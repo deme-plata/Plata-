@@ -480,7 +480,6 @@ class QuantumHolographicNetwork:
 
 class AddressRequest(BaseModel):
     address: str
-
 @app.post("/mine_block")
 def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
     node_id = request.node_id
@@ -509,7 +508,7 @@ def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
             transpiled_circuit = transpile(qhn.circuit, simulator)
             job = simulator.run(transpiled_circuit)
             result = job.result()
-            counts = result.get_counts()
+            counts = result.get_counts(transpiled_circuit)
             logging.info("QHIN Circuit Measurement Results:")
             logging.info(counts)
 
@@ -526,7 +525,7 @@ def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
         start_time = time.time()
         qc, qhin_counts, mining_time = mining_algorithm()
         end_time = time.time()
-        
+
         simulator = Aer.get_backend('aer_simulator')
         transpiled_circuit = transpile(qc, simulator)
         job = simulator.run(transpiled_circuit)
@@ -541,10 +540,14 @@ def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
             blockchain.pending_transactions = []
             logging.info(f"Node {node_id} mined a block and earned {reward} QuantumDAGKnight Coins")
             propagate_block_to_peers(f"Block mined by {node_id}", quantum_signature, blockchain.chain[-1].transactions, miner_address)
-            
+
             # Calculate hash rate (hashes per second)
             hash_rate = 1 / (end_time - start_time)
-            
+            logging.info(f"Mining Successful. Hash Rate: {hash_rate:.2f} hashes/second")
+            logging.info(f"Mining Time: {end_time - start_time:.2f} seconds")
+            logging.info(f"QHIN Counts: {qhin_counts}")
+            logging.info(f"Entanglement Matrix: {entanglement_matrix.tolist()}")
+
             return {
                 "success": True,
                 "message": f"Block mined successfully. Reward: {reward} QuantumDAGKnight Coins",
@@ -559,6 +562,7 @@ def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
     except Exception as e:
         logging.error(f"Error during mining: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error during mining: {str(e)}")
+
 
 @app.get("/research_data")
 def get_research_data(pincode: str = Depends(authenticate)):
@@ -710,9 +714,10 @@ class DAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         port = request.port
         try:
             magnet_link = node_directory.register_node(node_id, public_key, ip_address, port)
-            return dagknight_pb2.RegisterNodeResponse(magnet_link=magnet_link)
+            return dagknight_pb2.RegisterNodeResponse(success=True, magnet_link=magnet_link)
         except Exception as e:
             context.abort(grpc.StatusCode.INTERNAL, f'Error registering node: {str(e)}')
+
 
     def DiscoverNodes(self, request, context):
         self.authenticate(context)
@@ -786,8 +791,12 @@ def serve_directory_service():
             public_key = request.public_key
             ip_address = request.ip_address
             port = request.port
-            magnet_link = node_directory.register_node(node_id, public_key, ip_address, port)
-            return dagknight_pb2.RegisterNodeResponse(magnet_link=magnet_link)
+            try:
+                magnet_link = node_directory.register_node(node_id, public_key, ip_address, port)
+                return dagknight_pb2.RegisterNodeResponse(success=True, magnet_link=magnet_link)
+            except Exception as e:
+                context.abort(grpc.StatusCode.INTERNAL, f'Error registering node: {str(e)}')
+
 
         def DiscoverNodes(self, request, context):
             nodes = node_directory.discover_nodes()
@@ -825,16 +834,38 @@ def register_node_with_grpc(node_id, public_key, ip_address, port, directory_ip,
         logger.info(f"Registered node with magnet link: {response.magnet_link}")
 
 def discover_nodes_with_grpc(directory_ip, directory_port):
-    with grpc.insecure_channel(f'{directory_ip}:{directory_port}') as channel:
-        stub = dagknight_pb2_grpc.DAGKnightStub(channel)
-        request = dagknight_pb2.DiscoverNodesRequest()
-        response = stub.DiscoverNodes(request)
-        logger.info(f"Discovered nodes: {response.magnet_links}")
+    try:
+        with grpc.insecure_channel(f'{directory_ip}:{directory_port}') as channel:
+            stub = dagknight_pb2_grpc.DAGKnightStub(channel)
+            request = dagknight_pb2.DiscoverNodesRequest()
+            response = stub.DiscoverNodes(request)
+            logger.info(f"Discovered nodes: {response.magnet_links}")
+            return response.magnet_links
+    except grpc.RpcError as e:
+        logger.error(f"gRPC error when discovering nodes: {e.code()}: {e.details()}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error when discovering nodes: {str(e)}")
+        raise
 
-def periodically_discover_nodes(directory_ip, directory_port):
+
+def periodically_discover_nodes(directory_ip, directory_port, retry_interval=60, max_retries=5):
+    retries = 0
     while True:
-        discover_nodes_with_grpc(directory_ip, directory_port)
-        time.sleep(60)  # Discover nodes every 60 seconds
+        try:
+            logger.info(f"Attempting to discover nodes (Attempt {retries + 1})...")
+            discover_nodes_with_grpc(directory_ip, directory_port)
+            retries = 0  # Reset retries after a successful attempt
+        except Exception as e:
+            retries += 1
+            if retries > max_retries:
+                logger.error(f"Max retries reached. Failed to discover nodes: {str(e)}")
+                break
+            logger.warning(f"Error discovering nodes: {str(e)}. Retrying in {retry_interval} seconds...")
+            time.sleep(retry_interval)
+        else:
+            logger.info(f"Node discovery successful. Next discovery in {retry_interval} seconds...")
+            time.sleep(retry_interval)
 
 def main():
     # Node details
@@ -873,4 +904,4 @@ def main():
     uvicorn.run(app, host="0.0.0.0", port=api_port)
 
 if __name__ == "__main__":
-    main()                                                                                                                                                                                                          
+    main()
