@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package dagknight;
+
+service DAGKnight {
+  rpc SendQuantumState (QuantumStateRequest) returns (QuantumStateResponse);
+  rpc RequestConsensus (ConsensusRequest) returns (ConsensusResponse);
+  rpc RegisterNode (RegisterNodeRequest) returns (RegisterNodeResponse);
+  rpc DiscoverNodes (DiscoverNodesRequest) returns (DiscoverNodesResponse);
+  rpc MineBlock (MineBlockRequest) returns (MineBlockResponse);
+  rpc StakeCoins (StakeCoinsRequest) returns (StakeCoinsResponse);
+  rpc UnstakeCoins (UnstakeCoinsRequest) returns (UnstakeCoinsResponse);
+  rpc GetStakedBalance (GetStakedBalanceRequest) returns (GetStakedBalanceResponse);
+}
+
+message QuantumStateRequest {
+  string node_id = 1;
+  string quantum_state = 2;
+  int32 shard_id = 3;
+}
+
+message QuantumStateResponse {
+  bool success = 1;
+}
+
+message ConsensusRequest {
+  repeated string node_ids = 1;
+  float network_quality = 2;
+}
+
+message ConsensusResponse {
+  string consensus_result = 1;
+}
+
+message RegisterNodeRequest {
+  string node_id = 1;
+  string public_key = 2;
+  string ip_address = 3;
+  int32 port = 4;
+}
+
+message RegisterNodeResponse {
+  bool success = 1;
+}
+
+message DiscoverNodesRequest {}
+
+message DiscoverNodesResponse {
+  repeated string magnet_links = 1;
+}
+
+message MineBlockRequest {
+  string node_id = 1;
+}
+
+message MineBlockResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message StakeCoinsRequest {
+  string address = 1;
+  float amount = 2;
+}
+
+message StakeCoinsResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message UnstakeCoinsRequest {
+  string address = 1;
+  float amount = 2;
+}
+
+message UnstakeCoinsResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetStakedBalanceRequest {
+  string address = 1;
+}
+
+message GetStakedBalanceResponse {
+  float balance = 1;
+}

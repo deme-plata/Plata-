@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+grpcio
+pydantic
+passlib[bcrypt]
+cryptography
+qiskit
+qiskit-aer
+numpy
+cachetools
+grpcio-reflection
+merkletools
+requests
