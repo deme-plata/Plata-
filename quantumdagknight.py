@@ -24,11 +24,15 @@ from qiskit.exceptions import QiskitError
 
 import dagknight_pb2
 import dagknight_pb2_grpc
+
+from dagknight_pb2 import *
+from dagknight_pb2_grpc import DAGKnightStub
 import base64
 import hashlib
 from grpc_reflection.v1alpha import reflection
 import numpy as np
 import random
+from mnemonic import Mnemonic
 
 # Import the SimpleVM class
 from vm import SimpleVM
@@ -228,6 +232,7 @@ class MerkleTree:
 
     def hash_pair(self, left, right):
         return hashlib.sha256((left + right).encode('utf-8')).hexdigest()
+    
     def get_root(self):
         return self.tree[-1][0] if self.tree else None
 
@@ -333,8 +338,16 @@ class QuantumBlockchain:
         return self.stakes.get(address, 0)
 
 class Wallet:
-    def __init__(self, private_key=None):
-        if private_key:
+    def __init__(self, private_key=None, mnemonic=None):
+        self.mnemo = Mnemonic("english")
+        if mnemonic:
+            seed = self.mnemo.to_seed(mnemonic)
+            self.private_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=2048,
+                backend=default_backend()
+            )
+        elif private_key:
             self.private_key = serialization.load_pem_private_key(
                 private_key.encode('utf-8'),
                 password=None,
@@ -361,6 +374,10 @@ class Wallet:
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         ).decode('utf-8')
+
+    def generate_mnemonic(self):
+        return self.mnemo.generate(strength=128)
+
 
 class Transaction(BaseModel):
     sender: str
@@ -389,6 +406,15 @@ class Transaction(BaseModel):
         return cls(**data)
 
 blockchain = QuantumBlockchain()
+class ImportWalletRequest(BaseModel):
+    mnemonic: str
+
+@app.post("/import_wallet")
+def import_wallet(request: ImportWalletRequest, pincode: str = Depends(authenticate)):
+    wallet = Wallet(mnemonic=request.mnemonic)
+    address = wallet.get_address()
+    private_key = wallet.private_key_pem()
+    return {"address": address, "private_key": private_key}
 
 # Initialize the SimpleVM instance
 simple_vm = SimpleVM()
@@ -398,16 +424,26 @@ def create_wallet(pincode: str = Depends(authenticate)):
     wallet = Wallet()
     address = wallet.get_address()
     private_key = wallet.private_key_pem()
-    return {"address": address, "private_key": private_key}
+    mnemonic = wallet.generate_mnemonic()
+    return {"address": address, "private_key": private_key, "mnemonic": mnemonic}
 
 class AddressRequest(BaseModel):
     address: str
-
 @app.post("/get_balance")
 def get_balance(request: AddressRequest, pincode: str = Depends(authenticate)):
     address = request.address
     balance = blockchain.get_balance(address)
-    return {"balance": balance}
+    transactions = [
+        {
+            "tx_hash": tx['hash'],
+            "sender": tx['sender'],
+            "receiver": tx['receiver'],
+            "amount": tx['amount'],
+            "timestamp": tx['timestamp']
+        } for tx in blockchain.get_transactions(address)
+    ]
+    return {"balance": balance, "transactions": transactions}
+
 
 @app.post("/send_transaction")
 def send_transaction(transaction: Transaction, pincode: str = Depends(authenticate)):
@@ -421,6 +457,19 @@ def send_transaction(transaction: Transaction, pincode: str = Depends(authentica
     except ValueError as e:
         logger.error(f"Error deserializing private key: {e}")
         raise HTTPException(status_code=400, detail="Invalid private key format")
+
+class DeployContractRequest(BaseModel):
+    sender_address: str
+    contract_code: str
+    constructor_args: list = []
+
+@app.post("/deploy_contract")
+def deploy_contract(request: DeployContractRequest):
+    try:
+        contract_address = vm.deploy_contract(request.sender_address, request.contract_code, request.constructor_args)
+        return {"contract_address": contract_address}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 class MineBlockRequest(BaseModel):
     node_id: str
@@ -480,6 +529,7 @@ class QuantumHolographicNetwork:
 
     def get_boundary_qubits(self):
         return [i for i in range(self.size**2) if i < self.size or i >= self.size*(self.size-1) or i % self.size == 0 or i % self.size == self.size-1]
+
 import time
 import logging
 from functools import partial
@@ -734,9 +784,8 @@ def propagate_block_to_peers(data, quantum_signature, transactions, miner_addres
                 )
                 request = dagknight_pb2.PropagateBlockRequest(block=block, miner_address=miner_address)
                 response = stub.PropagateBlock(request)
-                logger.info(f"Block propagated to node {node['node_id']}: {response.success}")
                 if response.success:
-                    logger.info(f"Node {node['node_id']} received block with hash: {block.hash}")
+                    logger.info(f"Node {node['node_id']} received block with hash: {block.previous_hash}")
                 else:
                     logger.error(f"Node {node['node_id']} failed to receive the block.")
         except Exception as e:
@@ -836,10 +885,12 @@ class DAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         ip_address = request.ip_address
         port = request.port
         try:
-            magnet_link = node_directory.register_node(node_id, public_key, ip_address, port)
+            magnet_link = generate_magnet_link(request.node_id, request.public_key, request.ip_address, request.port)
             return dagknight_pb2.RegisterNodeResponse(success=True, magnet_link=magnet_link)
         except Exception as e:
-            context.abort(grpc.StatusCode.INTERNAL, f'Error registering node: {str(e)}')
+            logger.error(f"Error registering node: {e}")
+            return dagknight_pb2.RegisterNodeResponse(success=False, magnet_link="")
+
 
 
     def DiscoverNodes(self, request, context):
@@ -885,28 +936,55 @@ class DAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         simulator = Aer.get_backend('aer_simulator')
         key = qkd.run_protocol(simulator)
         return dagknight_pb2.QKDKeyExchangeResponse(node_id=request.node_id, key=key)
-
     def PropagateBlock(self, request, context):
-        self.authenticate(context)
         block = request.block
         miner_address = request.miner_address
         try:
             blockchain.add_block(
                 data=block.data,
                 quantum_signature=block.quantum_signature,
-                transactions=[tx for tx in block.transactions],
+                transactions=[{'sender': tx.sender, 'receiver': tx.receiver, 'amount': tx.amount} for tx in block.transactions],
                 miner_address=miner_address
             )
-            logger.info(f"Received block with hash: {block.hash} from miner {miner_address}")
+            logger.info(f"Received block with hash: {block.previous_hash} from miner {miner_address}")
             return dagknight_pb2.PropagateBlockResponse(success=True)
         except Exception as e:
             logger.error(f"Error adding propagated block: {e}")
             return dagknight_pb2.PropagateBlockResponse(success=False)
 
+
 @app.get("/status")
 def status():
     nodes = node_directory.discover_nodes()
     return {"status": "ok", "nodes": nodes}
+@app.get("/get_block_info/{block_hash}", response_model=dict)
+def get_block_info(block_hash: str, pincode: str = Depends(authenticate)):
+    response = get(f'http://161.35.219.10:50503/get_block_info/{block_hash}')
+    block_info = response.json()
+
+    # Add transactions to the block info
+    block_info['transactions'] = [
+        {
+            "tx_hash": tx['hash'],
+            "sender": tx['sender'],
+            "receiver": tx['receiver'],
+            "amount": tx['amount'],
+            "timestamp": tx['timestamp']
+        } for tx in block_info.get('transactions', [])
+    ]
+
+    return block_info
+
+
+@app.get("/get_node_info/{node_id}", response_model=dict)
+def get_node_info(node_id: str, pincode: str = Depends(authenticate)):
+    response = get(f'http://161.35.219.10:50503/get_node_info/{node_id}')
+    return response.json()
+
+@app.get("/get_transaction_info/{tx_hash}", response_model=dict)
+def get_transaction_info(tx_hash: str, pincode: str = Depends(authenticate)):
+    response = get(f'http://161.35.219.10:50503/get_transaction_info/{tx_hash}')
+    return response.json()
 
 def serve_directory_service():
     class DirectoryServicer(dagknight_pb2_grpc.DAGKnightServicer):
@@ -920,7 +998,6 @@ def serve_directory_service():
                 return dagknight_pb2.RegisterNodeResponse(success=True, magnet_link=magnet_link)
             except Exception as e:
                 context.abort(grpc.StatusCode.INTERNAL, f'Error registering node: {str(e)}')
-
 
         def DiscoverNodes(self, request, context):
             nodes = node_directory.discover_nodes()
@@ -971,7 +1048,6 @@ def discover_nodes_with_grpc(directory_ip, directory_port):
     except Exception as e:
         logger.error(f"Unexpected error when discovering nodes: {str(e)}")
         raise
-
 
 def periodically_discover_nodes(directory_ip, directory_port, retry_interval=60, max_retries=5):
     retries = 0
