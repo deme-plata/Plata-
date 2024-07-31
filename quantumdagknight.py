@@ -491,7 +491,55 @@ import scipy.sparse as sparse
 import scipy.sparse.linalg
 from scipy.optimize import minimize
 from fastapi import Depends, HTTPException, FastAPI
-def mining_algorithm():
+continue_mining = True
+class QuantumHolographicNetwork:
+    def __init__(self, size):
+        self.size = size
+        self.qubits = QuantumRegister(size**2)
+        self.circuit = QuantumCircuit(self.qubits)
+        self.entanglement_matrix = np.zeros((size, size))
+
+    def initialize_network(self):
+        for i in range(self.size**2):
+            self.circuit.h(i)  # Apply Hadamard gate to create superposition
+
+    def apply_holographic_principle(self):
+        for i in range(self.size):
+            for j in range(self.size):
+                if i != j:
+                    self.circuit.cz(i*self.size, j*self.size)  # Controlled-Z gate for entanglement
+
+    def simulate_gravity(self, mass_distribution):
+        for i in range(self.size):
+            for j in range(self.size):
+                strength = mass_distribution[i, j]
+                self.circuit.rz(strength, i*self.size + j)  # Rotation around Z-axis based on mass
+
+    def measure_entanglement(self):
+        for i in range(self.size):
+            for j in range(self.size):
+                if i != j:
+                    self.circuit.cz(i*self.size, j*self.size)
+                    self.circuit.measure_all()
+                    counts = execute(self.circuit, Aer.get_backend('qasm_simulator')).result().get_counts()
+                    self.entanglement_matrix[i, j] = counts.get('11', 0) / sum(counts.values())
+
+    def create_black_hole(self, center, radius):
+        for i in range(self.size):
+            for j in range(self.size):
+                if ((i - center[0])**2 + (j - center[1])**2) <= radius**2:
+                    for k in range(4):  # Maximally entangle qubits in the black hole region
+                        self.circuit.cx(i*self.size + j, ((i+1)%self.size)*self.size + ((j+1)%self.size))
+        
+    def extract_hawking_radiation(self, black_hole_region):
+        edge_qubits = [q for q in black_hole_region if q in self.get_boundary_qubits()]
+        for q in edge_qubits:
+            self.circuit.measure(q)  # Measure qubits at the black hole boundary
+
+    def get_boundary_qubits(self):
+        return [i for i in range(self.size**2) if i < self.size or i >= self.size*(self.size-1) or i % self.size == 0 or i % self.size == self.size-1]
+
+def mining_algorithm(iterations=5):
     try:
         process = psutil.Process()
         memory_info = process.memory_info()
@@ -528,32 +576,53 @@ def mining_algorithm():
 
             return -np.abs(final_state[0])**2  # Negative because we're minimizing
 
-        logging.info("Running Quantum Annealing Simulation")
-        result = minimize(quantum_annealing_simulation, [1.0, 1.0], method='Nelder-Mead')
+        cumulative_counts = {}
+        for _ in range(iterations):
+            logging.info("Running Quantum Annealing Simulation")
+            start_time_simulation = time.time()
+            # Introduce randomness in the parameters to help produce a wider range of probabilities
+            random_params = [random.uniform(0.1, 2.0), random.uniform(0.1, 2.0)]
+            result = minimize(quantum_annealing_simulation, random_params, method='Nelder-Mead')
+            end_time_simulation = time.time()
 
-        logging.info("Simulating gravity effects")
-        mass_distribution = np.random.rand(2, 5)  # 2x5 grid
-        gravity_factor = np.sum(mass_distribution) / 10
+            simulation_duration = end_time_simulation - start_time_simulation
 
-        logging.info("Creating quantum-inspired black hole")
-        black_hole_position = np.unravel_index(np.argmax(mass_distribution), mass_distribution.shape)
-        black_hole_strength = mass_distribution[black_hole_position]
+            logging.info("Simulating gravity effects")
+            mass_distribution = np.random.rand(2, 5)  # 2x5 grid
+            gravity_factor = np.sum(mass_distribution) / 10
 
-        logging.info("Measuring entanglement")
-        entanglement_matrix = np.abs(np.outer(result.x, result.x))
-        logging.info(f"Entanglement Matrix: {entanglement_matrix}")
+            logging.info("Creating quantum-inspired black hole")
+            black_hole_position = np.unravel_index(np.argmax(mass_distribution), mass_distribution.shape)
+            black_hole_strength = mass_distribution[black_hole_position]
 
-        logging.info("Extracting Hawking radiation analogue")
-        hawking_radiation = np.random.exponential(scale=black_hole_strength, size=10)
+            logging.info("Measuring entanglement")
+            entanglement_matrix = np.abs(np.outer(result.x, result.x))
+            logging.info(f"Entanglement Matrix: {entanglement_matrix}")
 
-        logging.info("Calculating final quantum state")
-        final_state = np.ones(2**num_qubits, dtype=complex) / np.sqrt(2**num_qubits)
-        counts = {format(i, f'0{num_qubits}b'): abs(val)**2 for i, val in enumerate(final_state) if abs(val)**2 > 1e-6}
+            logging.info("Extracting Hawking radiation analogue")
+            hawking_radiation = np.random.exponential(scale=black_hole_strength, size=10)
+
+            logging.info("Calculating final quantum state")
+            final_state = np.ones(2**num_qubits, dtype=complex) / np.sqrt(2**num_qubits)
+            counts = {format(i, f'0{num_qubits}b'): abs(val)**2 for i, val in enumerate(final_state) if abs(val)**2 > 1e-6}
+
+            for state, prob in counts.items():
+                if state in cumulative_counts:
+                    cumulative_counts[state] += prob
+                else:
+                    cumulative_counts[state] = prob
 
         memory_info = process.memory_info()
         logging.info(f"Memory usage after simulation: {memory_info.rss / (1024 * 1024):.2f} MB")
 
-        return counts, result.fun, entanglement_matrix
+        # Realistic Calculation of QHINs and Hashrate
+        qhins = np.trace(entanglement_matrix)  # Quantum Hash Information Number based on the trace of the entanglement matrix
+        hashrate = 1 / (simulation_duration * iterations)  # Hashrate as the inverse of the total simulation duration
+
+        logging.info(f"QHINs: {qhins:.6f}")
+        logging.info(f"Hashrate: {hashrate:.6f} hashes/second")
+
+        return cumulative_counts, result.fun, entanglement_matrix, qhins, hashrate
     except Exception as e:
         logging.error(f"Error in mining_algorithm: {str(e)}")
         logging.error(traceback.format_exc())  # Log the traceback
@@ -561,101 +630,93 @@ def mining_algorithm():
 
 @app.post("/mine_block")
 def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
+    global continue_mining
     node_id = request.node_id
     miner_address = request.node_id
 
     try:
         logging.info(f"Starting mining process for node {node_id}")
-        start_time = time.time()
+        iteration_count = 0
+        max_iterations = 20  # Set a maximum number of iterations to prevent endless looping
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(mining_algorithm)
-            try:
-                result = future.result(timeout=300)  # 5 minutes timeout
-                logging.info("Mining algorithm completed within timeout")
-            except TimeoutError:
-                logging.error("Mining algorithm timed out after 5 minutes")
-                return {"success": False, "message": "Mining timed out. Try again."}
+        while continue_mining and iteration_count < max_iterations:
+            start_time = time.time()
 
-        if isinstance(result, dict) and not result.get("success", True):
-            logging.error(f"Mining algorithm failed: {result.get('message')}")
-            return result
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(mining_algorithm, iterations=5)  # Run the simulation multiple times
+                try:
+                    result = future.result(timeout=300)  # 5 minutes timeout
+                    logging.info("Mining algorithm completed within timeout")
+                except TimeoutError:
+                    logging.error("Mining algorithm timed out after 5 minutes")
+                    continue  # Continue mining even if there's a timeout
 
-        counts, energy, entanglement_matrix = result
-        end_time = time.time()
+            if isinstance(result, dict) and not result.get("success", True):
+                logging.error(f"Mining algorithm failed: {result.get('message')}")
+                continue  # Continue mining even if there's an error
 
-        logging.info(f"Quantum Annealing Simulation completed in {end_time - start_time:.2f} seconds")
+            counts, energy, entanglement_matrix, qhins, hashrate = result
+            end_time = time.time()
 
-        logging.info("Checking mining conditions")
-        if '11111' in counts and counts['11111'] > 0.1:  # Adjust condition as needed
-            logging.info("Mining condition met, generating quantum signature")
-            quantum_signature = blockchain.generate_quantum_signature()
+            logging.info(f"Quantum Annealing Simulation completed in {end_time - start_time:.2f} seconds")
 
-            logging.info("Adding block to blockchain")
-            reward = blockchain.add_block(f"Block mined by {node_id}", quantum_signature, blockchain.pending_transactions, miner_address)
-            blockchain.pending_transactions = []
+            logging.info("Checking mining conditions")
 
-            logging.info(f"Node {node_id} mined a block and earned {reward} QuantumDAGKnight Coins")
-            propagate_block_to_peers(f"Block mined by {node_id}", quantum_signature, blockchain.chain[-1].transactions, miner_address)
+            # Log the probabilities of all states
+            for state, probability in counts.items():
+                logging.info(f"State: {state}, Probability: {probability:.6f}")
 
-            hash_rate = 1 / (end_time - start_time)
-            logging.info(f"Mining Successful. Hash Rate: {hash_rate:.2f} hashes/second")
-            logging.info(f"Mining Time: {end_time - start_time:.2f} seconds")
-            logging.info(f"Quantum State Probabilities: {counts}")
-            logging.info(f"Entanglement Matrix: {entanglement_matrix.tolist()}")
+            # New condition to check if any probability exceeds a lower threshold
+            max_state = max(counts, key=counts.get)
+            max_prob = counts[max_state]
 
-            return {
-                "success": True,
-                "message": f"Block mined successfully. Reward: {reward} QuantumDAGKnight Coins",
-                "hash_rate": hash_rate,
-                "mining_time": end_time - start_time,
-                "quantum_state_probabilities": counts,
-                "entanglement_matrix": entanglement_matrix.tolist()
-            }
-        else:
-            logging.warning("Mining failed. Condition not met.")
-            return {"success": False, "message": "Mining failed. Condition not met."}
+            # Cumulative probability of top N states
+            top_n = 10
+            sorted_probs = sorted(counts.values(), reverse=True)
+            cumulative_prob = sum(sorted_probs[:top_n])
+
+            if cumulative_prob > 0.01:  # Adjusted cumulative threshold to be lower
+                logging.info(f"Mining condition met with cumulative probability of top {top_n} states: {cumulative_prob:.6f}, generating quantum signature")
+                quantum_signature = blockchain.generate_quantum_signature()
+
+                logging.info("Adding block to blockchain")
+                reward = blockchain.add_block(f"Block mined by {node_id}", quantum_signature, blockchain.pending_transactions, miner_address)
+                blockchain.pending_transactions = []
+
+                logging.info(f"Node {node_id} mined a block and earned {reward} QuantumDAGKnight Coins")
+                propagate_block_to_peers(f"Block mined by {node_id}", quantum_signature, blockchain.chain[-1].transactions, miner_address)
+
+                hash_rate = 1 / (end_time - start_time)
+                logging.info(f"Mining Successful. Hash Rate: {hash_rate:.2f} hashes/second")
+                logging.info(f"Mining Time: {end_time - start_time:.2f} seconds")
+                logging.info(f"Quantum State Probabilities: {counts}")
+                logging.info(f"Entanglement Matrix: {entanglement_matrix.tolist()}")
+                logging.info(f"Quantum Hash Information Number: {qhins:.6f}")
+
+                return {
+                    "success": True,
+                    "message": f"Block mined successfully. Reward: {reward} QuantumDAGKnight Coins",
+                    "hash_rate": hash_rate,
+                    "mining_time": end_time - start_time,
+                    "quantum_state_probabilities": counts,
+                    "entanglement_matrix": entanglement_matrix.tolist(),
+                    "qhins": qhins,
+                    "hashrate": hashrate
+                }
+            else:
+                logging.warning(f"Mining failed. Condition not met. Highest probability state: {max_state} with probability: {max_prob:.6f}")
+                iteration_count += 1
+                if iteration_count >= max_iterations:
+                    logging.error(f"Maximum number of iterations ({max_iterations}) reached. Stopping mining.")
+                    break  # Stop mining if maximum iterations reached
+                continue  # Continue mining even if the condition is not met
+
+        return {"success": False, "message": "Mining failed after maximum iterations."}
+
     except Exception as e:
         logging.error(f"Error during mining: {str(e)}")
         logging.error(traceback.format_exc())  # Log the traceback
         raise HTTPException(status_code=500, detail=f"Error during mining: {str(e)}")
-
-
-
-@app.get("/research_data")
-def get_research_data(pincode: str = Depends(authenticate)):
-    # Provide the entanglement matrix and counts from QHIN circuits for researchers
-    try:
-        network_size = 5
-        qhn = QuantumHolographicNetwork(network_size)
-        qhn.initialize_network()
-        qhn.apply_holographic_principle()
-
-        # Simulate gravity with a simple mass distribution
-        mass_distribution = np.random.rand(network_size, network_size)
-        qhn.simulate_gravity(mass_distribution)
-
-        # Create a black hole
-        qhn.create_black_hole((2, 2), 1)
-
-        # Measure entanglement
-        qhn.measure_entanglement()
-        entanglement_matrix = qhn.entanglement_matrix
-
-        # Extract Hawking radiation
-        black_hole_region = [q for q in range(network_size**2) if ((q // network_size - 2)**2 + (q % network_size - 2)**2) <= 1]
-        qhn.extract_hawking_radiation(black_hole_region)
-
-        # Execute the QHIN circuit
-        simulator = Aer.get_backend('qasm_simulator')
-        transpiled_circuit = transpile(qhn.circuit, simulator)
-        job = simulator.run(transpiled_circuit)
-        result = job.result()
-        counts = result.get_counts()
-
-        return {"entanglement_matrix": entanglement_matrix.tolist(), "counts": counts}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving research data: {str(e)}")
 
 def propagate_block_to_peers(data, quantum_signature, transactions, miner_address):
     nodes = node_directory.discover_nodes()
@@ -674,6 +735,10 @@ def propagate_block_to_peers(data, quantum_signature, transactions, miner_addres
                 request = dagknight_pb2.PropagateBlockRequest(block=block, miner_address=miner_address)
                 response = stub.PropagateBlock(request)
                 logger.info(f"Block propagated to node {node['node_id']}: {response.success}")
+                if response.success:
+                    logger.info(f"Node {node['node_id']} received block with hash: {block.hash}")
+                else:
+                    logger.error(f"Node {node['node_id']} failed to receive the block.")
         except Exception as e:
             logger.error(f"Failed to propagate block to node {node['node_id']}: {e}")
 
@@ -832,6 +897,7 @@ class DAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
                 transactions=[tx for tx in block.transactions],
                 miner_address=miner_address
             )
+            logger.info(f"Received block with hash: {block.hash} from miner {miner_address}")
             return dagknight_pb2.PropagateBlockResponse(success=True)
         except Exception as e:
             logger.error(f"Error adding propagated block: {e}")
