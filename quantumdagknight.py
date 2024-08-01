@@ -62,7 +62,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.backends import default_backend
 from nacl.public import PrivateKey, Box
 from nacl.utils import random
-
+import traceback 
 import dagknight_pb2
 import dagknight_pb2_grpc
 from dagknight_pb2 import *
@@ -86,7 +86,7 @@ from cryptography.exceptions import InvalidSignature
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from typing import List  # Add this import statement
-
+import json
 
 # Import the SimpleVM class
 from vm import SimpleVM
@@ -295,8 +295,10 @@ class MerkleTree:
         return tree
 
     def hash_pair(self, left, right):
-        return hashlib.sha256((left + right).encode('utf-8')).hexdigest()
-    
+        left_str = json.dumps(left, sort_keys=True)
+        right_str = json.dumps(right, sort_keys=True)
+        return hashlib.sha256((left_str + right_str).encode('utf-8')).hexdigest()
+
     def get_root(self):
         return self.tree[-1][0] if self.tree else None
 
@@ -430,6 +432,19 @@ class QuantumBlockchain:
                     transactions.append(tx)
         return transactions
 
+    def full_state_sync(self, request, context):
+        return dagknight_pb2.FullStateResponse(
+            chain=[dagknight_pb2.Block(
+                previous_hash=block.previous_hash,
+                data=block.data,
+                quantum_signature=block.quantum_signature,
+                reward=block.reward,
+                transactions=[dagknight_pb2.Transaction(sender=tx['sender'], receiver=tx['receiver'], amount=tx['amount']) for tx in block.transactions]
+            ) for block in self.chain],
+            balances=self.balances,
+            stakes=self.stakes
+        )
+
 class Wallet:
     def __init__(self, private_key=None, mnemonic=None):
         self.mnemo = Mnemonic("english")
@@ -550,9 +565,6 @@ def create_pq_wallet(pincode: str = Depends(authenticate)):
     address = pq_wallet.get_address()
     pq_public_key = pq_wallet.get_pq_public_key()
     return {"address": address, "pq_public_key": pq_public_key}
-
-# Initialize the SimpleVM instance
-simple_vm = SimpleVM()
 
 @app.post("/create_wallet")
 def create_wallet(pincode: str = Depends(authenticate)):
@@ -936,6 +948,22 @@ consensus_manager = ConsensusManager()
 class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
     def __init__(self, private_key):
         self.private_key = private_key
+        self.blockchain = blockchain
+
+    def FullStateSync(self, request, context):
+        chain = [dagknight_pb2.Block(
+            previous_hash=block.previous_hash,
+            data=block.data,
+            quantum_signature=block.quantum_signature,
+            reward=block.reward,
+            transactions=[dagknight_pb2.Transaction(
+                sender=tx.sender, receiver=tx.receiver, amount=tx.amount) for tx in block.transactions]
+        ) for block in self.blockchain.chain]
+        
+        balances = {k: v for k, v in self.blockchain.balances.items()}
+        stakes = {k: v for k, v in self.blockchain.stakes.items()}
+        
+        return dagknight_pb2.FullStateResponse(chain=chain, balances=balances, stakes=stakes)
 
     def authenticate(self, context):
         metadata = dict(context.invocation_metadata())
