@@ -21,6 +21,15 @@ from qiskit_aer import Aer
 from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile, QuantumCircuit
 from qiskit.providers.jobstatus import JobStatus
 from qiskit.exceptions import QiskitError
+from passlib.context import CryptContext
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.backends import default_backend
+from nacl.public import PrivateKey, Box
+from nacl.utils import random
+from fastapi import FastAPI, HTTPException, Depends, status
+from cryptography.exceptions import InvalidSignature
 
 import dagknight_pb2
 import dagknight_pb2_grpc
@@ -33,6 +42,51 @@ from grpc_reflection.v1alpha import reflection
 import numpy as np
 import random
 from mnemonic import Mnemonic
+import os
+import time
+import logging
+import threading
+from concurrent import futures
+import grpc
+import uvicorn
+import jwt
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel
+from typing import Optional
+from passlib.context import CryptContext
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.backends import default_backend
+from nacl.public import PrivateKey, Box
+from nacl.utils import random
+
+import dagknight_pb2
+import dagknight_pb2_grpc
+from dagknight_pb2 import *
+from dagknight_pb2_grpc import DAGKnightStub
+import base64
+import hashlib
+from grpc_reflection.v1alpha import reflection
+import numpy as np
+import random
+from mnemonic import Mnemonic
+from Crypto.PublicKey import ECC
+from Crypto.Signature import DSS
+from Crypto.Hash import SHA256
+from Crypto.Cipher import PKCS1_OAEP
+from Crypto.PublicKey import RSA
+import base64
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.backends import default_backend
+from cryptography.exceptions import InvalidSignature
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from typing import List  # Add this import statement
+
 
 # Import the SimpleVM class
 from vm import SimpleVM
@@ -50,6 +104,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+MAX_SUPPLY = 21000000  # Example max supply
 
 SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key")
 ALGORITHM = "HS256"
@@ -59,7 +116,6 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # In-memory storage for demonstration purposes
 fake_users_db = {}
-
 class User(BaseModel):
     pincode: str
 
@@ -71,7 +127,15 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     wallet: dict
-    
+
+def constant_time_compare(val1, val2):
+    if len(val1) != len(val2):
+        return False
+    result = 0
+    for x, y in zip(val1, val2):
+        result |= x ^ y
+    return result == 0
+
 def get_password_hash(password):
     return pwd_context.hash(password)
 
@@ -247,6 +311,7 @@ class QuantumBlockchain:
         self.start_time = time.time()
         self.difficulty = 1
         self.target = 2**(256 - self.difficulty)
+        self.max_supply = MAX_SUPPLY
 
     def create_genesis_block(self):
         return QuantumBlock("0", "Genesis Block", self.generate_quantum_signature(), self.initial_reward, [])
@@ -289,17 +354,31 @@ class QuantumBlockchain:
             self.target = 2**(256 - self.difficulty)
             logger.info(f"Adjusted difficulty to {self.difficulty} with target {self.target}")
 
+    def get_total_supply(self):
+        return sum(self.balances.values())
+
     def add_block(self, data, quantum_signature, transactions, miner_address):
         previous_block = self.chain[-1]
         reward = self.current_reward()
+        total_supply = self.get_total_supply()
+        
+        # Calculate the actual reward considering the max supply
+        if total_supply + reward > self.max_supply:
+            reward = self.max_supply - total_supply
+        
         new_block = QuantumBlock(previous_block.hash, data, quantum_signature, reward, transactions)
         self.chain.append(new_block)
         self.process_transactions(transactions)
+
+        if reward > 0:
+            self.balances[miner_address] = self.balances.get(miner_address, 0) + reward
+            logger.info(f"Block added: {new_block.hash}")
+            logger.info(f"Updated balance for miner {miner_address}: {self.balances[miner_address]}")
         
-        # Update miner's balance with the reward
-        self.balances[miner_address] = self.balances.get(miner_address, 0) + reward
-        logger.info(f"Block added: {new_block.hash}")
-        logger.info(f"Updated balance for {miner_address}: {self.balances[miner_address]}")
+        # Log total supply after adding block
+        total_supply = self.get_total_supply()
+        logger.info(f"Total supply after adding block: {total_supply}")
+        
         self.adjust_difficulty()
         return reward
 
@@ -308,6 +387,12 @@ class QuantumBlockchain:
             transaction = Transaction.from_dict(tx)
             self.balances[transaction.sender] = self.balances.get(transaction.sender, 0) - transaction.amount
             self.balances[transaction.receiver] = self.balances.get(transaction.receiver, 0) + transaction.amount
+            logger.info(f"Updated balance for sender {transaction.sender}: {self.balances[transaction.sender]}")
+            logger.info(f"Updated balance for receiver {transaction.receiver}: {self.balances[transaction.receiver]}")
+            
+            # Log total supply after each transaction
+            total_supply = self.get_total_supply()
+            logger.info(f"Total supply after transaction: {total_supply}")
 
     def add_transaction(self, transaction):
         if self.balances.get(transaction.sender, 0) >= transaction.amount:
@@ -337,35 +422,28 @@ class QuantumBlockchain:
     def get_staked_balance(self, address):
         return self.stakes.get(address, 0)
 
+    def get_transactions(self, address):
+        transactions = []
+        for block in self.chain:
+            for tx in block.transactions:
+                if tx['sender'] == address or tx['receiver'] == address:
+                    transactions.append(tx)
+        return transactions
+
 class Wallet:
     def __init__(self, private_key=None, mnemonic=None):
         self.mnemo = Mnemonic("english")
         if mnemonic:
             seed = self.mnemo.to_seed(mnemonic)
-            self.private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-                backend=default_backend()
-            )
+            self.private_key = ec.derive_private_key(int.from_bytes(seed[:32], byteorder="big"), ec.SECP256R1(), default_backend())
         elif private_key:
-            self.private_key = serialization.load_pem_private_key(
-                private_key.encode('utf-8'),
-                password=None,
-                backend=default_backend()
-            )
+            self.private_key = serialization.load_pem_private_key(private_key.encode(), password=None, backend=default_backend())
         else:
-            self.private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-                backend=default_backend()
-            )
+            self.private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
         self.public_key = self.private_key.public_key()
 
     def get_address(self):
-        public_key_bytes = self.public_key.public_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
+        public_key_bytes = self.public_key.public_bytes(encoding=serialization.Encoding.DER, format=serialization.PublicFormat.SubjectPublicKeyInfo)
         return hashlib.sha256(public_key_bytes).hexdigest()
 
     def private_key_pem(self):
@@ -378,6 +456,58 @@ class Wallet:
     def generate_mnemonic(self):
         return self.mnemo.generate(strength=128)
 
+    def sign_message(self, message):
+        signature = self.private_key.sign(
+            message.encode(),
+            ec.ECDSA(hashes.SHA256())
+        )
+        return base64.b64encode(signature).decode('utf-8')
+
+    def verify_signature(self, message, signature, public_key):
+        try:
+            public_key_obj = serialization.load_pem_public_key(public_key.encode(), backend=default_backend())
+            public_key_obj.verify(
+                base64.b64decode(signature),
+                message.encode(),
+                ec.ECDSA(hashes.SHA256())
+            )
+            return True
+        except InvalidSignature:
+            return False
+
+    def encrypt_message(self, message, public_key):
+        rsa_public_key = serialization.load_pem_public_key(public_key.encode(), backend=default_backend())
+        encrypted_message = rsa_public_key.encrypt(
+            message.encode('utf-8'),
+            PKCS1_OAEP.new(rsa_public_key)
+        )
+        return base64.b64encode(encrypted_message).decode('utf-8')
+
+    def decrypt_message(self, encrypted_message):
+        rsa_private_key = serialization.load_pem_private_key(self.private_key_pem().encode(), password=None, backend=default_backend())
+        decrypted_message = rsa_private_key.decrypt(
+            base64.b64decode(encrypted_message),
+            PKCS1_OAEP.new(rsa_private_key)
+        )
+        return decrypted_message.decode('utf-8')
+
+class PQWallet(Wallet):
+    def __init__(self):
+        super().__init__()
+        self.rsa_keypair = RSA.generate(2048)
+
+    def get_pq_public_key(self):
+        return self.rsa_keypair.publickey().export_key(format='PEM').decode('utf-8')
+
+    def pq_encrypt(self, message):
+        cipher = PKCS1_OAEP.new(self.rsa_keypair.publickey())
+        encrypted_message = cipher.encrypt(message.encode('utf-8'))
+        return base64.b64encode(encrypted_message).decode('utf-8')
+
+    def pq_decrypt(self, ciphertext):
+        cipher = PKCS1_OAEP.new(self.rsa_keypair)
+        decrypted_message = cipher.decrypt(base64.b64decode(ciphertext))
+        return decrypted_message.decode('utf-8')
 
 class Transaction(BaseModel):
     sender: str
@@ -389,14 +519,11 @@ class Transaction(BaseModel):
     def sign_transaction(self, wallet):
         private_key = wallet.private_key
         message = f'{self.sender}{self.receiver}{self.amount}'.encode('utf-8')
-        self.signature = base64.b64encode(private_key.sign(
+        signature = private_key.sign(
             message,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )).decode('utf-8')
+            ec.ECDSA(hashes.SHA256())
+        )
+        self.signature = base64.b64encode(signature).decode('utf-8')
 
     def to_dict(self):
         return self.dict()
@@ -406,6 +533,7 @@ class Transaction(BaseModel):
         return cls(**data)
 
 blockchain = QuantumBlockchain()
+
 class ImportWalletRequest(BaseModel):
     mnemonic: str
 
@@ -415,6 +543,13 @@ def import_wallet(request: ImportWalletRequest, pincode: str = Depends(authentic
     address = wallet.get_address()
     private_key = wallet.private_key_pem()
     return {"address": address, "private_key": private_key}
+
+@app.post("/create_pq_wallet")
+def create_pq_wallet(pincode: str = Depends(authenticate)):
+    pq_wallet = PQWallet()
+    address = pq_wallet.get_address()
+    pq_public_key = pq_wallet.get_pq_public_key()
+    return {"address": address, "pq_public_key": pq_public_key}
 
 # Initialize the SimpleVM instance
 simple_vm = SimpleVM()
@@ -429,6 +564,7 @@ def create_wallet(pincode: str = Depends(authenticate)):
 
 class AddressRequest(BaseModel):
     address: str
+
 @app.post("/get_balance")
 def get_balance(request: AddressRequest, pincode: str = Depends(authenticate)):
     address = request.address
@@ -444,19 +580,56 @@ def get_balance(request: AddressRequest, pincode: str = Depends(authenticate)):
     ]
     return {"balance": balance, "transactions": transactions}
 
-
 @app.post("/send_transaction")
 def send_transaction(transaction: Transaction, pincode: str = Depends(authenticate)):
     try:
+        logger.info("Received transaction request.")
         wallet = Wallet(private_key=transaction.private_key)
-        transaction.sign_transaction(wallet)
+        logger.info("Created wallet from private key.")
+        message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
+        transaction.signature = wallet.sign_message(message)
+        logger.info(f"Transaction signed with signature: {transaction.signature}")
+
         if blockchain.add_transaction(transaction):
+            logger.info(f"Transaction from {transaction.sender} to {transaction.receiver} added to blockchain.")
             return {"success": True, "message": "Transaction added successfully."}
         else:
-            return {"success": False, "message": "Transaction failed to add."}
+            logger.info(f"Transaction from {transaction.sender} to {transaction.receiver} failed to add: insufficient balance")
+            return {"success": False, "message": "Transaction failed to add: insufficient balance"}
     except ValueError as e:
         logger.error(f"Error deserializing private key: {e}")
         raise HTTPException(status_code=400, detail="Invalid private key format")
+    except InvalidSignature as e:
+        logger.error(f"Invalid signature: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/send_batch_transactions")
+def send_batch_transactions(transactions: List[Transaction], pincode: str = Depends(authenticate)):
+    results = []
+    try:
+        for transaction in transactions:
+            wallet = Wallet(private_key=transaction.private_key)
+            message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
+            transaction.signature = wallet.sign_message(message)
+
+            if blockchain.add_transaction(transaction):
+                results.append({"success": True, "message": "Transaction added successfully.", "transaction": transaction.dict()})
+            else:
+                results.append({"success": False, "message": "Transaction failed to add: insufficient balance", "transaction": transaction.dict()})
+    except ValueError as e:
+        logger.error(f"Error deserializing private key: {e}")
+        raise HTTPException(status_code=400, detail="Invalid private key format")
+    except InvalidSignature as e:
+        logger.error(f"Invalid signature: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    return results
 
 class DeployContractRequest(BaseModel):
     sender_address: str
@@ -541,53 +714,8 @@ import scipy.sparse as sparse
 import scipy.sparse.linalg
 from scipy.optimize import minimize
 from fastapi import Depends, HTTPException, FastAPI
+
 continue_mining = True
-class QuantumHolographicNetwork:
-    def __init__(self, size):
-        self.size = size
-        self.qubits = QuantumRegister(size**2)
-        self.circuit = QuantumCircuit(self.qubits)
-        self.entanglement_matrix = np.zeros((size, size))
-
-    def initialize_network(self):
-        for i in range(self.size**2):
-            self.circuit.h(i)  # Apply Hadamard gate to create superposition
-
-    def apply_holographic_principle(self):
-        for i in range(self.size):
-            for j in range(self.size):
-                if i != j:
-                    self.circuit.cz(i*self.size, j*self.size)  # Controlled-Z gate for entanglement
-
-    def simulate_gravity(self, mass_distribution):
-        for i in range(self.size):
-            for j in range(self.size):
-                strength = mass_distribution[i, j]
-                self.circuit.rz(strength, i*self.size + j)  # Rotation around Z-axis based on mass
-
-    def measure_entanglement(self):
-        for i in range(self.size):
-            for j in range(self.size):
-                if i != j:
-                    self.circuit.cz(i*self.size, j*self.size)
-                    self.circuit.measure_all()
-                    counts = execute(self.circuit, Aer.get_backend('qasm_simulator')).result().get_counts()
-                    self.entanglement_matrix[i, j] = counts.get('11', 0) / sum(counts.values())
-
-    def create_black_hole(self, center, radius):
-        for i in range(self.size):
-            for j in range(self.size):
-                if ((i - center[0])**2 + (j - center[1])**2) <= radius**2:
-                    for k in range(4):  # Maximally entangle qubits in the black hole region
-                        self.circuit.cx(i*self.size + j, ((i+1)%self.size)*self.size + ((j+1)%self.size))
-        
-    def extract_hawking_radiation(self, black_hole_region):
-        edge_qubits = [q for q in black_hole_region if q in self.get_boundary_qubits()]
-        for q in edge_qubits:
-            self.circuit.measure(q)  # Measure qubits at the black hole boundary
-
-    def get_boundary_qubits(self):
-        return [i for i in range(self.size**2) if i < self.size or i >= self.size*(self.size-1) or i % self.size == 0 or i % self.size == self.size-1]
 
 def mining_algorithm(iterations=5):
     try:
@@ -805,9 +933,9 @@ class ConsensusManager:
 
 consensus_manager = ConsensusManager()
 
-class DAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
-    def __init__(self, secret_key):
-        self.secret_key = secret_key
+class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
+    def __init__(self, private_key):
+        self.private_key = private_key
 
     def authenticate(self, context):
         metadata = dict(context.invocation_metadata())
@@ -819,14 +947,33 @@ class DAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         except jwt.InvalidTokenError:
             context.abort(grpc.StatusCode.UNAUTHENTICATED, 'Invalid token')
 
+    def decrypt_message(self, encrypted, shared_box):
+        decrypted = shared_box.decrypt(encrypted)
+        return decrypted.decode()
+
+    def encrypt_message(self, message, shared_box):
+        nonce = random(Box.NONCE_SIZE)
+        encrypted = shared_box.encrypt(message.encode(), nonce)
+        return encrypted
+
     def SendQuantumState(self, request, context):
         self.authenticate(context)
         node_id = request.node_id
         quantum_state = request.quantum_state
         shard_id = request.shard_id
 
+        # Get the peer's public key from the request metadata
+        peer_public_key_bytes = dict(context.invocation_metadata()).get('public_key')
+        peer_public_key = nacl.public.PublicKey(peer_public_key_bytes)
+
+        # Create a shared box
+        shared_box = Box(self.private_key, peer_public_key)
+
+        # Decrypt the incoming message
+        decrypted_quantum_state = self.decrypt_message(request.encrypted_quantum_state, shared_box)
+
         # Decode the quantum state
-        qc = QuantumCircuit.from_qasm_str(quantum_state)
+        qc = QuantumCircuit.from_qasm_str(decrypted_quantum_state)
 
         # Simulate the quantum circuit to get the statevector
         backend = Aer.get_backend('statevector_simulator')
@@ -891,8 +1038,6 @@ class DAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
             logger.error(f"Error registering node: {e}")
             return dagknight_pb2.RegisterNodeResponse(success=False, magnet_link="")
 
-
-
     def DiscoverNodes(self, request, context):
         self.authenticate(context)
         try:
@@ -936,6 +1081,7 @@ class DAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         simulator = Aer.get_backend('aer_simulator')
         key = qkd.run_protocol(simulator)
         return dagknight_pb2.QKDKeyExchangeResponse(node_id=request.node_id, key=key)
+
     def PropagateBlock(self, request, context):
         block = request.block
         miner_address = request.miner_address
@@ -952,11 +1098,26 @@ class DAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
             logger.error(f"Error adding propagated block: {e}")
             return dagknight_pb2.PropagateBlockResponse(success=False)
 
+@app.post("/token", response_model=Token)
+def login_for_access_token(form_data: User):
+    user = authenticate_user(form_data.pincode)
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="Incorrect pincode",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.pincode}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/status")
 def status():
     nodes = node_directory.discover_nodes()
     return {"status": "ok", "nodes": nodes}
+
 @app.get("/get_block_info/{block_hash}", response_model=dict)
 def get_block_info(block_hash: str, pincode: str = Depends(authenticate)):
     response = get(f'http://161.35.219.10:50503/get_block_info/{block_hash}')
@@ -974,7 +1135,6 @@ def get_block_info(block_hash: str, pincode: str = Depends(authenticate)):
     ]
 
     return block_info
-
 
 @app.get("/get_node_info/{node_id}", response_model=dict)
 def get_node_info(node_id: str, pincode: str = Depends(authenticate)):
@@ -1013,7 +1173,7 @@ def serve_directory_service():
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    dagknight_servicer = DAGKnightServicer(SECRET_KEY)  # Pass the SECRET_KEY here
+    dagknight_servicer = SecureDAGKnightServicer(SECRET_KEY)  # Pass the SECRET_KEY here
     dagknight_pb2_grpc.add_DAGKnightServicer_to_server(dagknight_servicer, server)
     grpc_port = int(os.getenv("GRPC_PORT", 50502))  # Use environment variable or default to 50502
     service_names = (
@@ -1066,6 +1226,19 @@ def periodically_discover_nodes(directory_ip, directory_port, retry_interval=60,
         else:
             logger.info(f"Node discovery successful. Next discovery in {retry_interval} seconds...")
             time.sleep(retry_interval)
+
+def run_secure_client():
+    channel = grpc.insecure_channel('localhost:50051')
+    stub = dagknight_pb2_grpc.DAGKnightStub(channel)
+
+    message = "Hello, secure world!"
+    encrypted_message = encrypt_message(message, shared_box)
+
+    metadata = [('public_key', client_public_key.encode())]
+    response = stub.SecureRPC(dagknight_pb2.SecureRequest(encrypted_message=encrypted_message), metadata=metadata)
+
+    decrypted_response = decrypt_message(response.encrypted_message, shared_box)
+    print("Received:", decrypted_response)
 
 def main():
     # Node details
