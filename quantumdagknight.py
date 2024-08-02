@@ -58,7 +58,10 @@ import aiohttp
 from vm import SimpleVM
 from pydantic import BaseModel, Field
 from hashlib import sha256
-
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
+import hashlib
 # Initialize the logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("node")
@@ -764,7 +767,6 @@ def get_balance(request: AddressRequest, pincode: str = Depends(authenticate)):
         } for tx in blockchain.get_transactions(address)
     ]
     return {"balance": balance, "transactions": transactions}
-
 
 @app.post("/send_transaction")
 def send_transaction(transaction: Transaction, pincode: str = Depends(authenticate)):
