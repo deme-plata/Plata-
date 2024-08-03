@@ -79,6 +79,11 @@ import dagknight_pb2_grpc
 from dagknight_pb2 import *
 from dagknight_pb2_grpc import DAGKnightStub
 from dagknight_pb2_grpc import DAGKnightStub, add_DAGKnightServicer_to_server
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import serialization
+import statistics
+
 
 # Initialize the logger
 logging.basicConfig(level=logging.INFO)
@@ -278,6 +283,11 @@ class NodeDirectory:
         self.lock = threading.Lock()
         self.register_times = []
         self.discover_times = []
+        self.transactions = {}  # Assuming transactions are stored in a dictionary
+    def add_transaction(self, transaction):
+        transaction_hash = transaction.compute_hash()
+        self.transactions[transaction_hash] = transaction
+
     def register_node(self, node_id, public_key, ip_address, port):
         start_time = time.time()
         with self.lock:
@@ -286,6 +296,8 @@ class NodeDirectory:
         end_time = time.time()
         self.register_times.append(end_time - start_time)
         return magnet_link
+    def get_transaction(self, transaction_hash):
+        return self.transactions.get(transaction_hash)
 
     def discover_nodes(self):
         start_time = time.time()
@@ -377,14 +389,13 @@ class QuantumStateManager:
 quantum_state_manager = QuantumStateManager()
 
 
-
 class QuantumBlock:
     def __init__(self, previous_hash, data, quantum_signature, reward, transactions, timestamp=None):
         self.previous_hash = previous_hash
         self.data = data
         self.quantum_signature = quantum_signature
         self.reward = reward
-        self.transactions = transactions
+        self.transactions = transactions  # Ensure transactions are stored as Transaction objects
         self.timestamp = timestamp or time.time()
         self.nonce = 0
         self.hash = self.compute_hash()
@@ -396,7 +407,7 @@ class QuantumBlock:
             "data": self.data,
             "quantum_signature": self.quantum_signature,
             "reward": self.reward,
-            "transactions": self.transactions,
+            "transactions": [txn.to_dict() if hasattr(txn, 'to_dict') else txn for txn in self.transactions],
             "timestamp": self.timestamp,
             "nonce": self.nonce
         }, sort_keys=True)
@@ -419,10 +430,10 @@ class QuantumBlock:
             "data": self.data,
             "quantum_signature": self.quantum_signature,
             "reward": self.reward,
-            "transactions": self.transactions,
+            "transactions": [txn.to_dict() if hasattr(txn, 'to_dict') else txn for txn in self.transactions],
+            "hash": self.hash,
             "timestamp": self.timestamp,
-            "nonce": self.nonce,
-            "hash": self.hash
+            "nonce": self.nonce
         }
 
     @classmethod
@@ -447,6 +458,7 @@ class QuantumBlock:
 
     def hash_block(self):
         self.hash = self.compute_hash()
+
 
 
 class MerkleTree:
@@ -556,6 +568,18 @@ class QuantumBlockchain:
         self.node_directory = NodeDirectory()
         self.blockchain = Blockchain()  # Initialize Blockchain
 
+    def validate_block(self, block):
+        # Check if the previous hash of the block matches the hash of the last block in the chain
+        if len(self.chain) > 0 and block.previous_hash != self.chain[-1].hash:
+            return False
+
+        # Check if the hash of the block is valid
+        if block.hash != block.compute_hash():
+            return False
+
+        # Check if the quantum signature is valid
+        if not self.validate_quantum_signature(block.quantum_signature):
+            return False
 
     def validate_quantum_signature(self, quantum_signature):
         logger.debug(f"Validating quantum signature: {quantum_signature}")
@@ -664,8 +688,6 @@ class QuantumBlockchain:
         except Exception as e:
             logger.error(f"Unexpected error in generate_quantum_signature: {str(e)}")
             raise
-
-
     def adjust_difficulty(self):
         if len(self.chain) >= self.adjustment_interval:
             start_block = self.chain[-self.adjustment_interval]
@@ -677,20 +699,29 @@ class QuantumBlockchain:
             logger.info(f"Total time: {total_time:.2e}, Avg time: {avg_time:.2e}, Target time: {target_time:.2e}")
             logger.info(f"Current difficulty: {self.difficulty}, Target: {self.target:.2e}")
 
-            # Only adjust if the difference is significant (e.g., 25% faster or slower)
-            if avg_time < target_time * 0.75:
-                old_difficulty = self.difficulty
-                self.difficulty += 1
-                logger.info(f"Avg time ({avg_time:.2e}) significantly < Target time ({target_time:.2e}). Increased difficulty from {old_difficulty} to {self.difficulty}")
-            elif avg_time > target_time * 1.25 and self.difficulty > 1:
-                old_difficulty = self.difficulty
-                self.difficulty -= 1
-                logger.info(f"Avg time ({avg_time:.2e}) significantly > Target time ({target_time:.2e}). Decreased difficulty from {old_difficulty} to {self.difficulty}")
-            else:
-                logger.info(f"Avg time ({avg_time:.2e}) close to Target time ({target_time:.2e}). Difficulty remains unchanged at {self.difficulty}")
+            # Calculate the adjustment factor
+            adjustment_factor = target_time / avg_time
 
+            # Adjust difficulty more gradually
+            if adjustment_factor > 1.25:
+                self.difficulty = min(int(self.difficulty * 1.25), 256)  # Cap at 256
+            elif adjustment_factor < 0.75:
+                self.difficulty = max(int(self.difficulty * 0.75), 1)  # Ensure minimum difficulty of 1
+            else:
+                # Fine-tune difficulty for smaller variations
+                self.difficulty = max(int(self.difficulty * adjustment_factor), 1)
+
+            logger.info(f"Adjustment factor: {adjustment_factor:.2f}")
+            logger.info(f"New difficulty: {self.difficulty}")
+
+            # Recalculate target based on new difficulty
             self.target = 2**(256 - self.difficulty)
-            logger.info(f"New difficulty: {self.difficulty}, New target: {self.target:.2e}")
+            logger.info(f"New target: {self.target:.2e}")
+
+
+
+
+
     def current_reward(self):
         elapsed_time = time.time() - self.start_time
         halvings = int(elapsed_time // self.halving_interval)
@@ -699,14 +730,19 @@ class QuantumBlockchain:
         return reward
     def get_block_reward(self):
         return self.current_reward()
-
     def add_block(self, block):
-        block.previous_hash = self.chain[-1].hash  # Ensure previous_hash is correctly set
-        block.recompute_hash()  # Recompute the hash to ensure correctness
+        if not self.validate_block(block):
+            logger.error(f"Block validation failed for block with hash: {block.hash}")
+            return False
+        
+        if block.previous_hash != self.chain[-1].hash:
+            logger.error(f"Block's previous hash doesn't match the last block in the chain. Expected: {self.chain[-1].hash}, Got: {block.previous_hash}")
+            return False
+        
         self.chain.append(block)
-        if len(self.chain) % self.adjustment_interval == 0:
-            logger.info(f"Calling adjust_difficulty at block {len(self.chain)}...")
-            self.adjust_difficulty()
+        logger.info(f"Block added to the chain. New chain length: {len(self.chain)}")
+        return True
+
     def add_new_block(self, data, quantum_signature, transactions, miner_address):
         previous_block = self.chain[-1]
         previous_hash = previous_block.hash
@@ -764,9 +800,14 @@ class QuantumBlockchain:
             logger.info(f"Total supply after transaction: {total_supply}")
     def process_transactions(self, transactions):
         for tx in transactions:
-            sender = tx['sender']
-            receiver = tx['receiver']
-            amount = tx['amount']
+            if isinstance(tx, dict):
+                sender = tx['sender']
+                receiver = tx['receiver']
+                amount = tx['amount']
+            else:  # Assume it's a Transaction object
+                sender = tx.sender
+                receiver = tx.receiver
+                amount = tx.amount
             
             if self.balances.get(sender, 0) >= amount:
                 self.balances[sender] = self.balances.get(sender, 0) - amount
@@ -778,6 +819,8 @@ class QuantumBlockchain:
 
         total_supply = self.get_total_supply()
         logger.info(f"Total supply after processing transactions: {total_supply}")
+
+
 
 
 
@@ -848,12 +891,26 @@ class QuantumBlockchain:
         new_total_supply = total_supply + reward
         logger.info(f"Total supply updated from {total_supply:.2e} to {new_total_supply:.2e}")
 
+from pydantic import BaseModel, Field
+from mnemonic import Mnemonic
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding
+from cryptography.hazmat.backends import default_backend
+from cryptography.exceptions import InvalidSignature
+import base64
+import hashlib
+from typing import Optional
 
-class Wallet:
-    def __init__(self, private_key=None, mnemonic=None):
-        self.mnemo = Mnemonic("english")
+class Wallet(BaseModel):
+    private_key: Optional[str] = None
+    public_key: Optional[str] = None
+    mnemonic: Optional[Mnemonic] = None
+
+    def __init__(self, private_key=None, mnemonic=None, **data):
+        super().__init__(**data)
+        self.mnemonic = Mnemonic("english")
         if mnemonic:
-            seed = self.mnemo.to_seed(mnemonic)
+            seed = self.mnemonic.to_seed(mnemonic)
             self.private_key = ec.derive_private_key(int.from_bytes(seed[:32], byteorder="big"), ec.SECP256R1(), default_backend())
         elif private_key:
             self.private_key = serialization.load_pem_private_key(private_key.encode(), password=None, backend=default_backend())
@@ -873,7 +930,7 @@ class Wallet:
         ).decode('utf-8')
 
     def generate_mnemonic(self):
-        return self.mnemo.generate(strength=128)
+        return self.mnemonic.generate(strength=128)
 
     def sign_message(self, message):
         signature = self.private_key.sign(
@@ -916,6 +973,9 @@ class Wallet:
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         ).decode('utf-8')
 
+    class Config:
+        arbitrary_types_allowed = True
+
 
 
 class PQWallet(Wallet):
@@ -942,29 +1002,68 @@ class PQWallet(Wallet):
         cipher = PKCS1_OAEP.new(self.rsa_keypair)
         decrypted_message = cipher.decrypt(base64.b64decode(ciphertext))
         return decrypted_message.decode('utf-8')
+from pydantic import BaseModel, Field
+from typing import Optional
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+import base64
 class Transaction(BaseModel):
     sender: str
     receiver: str
-    amount: float
-    private_key: str = Field(..., description="Private key for signing the transaction")
-    public_key: str
+    amount: int
+    private_key: Optional[str] = None
+    public_key: Optional[str] = None
     signature: Optional[str] = None
+    wallet: Optional[Wallet] = None
 
     def sign_transaction(self):
-        private_key = serialization.load_pem_private_key(self.private_key.encode(), password=None)
-        message = f'{self.sender}{self.receiver}{self.amount}'.encode('utf-8')
-        signature = private_key.sign(
-            message,
-            ec.ECDSA(hashes.SHA256())
-        )
-        self.signature = base64.b64encode(signature).decode('utf-8')
+        if not self.wallet:
+            raise ValueError("Wallet is required to sign the transaction")
+        message = f"{self.sender}{self.receiver}{self.amount}"
+        self.signature = self.wallet.sign_message(message)
+        self.public_key = self.wallet.get_public_key()
+
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+
+
+
+
+
+
+    def compute_hash(self):
+        transaction_string = f'{self.sender}{self.receiver}{self.amount}{self.signature}'
+        return hashlib.sha256(transaction_string.encode('utf-8')).hexdigest()
 
     def to_dict(self):
-        return self.dict()
+        return {
+            "sender": self.sender,
+            "receiver": self.receiver,
+            "amount": self.amount,
+            "signature": self.signature,
+            "public_key": self.public_key
+        }
 
     @classmethod
     def from_dict(cls, data):
         return cls(**data)
+
+    @classmethod
+    def from_proto(cls, proto_transaction):
+        return cls(
+            sender=proto_transaction.sender,
+            receiver=proto_transaction.receiver,
+            amount=proto_transaction.amount,
+            private_key=None,  # We don't receive private key in proto
+            public_key=proto_transaction.public_key,
+            signature=proto_transaction.signature
+        )
+
+
+
 def hamming_distance(s1, s2):
     return sum(c1 != c2 for c1, c2 in zip(s1, s2))
 
@@ -1299,7 +1398,6 @@ from fastapi import Depends, HTTPException, FastAPI
 
 continue_mining = True
 
-
 def mining_algorithm(iterations=5):
     try:
         process = psutil.Process()
@@ -1307,17 +1405,37 @@ def mining_algorithm(iterations=5):
         logging.info(f"Memory usage at start: {memory_info.rss / (1024 * 1024):.2f} MB")
 
         logging.info("Initializing Quantum Annealing Simulation")
+        global num_qubits, graph
         num_qubits = 10  # Reduced number of qubits
         graph = nx.grid_graph(dim=[2, 5])  # 2x5 grid instead of 5x5
+        logging.info(f"Initialized graph with {len(graph.nodes)} nodes and {len(graph.edges())} edges")
+        logging.info(f"Graph nodes: {list(graph.nodes())}")
+        logging.info(f"Graph edges: {list(graph.edges())}")
+
 
         def quantum_annealing_simulation(params):
             hamiltonian = sparse.csr_matrix((2**num_qubits, 2**num_qubits), dtype=complex)
+            
+            # Get the dimensions of the grid graph
+            grid_dims = list(graph.nodes())[-1]
+            rows, cols = grid_dims[0] + 1, grid_dims[1] + 1
+            
             for edge in graph.edges():
-                i, j = edge  # Extract nodes from the edge tuple
+                i, j = edge
+                logger.debug(f"Processing edge: {edge}, i: {i}, j: {j}")
                 sigma_z = sparse.csr_matrix([[1, 0], [0, -1]], dtype=complex)
-                term = sparse.kron(sparse.eye(2**i[0], dtype=complex), sigma_z)  # Using i[0] for proper dimension
-                term = sparse.kron(term, sparse.eye(2**(num_qubits-i[0]-1), dtype=complex))
-                hamiltonian += term
+                
+                # Convert tuple indices to integers
+                i_int = i[0] * cols + i[1]
+                j_int = j[0] * cols + j[1]
+                
+                term_i = sparse.kron(sparse.eye(2**i_int, dtype=complex), sigma_z)
+                term_i = sparse.kron(term_i, sparse.eye(2**(num_qubits-i_int-1), dtype=complex))
+                hamiltonian += term_i
+                
+                term_j = sparse.kron(sparse.eye(2**j_int, dtype=complex), sigma_z)
+                term_j = sparse.kron(term_j, sparse.eye(2**(num_qubits-j_int-1), dtype=complex))
+                hamiltonian += term_j
 
             problem_hamiltonian = sparse.diags(np.random.randn(2**num_qubits), dtype=complex)
             hamiltonian += params[0] * problem_hamiltonian
@@ -1326,27 +1444,26 @@ def mining_algorithm(iterations=5):
             evolution = sparse.linalg.expm(-1j * hamiltonian.tocsc() * params[1])
             final_state = evolution @ initial_state
 
-            logging.info(f"Shape of final_state: {final_state.shape}")
-            logging.info(f"Type of final_state: {type(final_state)}")
-            logging.info(f"First element of final_state: {final_state[0]}")
-
-            # Ensure final_state is a 1D array
-            if final_state.ndim != 1:
-                logging.error(f"final_state is not a 1D array: {final_state.shape}")
-                return float('inf')  # Return a large value to indicate an error
-
             return -np.abs(final_state[0])**2  # Negative because we're minimizing
 
+
+
         cumulative_counts = {}
-        for _ in range(iterations):
+        for iteration in range(iterations):
+            logging.info(f"Starting iteration {iteration + 1}/{iterations}")
             logging.info("Running Quantum Annealing Simulation")
             start_time_simulation = time.time()
-            # Introduce randomness in the parameters to help produce a wider range of probabilities
             random_params = [random.uniform(0.1, 2.0), random.uniform(0.1, 2.0)]
+            logging.info(f"Random parameters: {random_params}")
+            
             result = minimize(quantum_annealing_simulation, random_params, method='Nelder-Mead')
             end_time_simulation = time.time()
 
             simulation_duration = end_time_simulation - start_time_simulation
+            logging.info(f"Simulation completed in {simulation_duration:.2f} seconds")
+            logging.info(f"Optimization result: {result}")
+
+
 
             logging.info("Simulating gravity effects")
             mass_distribution = np.random.rand(2, 5)  # 2x5 grid
@@ -1388,6 +1505,7 @@ def mining_algorithm(iterations=5):
         logging.error(f"Error in mining_algorithm: {str(e)}")
         logging.error(traceback.format_exc())  # Log the traceback
         return {"success": False, "message": f"Error in mining_algorithm: {str(e)}"}
+
 @app.post("/mine_block")
 def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
     global continue_mining
@@ -1583,10 +1701,11 @@ def receive_block(block: BlockData, pincode: str = Depends(authenticate)):
         raise HTTPException(status_code=500, detail=f"Error receiving block: {str(e)}")
 
 class PBFT:
-    def __init__(self):
+    def __init__(self, f):
         self.view = 0
         self.prepared = set()
         self.committed = set()
+        self.f = f  # Number of maximum faulty nodes
 
     def pre_prepare(self, block):
         # Leader sends pre-prepare message
@@ -1597,18 +1716,18 @@ class PBFT:
         # Replica receives pre-prepare and sends prepare message
         self.prepared.add(message["block"].hash)
         self.broadcast(message, "prepare")
-
     def commit(self, message):
         # Replica receives prepare messages and sends commit message
-        if len(self.prepared) >= (2 * f + 1):
+        if len(self.prepared) >= (2 * self.f + 1):
             self.committed.add(message["block"].hash)
             self.broadcast(message, "commit")
 
     def reply(self, message):
         # Replica receives commit messages and sends reply
-        if len(self.committed) >= (2 * f + 1):
+        if len(self.committed) >= (2 * self.f + 1):
             self.apply_block(message["block"])
             self.broadcast(message, "reply")
+
 
     def broadcast(self, message, stage):
         nodes = node_directory.discover_nodes()
@@ -1620,7 +1739,7 @@ class PBFT:
         blockchain.add_block(block.data, block.quantum_signature, block.transactions, block.miner_address)
 
 
-pbft = PBFT()
+pbft = PBFT(f=1)  # Assuming 1 faulty node, adjust as needed
 
 
 class ConsensusManager:
@@ -1671,6 +1790,29 @@ class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         self.private_key = self.load_or_generate_private_key()
         self.logger = logging.getLogger(__name__)
         self.security_manager = SecurityManager(secret_key)
+        self.transaction_pool = []
+    def GetTransaction(self, request, context):
+        transaction_hash = request.transaction_hash
+        transaction = self.node_directory.get_transaction(transaction_hash)
+        if not transaction:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details('Transaction not found!')
+            return dagknight_pb2.GetTransactionResponse()
+
+        return dagknight_pb2.GetTransactionResponse(transaction=dagknight_pb2.Transaction(
+            sender=transaction.sender,
+            receiver=transaction.receiver,
+            amount=int(transaction.amount),  # Ensure amount is an integer
+            signature=transaction.signature,
+            public_key=transaction.public_key
+        ))
+
+
+    def AddTransaction(self, request, context):
+        transaction = request.transaction
+        # Validate and add transaction to the transaction pool
+        self.transaction_pool.append(transaction)
+        return dagknight_pb2.AddTransactionResponse(success=True)
 
     def FullStateSync(self, request, context):
         chain = [dagknight_pb2.Block(
@@ -1686,6 +1828,7 @@ class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         stakes = {k: v for k, v in self.blockchain.stakes.items()}
         
         return dagknight_pb2.FullStateResponse(chain=chain, balances=balances, stakes=stakes)
+
 
     def _validate_token(self, token):
         try:
@@ -1821,15 +1964,42 @@ class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         except Exception as e:
             logging.error(f"Error discovering nodes: {e}")
             context.abort(grpc.StatusCode.INTERNAL, f'Error discovering nodes: {str(e)}')
-
     def MineBlock(self, request, context):
-        self._check_authorization(context)
-        node_id = request.node_id
         try:
-            result = mine_block(node_id, None)
-            return dagknight_pb2.MineBlockResponse(success=result['success'], message=result['message'])
+            node_id = request.node_id
+            data = request.data
+            quantum_signature = request.quantum_signature
+            transactions = [Transaction.from_proto(t) for t in request.transactions]
+            miner_address = request.miner_address
+
+            logger.info(f"Mining block for node {node_id} with {len(transactions)} transactions")
+
+            block = QuantumBlock(
+                previous_hash=self.blockchain.chain[-1].hash,
+                data=data,
+                quantum_signature=quantum_signature,
+                reward=self.blockchain.get_block_reward(),
+                transactions=transactions
+            )
+            block.mine_block(self.blockchain.difficulty)
+            
+            if self.blockchain.validate_block(block):
+                self.blockchain.add_block(block)
+                logger.info(f"Block mined successfully by {miner_address}")
+                return dagknight_pb2.MineBlockResponse(success=True)
+            else:
+                logger.error("Failed to validate mined block")
+                return dagknight_pb2.MineBlockResponse(success=False)
         except Exception as e:
-            context.abort(grpc.StatusCode.INTERNAL, f'Error during mining: {str(e)}')
+            logger.error(f"Error during mining: {str(e)}")
+            context.set_details(f'Error during mining: {str(e)}')
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return dagknight_pb2.MineBlockResponse(success=False)
+
+
+
+
+
 
     def StakeCoins(self, request, context):
         self._check_authorization(context)
@@ -1878,6 +2048,21 @@ class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
             logger.error(f"Error adding propagated block: {e}")
             return dagknight_pb2.PropagateBlockResponse(success=False)
 
+    async def sync_state(self, directory_ip, directory_port):
+        async with grpc.aio.insecure_channel(f'{directory_ip}:{directory_port}') as channel:
+            stub = dagknight_pb2_grpc.DAGKnightStub(channel)
+            request = dagknight_pb2.FullStateRequest()
+            response = await stub.FullStateSync(request)
+            
+            self.blockchain.chain = [QuantumBlock(
+                previous_hash=blk.previous_hash,
+                data=blk.data,
+                quantum_signature=blk.quantum_signature,
+                reward=blk.reward,
+                transactions=[tx for tx in blk.transactions]
+            ) for blk in response.chain]
+            self.blockchain.balances = {k: v for k, v in response.balances.items()}
+            self.blockchain.stakes = {k: v for k, v in response.stakes.items()}
 
 
 @app.post("/token", response_model=Token)
@@ -1959,10 +2144,10 @@ def serve_directory_service():
     server.wait_for_termination()
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    dagknight_servicer = SecureDAGKnightServicer(SECRET_KEY, node_directory)  # Pass node_directory here
-    dagknight_pb2_grpc.add_DAGKnightServicer_to_server(dagknight_servicer, server)
+    dagknight_servicer = SecureDAGKnightServicer(SECRET_KEY, node_directory)
+    dagknight_pb2_grpc.add_DAGKnightServicer_to_server(dagknight_servicer, server)  # Corrected line
 
-    grpc_port = int(os.getenv("GRPC_PORT", 50502))  # Use environment variable or default to 50502
+    grpc_port = int(os.getenv("GRPC_PORT", 50502))
     service_names = (
         dagknight_pb2.DESCRIPTOR.services_by_name['DAGKnight'].full_name,
         reflection.SERVICE_NAME,
