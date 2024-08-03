@@ -334,7 +334,7 @@ class QuantumBlock:
         self.timestamp = datetime.utcnow().timestamp()
         self.nonce = 0
         self.hash = self.compute_hash()
-
+        logger.debug(f"Initialized QuantumBlock: {self.to_dict()}")
     def compute_hash(self):
         block_string = f"{self.previous_hash}{self.data}{self.quantum_signature}{self.reward}{self.transactions}{self.timestamp}{self.nonce}"
         block_hash = sha256(block_string.encode()).hexdigest()
@@ -356,6 +356,8 @@ class QuantumBlock:
             "quantum_signature": self.quantum_signature,
             "reward": self.reward,
             "transactions": self.transactions,
+            "timestamp": self.timestamp,
+            "nonce": self.nonce,
             "hash": self.hash
         }
 
@@ -368,9 +370,15 @@ class QuantumBlock:
             reward=block_data["reward"],
             transactions=block_data["transactions"]
         )
+        block.timestamp = block_data["timestamp"]
+        block.nonce = block_data["nonce"]
         block.hash = block_data["hash"]
         return block
 
+    def set_hash(self, hash_value):
+        self.hash = hash_value
+    def recompute_hash(self):
+        self.hash = self.compute_hash()
 
 
 class MerkleTree:
@@ -399,22 +407,35 @@ class MerkleTree:
     def get_root(self):
         return self.tree[-1][0] if self.tree else None
 class QuantumBlockchain:
-    def __init__(self):
-        self.initial_reward = 50
-        self.chain = [self.create_genesis_block()]
+    def __init__(self, consensus):
+        self.initial_reward = 50.0
+        self.chain = []
         self.pending_transactions = []
         self.balances = {}
         self.stakes = {}
-        self.halving_interval = 4 * 365 * 24 * 3600
+        self.halving_interval = 4 * 365 * 24 * 3600  # 4 years in seconds
         self.start_time = time.time()
         self.difficulty = 1
         self.target_block_time = 600  # 10 minutes in seconds
         self.adjustment_interval = 10
         self.max_supply = MAX_SUPPLY
         self.target = 2**(256 - self.difficulty)
+        self.consensus = consensus
+        self.create_genesis_block()
+
+
 
     def create_genesis_block(self):
-        return QuantumBlock("0", "Genesis Block", self.generate_quantum_signature(), self.initial_reward, [])
+        genesis_block = QuantumBlock(
+            previous_hash="0",
+            data="Genesis Block",
+            quantum_signature="00",
+            reward=0,
+            transactions=[]
+        )
+        genesis_block.hash = genesis_block.compute_hash()
+        self.chain.append(genesis_block)
+
     def get_total_supply(self):
         total_supply = sum(self.balances.values())
         logger.info(f"Total supply: {total_supply}")
@@ -455,7 +476,8 @@ class QuantumBlockchain:
             raise
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}")
-            raise    
+            raise
+
     def adjust_difficulty(self):
         if len(self.chain) >= self.adjustment_interval:
             start_block = self.chain[-self.adjustment_interval]
@@ -481,52 +503,68 @@ class QuantumBlockchain:
 
             self.target = 2**(256 - self.difficulty)
             logger.info(f"New difficulty: {self.difficulty}, New target: {self.target:.2e}")
-
-
-
-
-
-
-
     def current_reward(self):
         elapsed_time = time.time() - self.start_time
         halvings = int(elapsed_time // self.halving_interval)
         reward = self.initial_reward / (2 ** halvings)
         logger.info(f"Current reward: {reward}")
         return reward
+    def get_block_reward(self):
+        return self.current_reward()
 
     def add_block(self, block):
+        block.previous_hash = self.chain[-1].hash  # Ensure previous_hash is correctly set
+        block.recompute_hash()  # Recompute the hash to ensure correctness
         self.chain.append(block)
         if len(self.chain) % self.adjustment_interval == 0:
             logger.info(f"Calling adjust_difficulty at block {len(self.chain)}...")
             self.adjust_difficulty()
-
     def add_new_block(self, data, quantum_signature, transactions, miner_address):
         previous_block = self.chain[-1]
-        reward = self.current_reward()
+        previous_hash = previous_block.hash
+        reward = self.get_block_reward()
         total_supply = self.get_total_supply()
 
         if total_supply + reward > self.max_supply:
             reward = self.max_supply - total_supply
 
-        new_block = QuantumBlock(previous_block.hash, data, quantum_signature, reward, transactions)
+        new_block = QuantumBlock(
+            previous_hash=previous_hash,
+            data=data,
+            quantum_signature=quantum_signature,
+            reward=reward,
+            transactions=transactions,
+            timestamp=time.time()
+        )
 
-        if consensus.validate_block(new_block):
-            self.add_block(new_block)  # Use the updated add_block method
+        new_block.hash_block()
+
+        logger.info(f"Blockchain state before adding new block: {[block.hash for block in self.chain]}")
+        logger.info(f"Adding new block: {new_block.to_dict()}")
+
+        if self.consensus.validate_block(new_block):
+            self.chain.append(new_block)
+            self.update_balances(new_block)
+            self.update_total_supply(reward)
             self.process_transactions(transactions)
+
+            logger.info(f"Blockchain state after adding new block: {[block.hash for block in self.chain]}")
 
             if reward > 0:
                 self.balances[miner_address] = self.balances.get(miner_address, 0) + reward
                 logger.info(f"Block added: {new_block.hash}")
-                logger.info(f"Updated balance for miner {miner_address}: {self.balances[miner_address]}")
+                logger.info(f"Updated balance for miner {miner_address}: {self.balances[miner_address]:.2e}")
 
             total_supply = self.get_total_supply()
-            logger.info(f"Total supply after adding block: {total_supply}")
+            logger.info(f"Total supply after adding block: {total_supply:.2e}")
 
             return reward
         else:
             logger.error("Block validation failed. Block not added to the chain.")
-            return 0
+            raise ValueError("Invalid block")
+
+
+
 
     def process_transactions(self, transactions):
         for tx in transactions:
@@ -541,9 +579,23 @@ class QuantumBlockchain:
             logger.info(f"Total supply after transaction: {total_supply}")
 
     def add_transaction(self, transaction):
+        logger.debug(f"Adding transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
+        logger.debug(f"Sender balance before transaction: {self.balances.get(transaction.sender, 0)}")
+
+        # Check if the sender has enough balance
         if self.balances.get(transaction.sender, 0) >= transaction.amount:
-            self.pending_transactions.append(transaction.to_dict())
-            return True
+            # Verify the transaction signature
+            wallet = Wallet()
+            message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
+            if wallet.verify_signature(message, transaction.signature, transaction.public_key):
+                self.pending_transactions.append(transaction.to_dict())
+                logger.debug(f"Transaction added. Pending transactions count: {len(self.pending_transactions)}")
+                return True
+            else:
+                logger.debug(f"Transaction signature verification failed for transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
+        else:
+            logger.debug(f"Transaction failed. Insufficient balance for sender {transaction.sender}")
+
         return False
 
     def get_balance(self, address):
@@ -682,8 +734,6 @@ class PQWallet(Wallet):
         cipher = PKCS1_OAEP.new(self.rsa_keypair)
         decrypted_message = cipher.decrypt(base64.b64decode(ciphertext))
         return decrypted_message.decode('utf-8')
-
-
 class Transaction(BaseModel):
     sender: str
     receiver: str
@@ -692,9 +742,8 @@ class Transaction(BaseModel):
     public_key: str
     signature: Optional[str] = None
 
-
-    def sign_transaction(self, wallet):
-        private_key = wallet.private_key
+    def sign_transaction(self):
+        private_key = serialization.load_pem_private_key(self.private_key.encode(), password=None)
         message = f'{self.sender}{self.receiver}{self.amount}'.encode('utf-8')
         signature = private_key.sign(
             message,
@@ -708,9 +757,127 @@ class Transaction(BaseModel):
     @classmethod
     def from_dict(cls, data):
         return cls(**data)
+class Consensus:
+    def __init__(self, blockchain):
+        self.blockchain = blockchain
+        self.current_leader = None
+
+    def elect_leader(self):
+        nodes = node_directory.discover_nodes()
+        logger.debug(f"Discovered nodes for leader election: {nodes}")
+        if not nodes:
+            logger.warning("No nodes available for leader election")
+            return None
+        self.current_leader = random.choice(nodes)
+        logger.info(f"Elected leader: {self.current_leader['node_id']}")
+    def validate_block(self, block):
+        logger.info(f"Validating block with hash: {block.hash}")
+
+        if len(self.blockchain.chain) > 0:
+            last_block_hash = self.blockchain.chain[-1].hash
+            logger.debug(f"Last block hash: {last_block_hash}, Block's previous hash: {block.previous_hash}")
+            if block.previous_hash != last_block_hash:
+                logger.error("Invalid block: Previous hash does not match")
+                return False
+
+        expected_hash = block.compute_hash()
+        logger.debug(f"Expected hash: {expected_hash}, Block's hash: {block.hash}")
+        if block.hash != expected_hash:
+            logger.error(f"Invalid block: Computed hash does not match. Expected {expected_hash} but got {block.hash}")
+            return False
+
+        if not self.is_valid_hash(block.hash):
+            logger.error("Invalid block: Hash does not meet the required criteria")
+            return False
+
+        if not self.validate_quantum_signature(block.quantum_signature):
+            logger.error("Invalid block: Quantum signature is not valid")
+            return False
+
+        for tx in block.transactions:
+            if not self.validate_transaction(tx):
+                logger.error(f"Invalid block: Contains invalid transaction {tx}")
+                return False
+
+        logger.info("Block validated successfully")
+        return True
 
 
-blockchain = QuantumBlockchain()
+    def is_valid_hash(self, block_hash):
+        logger.info(f"Validating hash against target. Current difficulty: {self.blockchain.difficulty}, Target: {self.blockchain.target}")
+        valid = int(block_hash, 16) < self.blockchain.target
+        logger.debug(f"Is valid hash: {valid}")
+        return valid
+
+    def validate_quantum_signature(self, quantum_signature):
+        logger.debug(f"Validating quantum signature: {quantum_signature}")
+        try:
+            num_qubits = 2
+            qr = QuantumRegister(num_qubits)
+            cr = ClassicalRegister(num_qubits)
+            qc = QuantumCircuit(qr, cr)
+
+            for i in range(num_qubits):
+                qc.h(qr[i])
+                qc.measure(qr[i], cr[i])
+
+            simulator = AerSimulator()
+            transpiled_circuit = transpile(qc, simulator)
+            logger.debug("Transpiled quantum circuit")
+            job = simulator.run(transpiled_circuit)
+            result = job.result()
+
+            if result.status != 'COMPLETED':
+                logger.error(f"Job status: {result.status}, Job result: {result}")
+                return False
+
+            counts = result.get_counts()
+            logger.debug(f"Quantum measurement counts: {counts}")
+
+            if not counts:
+                logger.error("No counts were returned by the simulator")
+                return False
+
+            is_valid = quantum_signature in counts
+            if is_valid:
+                logger.info(f"Quantum signature {quantum_signature} validated successfully")
+            else:
+                logger.error(f"Quantum signature {quantum_signature} is invalid")
+            return is_valid
+
+        except QiskitError as e:
+            logger.error(f"Qiskit error during validation: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error during validation: {str(e)}")
+            return False
+
+    def validate_transaction(self, transaction):
+        logger.debug(f"Validating transaction: {transaction}")
+        sender_balance = self.blockchain.get_balance(transaction['sender'])
+        logger.debug(f"Sender balance: {sender_balance}, Transaction amount: {transaction['amount']}")
+        if sender_balance < transaction['amount']:
+            logger.error(f"Invalid transaction: Sender {transaction['sender']} has insufficient balance")
+            return False
+
+        wallet = Wallet()
+        message = f"{transaction['sender']}{transaction['receiver']}{transaction['amount']}"
+        logger.debug(f"Verifying signature for message: {message}")
+        if not wallet.verify_signature(message, transaction['signature'], transaction['public_key']):
+            logger.error("Invalid transaction: Signature verification failed")
+            return False
+
+        logger.info("Transaction validated successfully")
+        return True
+
+
+# Initialize the consensus object and the blockchain
+consensus = Consensus(blockchain=None)  # Temporarily set blockchain to None
+blockchain = QuantumBlockchain(consensus)  # Initialize the blockchain with the consensus
+
+# Update the consensus to point to the correct blockchain
+consensus.blockchain = blockchain
+
 
 
 class ImportWalletRequest(BaseModel):
@@ -1140,7 +1307,6 @@ async def gossip_protocol(block_data):
 # Example usage
 asyncio.run(gossip_protocol(block_data))
 
-
 def propagate_block_to_peers(data, quantum_signature, transactions, miner_address):
     nodes = node_directory.discover_nodes()
     logger.info(f"Propagating block to nodes: {nodes}")
@@ -1149,21 +1315,22 @@ def propagate_block_to_peers(data, quantum_signature, transactions, miner_addres
             with grpc.insecure_channel(f"{node['ip_address']}:{node['port']}") as channel:
                 stub = dagknight_pb2_grpc.DAGKnightStub(channel)
                 block = dagknight_pb2.Block(
-                    previous_hash=blockchain.chain[-2].hash,
+                    previous_hash=blockchain.chain[-1].hash,
                     data=data,
                     quantum_signature=quantum_signature,
                     reward=blockchain.current_reward(),
                     transactions=[dagknight_pb2.Transaction(
-                        sender=tx['sender'], receiver=tx['receiver'], amount=tx['amount'], private_key=tx['private_key']) for tx in transactions]
+                        sender=tx['sender'], receiver=tx['receiver'], amount=tx['amount']) for tx in transactions]
                 )
                 request = dagknight_pb2.PropagateBlockRequest(block=block, miner_address=miner_address)
                 response = stub.PropagateBlock(request)
                 if response.success:
-                    logger.info(f"Node {node['node_id']} received block with hash: {block.previous_hash}")
+                    logger.info(f"Node {node['node_id']} received block with hash: {block.hash}")
                 else:
                     logger.error(f"Node {node['node_id']} failed to receive the block.")
         except Exception as e:
             logger.error(f"Error propagating block to node {node['node_id']}: {str(e)}")
+
 
 class BlockData(BaseModel):
     previous_hash: str
@@ -1256,128 +1423,7 @@ class ConsensusManager:
 
 
 consensus_manager = ConsensusManager()
-class Consensus:
-    def __init__(self):
-        self.current_leader = None
 
-    def elect_leader(self):
-        nodes = node_directory.discover_nodes()
-        logger.debug(f"Discovered nodes for leader election: {nodes}")
-        if not nodes:
-            logger.warning("No nodes available for leader election")
-            return None
-        self.current_leader = random.choice(nodes)
-        logger.info(f"Elected leader: {self.current_leader['node_id']}")
-
-    def validate_block(self, block):
-        logger.info(f"Validating block with hash: {block.hash}")
-        
-        # Ensure the block's previous hash matches the last block in the chain
-        last_block_hash = blockchain.chain[-1].hash
-        logger.debug(f"Last block hash: {last_block_hash}, Block's previous hash: {block.previous_hash}")
-        if block.previous_hash != last_block_hash:
-            logger.error("Invalid block: Previous hash does not match")
-            return False
-
-        # Verify the computed hash matches the provided hash
-        expected_hash = block.compute_hash()
-        logger.debug(f"Expected hash: {expected_hash}, Block's hash: {block.hash}")
-        if block.hash != expected_hash:
-            logger.error(f"Invalid block: Computed hash does not match. Expected {expected_hash} but got {block.hash}")
-            return False
-
-        # Check the block's hash is valid (proof of work or other criteria)
-        if not self.is_valid_hash(block.hash):
-            logger.error("Invalid block: Hash does not meet the required criteria")
-            return False
-
-        # Validate quantum signature
-        if not self.validate_quantum_signature(block.quantum_signature):
-            logger.error("Invalid block: Quantum signature is not valid")
-            return False
-
-        # Validate all transactions within the block
-        for tx in block.transactions:
-            if not self.validate_transaction(tx):
-                logger.error(f"Invalid block: Contains invalid transaction {tx}")
-                return False
-
-        logger.info("Block validated successfully")
-        return True
-
-    def is_valid_hash(self, block_hash):
-        # Log current difficulty and target for debugging
-        logger.info(f"Validating hash against target. Current difficulty: {blockchain.difficulty}, Target: {blockchain.target}")
-        # Check if block hash meets the required difficulty (proof of work)
-        valid = int(block_hash, 16) < blockchain.target
-        logger.debug(f"Is valid hash: {valid}")
-        return valid
-
-    def validate_quantum_signature(self, quantum_signature):
-        logger.debug(f"Validating quantum signature: {quantum_signature}")
-        try:
-            num_qubits = 2
-            qr = QuantumRegister(num_qubits)
-            cr = ClassicalRegister(num_qubits)
-            qc = QuantumCircuit(qr, cr)
-
-            for i in range(num_qubits):
-                qc.h(qr[i])
-                qc.measure(qr[i], cr[i])
-
-            simulator = AerSimulator()
-            transpiled_circuit = transpile(qc, simulator)
-            logger.debug("Transpiled quantum circuit")
-            job = simulator.run(transpiled_circuit)
-            result = job.result()
-
-            if result.status != 'COMPLETED':
-                logger.error(f"Job status: {result.status}, Job result: {result}")
-                return False
-
-            counts = result.get_counts()
-            logger.debug(f"Quantum measurement counts: {counts}")
-
-            if not counts:
-                logger.error("No counts were returned by the simulator")
-                return False
-
-            is_valid = quantum_signature in counts
-            if is_valid:
-                logger.info(f"Quantum signature {quantum_signature} validated successfully")
-            else:
-                logger.error(f"Quantum signature {quantum_signature} is invalid")
-            return is_valid
-
-        except QiskitError as e:
-            logger.error(f"Qiskit error during validation: {str(e)}")
-            return False
-        except Exception as e:
-            logger.error(f"Unexpected error during validation: {str(e)}")
-            return False
-
-    def validate_transaction(self, transaction):
-        logger.debug(f"Validating transaction: {transaction}")
-        # Ensure the sender has sufficient balance
-        sender_balance = blockchain.get_balance(transaction['sender'])
-        logger.debug(f"Sender balance: {sender_balance}, Transaction amount: {transaction['amount']}")
-        if sender_balance < transaction['amount']:
-            logger.error(f"Invalid transaction: Sender {transaction['sender']} has insufficient balance")
-            return False
-
-        # Verify the transaction signature
-        wallet = Wallet()
-        message = f"{transaction['sender']}{transaction['receiver']}{transaction['amount']}"
-        logger.debug(f"Verifying signature for message: {message}")
-        if not wallet.verify_signature(message, transaction['signature'], transaction['public_key']):
-            logger.error("Invalid transaction: Signature verification failed")
-            return False
-
-        logger.info("Transaction validated successfully")
-        return True
-
-# Create the consensus object
-consensus = Consensus()
 
 
 class ViewChange:
@@ -1596,17 +1642,21 @@ class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         return dagknight_pb2.QKDKeyExchangeResponse(node_id=request.node_id, key=key)
 
     def PropagateBlock(self, request, context):
-        block = request.block
-        miner_address = request.miner_address
         try:
-            blockchain.add_block(
-                data=block.data,
-                quantum_signature=block.quantum_signature,
-                transactions=[{'sender': tx.sender, 'receiver': tx.receiver, 'amount': tx.amount} for tx in block.transactions],
-                miner_address=miner_address
+            block = QuantumBlock(
+                previous_hash=request.block.previous_hash,
+                data=request.block.data,
+                quantum_signature=request.block.quantum_signature,
+                reward=request.block.reward,
+                transactions=[{'sender': tx.sender, 'receiver': tx.receiver, 'amount': tx.amount} for tx in request.block.transactions]
             )
-            logger.info(f"Received block with hash: {block.previous_hash} from miner {miner_address}")
-            return dagknight_pb2.PropagateBlockResponse(success=True)
+            block.hash = request.block.hash  # Ensure the block's hash matches
+            if blockchain.add_block(block):
+                logger.info(f"Received block with hash: {block.hash} from miner {request.miner_address}")
+                return dagknight_pb2.PropagateBlockResponse(success=True)
+            else:
+                logger.error(f"Failed to validate block with hash: {block.hash}")
+                return dagknight_pb2.PropagateBlockResponse(success=False)
         except Exception as e:
             logger.error(f"Error adding propagated block: {e}")
             return dagknight_pb2.PropagateBlockResponse(success=False)
@@ -1773,12 +1823,12 @@ import unittest
 import time
 class TestBlockchain(unittest.TestCase):
     def setUp(self):
-        self.blockchain = QuantumBlockchain()
-        # Add the genesis block
-        genesis_block = QuantumBlock(previous_hash="0", data="Genesis Block", quantum_signature="00", reward=50, transactions=[])
-        genesis_block.hash = genesis_block.compute_hash()
-        genesis_block.timestamp = time.time() - self.blockchain.target_block_time
-        self.blockchain.chain[0] = genesis_block  # Replace the initial genesis block
+        # Initialize the consensus object and the blockchain
+        self.consensus = Consensus(blockchain=None)  # Temporarily set blockchain to None
+        self.blockchain = QuantumBlockchain(self.consensus)  # Initialize the blockchain with the consensus
+
+        # Update the consensus to point to the correct blockchain
+        self.consensus.blockchain = self.blockchain
 
     def test_difficulty_adjustment(self):
         logger.info(f"Target block time: {self.blockchain.target_block_time}")
@@ -1819,18 +1869,37 @@ class TestBlockchain(unittest.TestCase):
 
 class TestTransactions(unittest.TestCase):
     def setUp(self):
-        self.blockchain = QuantumBlockchain()
+        # Initialize the consensus object and the blockchain
+        self.consensus = Consensus(blockchain=None)  # Temporarily set blockchain to None
+        self.blockchain = QuantumBlockchain(self.consensus)  # Initialize the blockchain with the consensus
+
+        # Update the consensus to point to the correct blockchain
+        self.consensus.blockchain = self.blockchain
+
         self.wallet = Wallet()
         self.address = self.wallet.get_address()
         self.blockchain.balances[self.address] = 1000  # Initial balance for testing
 
     def test_add_transaction(self):
-        transaction = Transaction(sender=self.address, receiver="receiver_address", amount=100, private_key=self.wallet.private_key_pem(), public_key=self.wallet.get_public_key())
+        transaction = Transaction(
+            sender=self.address,
+            receiver="receiver_address",
+            amount=100,
+            private_key=self.wallet.private_key_pem(),
+            public_key=self.wallet.get_public_key()
+        )
+        transaction.sign_transaction()
         self.assertTrue(self.blockchain.add_transaction(transaction))
-        self.assertEqual(len(self.blockchain.pending_transactions), 1)
 
     def test_transaction_balances(self):
-        transaction = Transaction(sender=self.address, receiver="receiver_address", amount=100, private_key=self.wallet.private_key_pem(), public_key=self.wallet.get_public_key())
+        transaction = Transaction(
+            sender=self.address,
+            receiver="receiver_address",
+            amount=100,
+            private_key=self.wallet.private_key_pem(),
+            public_key=self.wallet.get_public_key()
+        )
+        transaction.sign_transaction()
         self.blockchain.add_transaction(transaction)
         self.blockchain.process_transactions([transaction.to_dict()])
         self.assertEqual(self.blockchain.balances[self.address], 900)
@@ -1847,6 +1916,108 @@ class TestWallet(unittest.TestCase):
         message = "test message"
         signature = wallet.sign_message(message)
         self.assertTrue(wallet.verify_signature(message, signature, wallet.get_public_key()))
+
+
+import traceback
+import asyncio
+class TestBlockchainMiningAndValidation(unittest.TestCase):
+    def setUp(self):
+        self.consensus = Consensus(blockchain=None)  # Temporarily set blockchain to None
+        self.blockchain = QuantumBlockchain(self.consensus)  # Initialize the blockchain with the consensus
+
+        self.consensus.blockchain = self.blockchain  # Update the consensus to point to the correct blockchain
+
+        self.wallet = Wallet()
+        self.node_id = "test_node"
+        self.miner_address = self.wallet.get_address()
+
+        self.blockchain.balances[self.wallet.get_address()] = 1000  # Add initial balance to the sender
+
+        if len(self.blockchain.chain) == 0:  # Ensure genesis block is added
+            self.blockchain.create_genesis_block()
+
+    def test_mining_and_validation(self):
+        try:
+            self.assertEqual(len(self.blockchain.chain), 1, "Blockchain should start with the genesis block")
+            self.assertEqual(self.blockchain.get_total_supply(), 1000, "Initial total supply should be 1000")
+
+            transaction = Transaction(
+                sender=self.wallet.get_address(),
+                receiver="receiver_address",
+                amount=100,
+                private_key=self.wallet.private_key_pem(),
+                public_key=self.wallet.get_public_key()
+            )
+            transaction.sign_transaction()
+            logger.debug(f"Transaction: {transaction}")
+
+            logger.debug(f"Initial balance of sender: {self.blockchain.get_balance(transaction.sender)}")
+            result = self.blockchain.add_transaction(transaction)
+            logger.debug(f"Add transaction result: {result}")
+            self.assertTrue(result, "Transaction should be added to the pending transactions list")
+
+            self.assertEqual(len(self.blockchain.pending_transactions), 1, "There should be one pending transaction")
+
+            quantum_signature = self.blockchain.generate_quantum_signature()
+            previous_block_hash = self.blockchain.chain[-1].hash
+            logger.info(f"Creating new block with previous_hash: {previous_block_hash}")
+
+            reward = self.blockchain.add_new_block(
+                data="Block mined by test_node",
+                quantum_signature=quantum_signature,
+                transactions=self.blockchain.pending_transactions,
+                miner_address=self.miner_address
+            )
+
+
+            self.blockchain.pending_transactions = []  # Clear pending transactions after mining
+            mined_block = self.blockchain.chain[-1]
+            logger.debug(f"Mined block: {mined_block.to_dict()}")
+
+            # Debugging: print blockchain state before and after adding the new block
+            logger.debug(f"Blockchain state before validation: {[block.hash for block in self.blockchain.chain]}")
+
+            try:
+                if len(self.blockchain.chain) > 1:
+                    previous_block_hash = self.blockchain.chain[-2].hash
+                    logger.debug(f"Previous hash in mined block: {mined_block.previous_hash}")
+                    logger.debug(f"Expected previous hash: {previous_block_hash}")
+                    self.assertEqual(mined_block.previous_hash, previous_block_hash, "Previous hash should match")
+
+                validation_result = self.consensus.validate_block(mined_block)
+                self.assertTrue(validation_result, "Mined block should be valid")
+            except AssertionError as ae:
+                logger.error("Validation failed for mined block")
+                logger.error(f"Block: {mined_block.to_dict()}")
+                if len(self.blockchain.chain) > 1:
+                    logger.error(f"Previous Block Hash: {self.blockchain.chain[-2].hash}")
+                logger.error("Detailed traceback: ", exc_info=True)
+                raise
+
+            miner_balance = self.blockchain.get_balance(self.miner_address)
+            self.assertEqual(miner_balance, 1050, "Miner should receive the block reward")
+            total_supply = self.blockchain.get_total_supply()
+            self.assertEqual(total_supply, 1050, "Total supply should include the block reward and initial balance")
+
+            self.assertEqual(len(self.blockchain.chain), 2, "Blockchain should have two blocks after mining")
+
+            peers = [{"node_id": "node_1", "ip_address": "127.0.0.1", "port": 5000}]
+            node_directory.nodes = peers
+            block_data = {
+                "previous_hash": mined_block.previous_hash,
+                "data": mined_block.data,
+                "quantum_signature": mined_block.quantum_signature,
+                "reward": mined_block.reward,
+                "transactions": mined_block.transactions,
+                "hash": mined_block.hash
+            }
+            result = asyncio.run(propagate_block_to_all_peers(block_data))
+            self.assertTrue(result, "Block should be propagated successfully")
+
+        except AssertionError as ae:
+            logger.error("Unexpected error during test: " + str(ae))
+            raise
+
 
 
 import sys
@@ -1866,6 +2037,12 @@ def main():
     directory_port = int(os.getenv("DIRECTORY_PORT", 50501))
 
     logger.info(f"Starting node {node_id} at {ip_address}:{grpc_port}")
+
+    # Initialize the consensus object
+    consensus = Consensus(blockchain=None)
+
+    # Initialize the blockchain with the consensus
+    blockchain = QuantumBlockchain(consensus)
 
     # Start the directory service in a separate thread
     directory_service_thread = threading.Thread(target=serve_directory_service)
@@ -1887,3 +2064,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
