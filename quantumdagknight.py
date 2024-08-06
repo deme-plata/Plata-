@@ -86,10 +86,14 @@ import statistics
 import matplotlib.pyplot as plt
 from qiskit.visualization import plot_histogram
 import time
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import os
+import base64
+import re  
+import string
 
-
-
-# Initialize the logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("node")
 
@@ -139,7 +143,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Change this to specific domains as needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -160,15 +164,18 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 fake_users_db = {}
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
+def generate_salt():
+    return base64.b64encode(os.urandom(16)).decode('utf-8')
 
 class User(BaseModel):
     pincode: str
 
-
 class UserInDB(User):
     hashed_pincode: str
     wallet: dict
+    salt: str
+    alias: str  # Add an alias field
+
 
 
 class Token(BaseModel):
@@ -180,18 +187,17 @@ class Token(BaseModel):
 def get_password_hash(password):
     return pwd_context.hash(password)
 
-
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
+def verify_password(plain_password, hashed_password, salt):
+    return pwd_context.verify(plain_password + salt, hashed_password)
 
 def authenticate_user(pincode: str):
     user = fake_users_db.get(pincode)
     if not user:
         return False
-    if not verify_password(pincode, user.hashed_pincode):
+    if not verify_password(pincode, user.hashed_pincode, user.salt):
         return False
     return user
+
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -244,19 +250,25 @@ def decode_token(token: str):
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
-
+def generate_unique_alias():
+    alias_length = 8  # Length of the alias
+    while True:
+        alias = ''.join(random.choices(string.ascii_lowercase + string.digits, k=alias_length))
+        if alias not in fake_users_db:
+            return alias
 
 @app.post("/register", response_model=Token)
 def register(user: User):
     if user.pincode in fake_users_db:
         raise HTTPException(status_code=400, detail="Pincode already registered")
-    hashed_pincode = get_password_hash(user.pincode)
+    salt = generate_salt()
+    hashed_pincode = get_password_hash(user.pincode + salt)
     wallet = {"address": "0x123456", "private_key": "abcd1234"}
-    user_in_db = UserInDB(pincode=user.pincode, hashed_pincode=hashed_pincode, wallet=wallet)
+    alias = generate_unique_alias()  # Generate a unique alias for the user
+    user_in_db = UserInDB(pincode=user.pincode, hashed_pincode=hashed_pincode, salt=salt, wallet=wallet, alias=alias)
     fake_users_db[user.pincode] = user_in_db
     access_token = create_access_token(data={"sub": user.pincode})
     return {"access_token": access_token, "token_type": "bearer", "wallet": wallet}
-
 
 @app.post("/token", response_model=Token)
 def login(user: User):
@@ -265,6 +277,16 @@ def login(user: User):
         raise HTTPException(status_code=400, detail="Invalid credentials")
     access_token = create_access_token(data={"sub": user.pincode})
     return {"access_token": access_token, "token_type": "bearer", "wallet": user_in_db.wallet}
+
+def generate_wallet_address(public_key):
+    public_bytes = public_key.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    hash_bytes = hashlib.sha256(public_bytes).digest()
+    address = "plata" + urlsafe_b64encode(hash_bytes).decode('utf-8').rstrip("=")
+    return address
+
 
 
 def authenticate(token: str = Depends(oauth2_scheme)):
@@ -279,7 +301,6 @@ def authenticate(token: str = Depends(oauth2_scheme)):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-
 class NodeDirectory:
     def __init__(self):
         self.nodes = {}
@@ -291,6 +312,9 @@ class NodeDirectory:
     def add_transaction(self, transaction):
         transaction_hash = transaction.compute_hash()
         self.transactions[transaction_hash] = transaction
+    def get_node_details(self, node_id):
+        with self.lock:
+            return self.nodes.get(node_id)
 
     def register_node(self, node_id, public_key, ip_address, port):
         start_time = time.time()
@@ -552,7 +576,6 @@ class Blockchain:
 import logging
 
 logger = logging.getLogger(__name__)
-
 class QuantumBlockchain:
     def __init__(self, consensus, secret_key, node_directory):
         self.initial_reward = 50.0
@@ -569,25 +592,124 @@ class QuantumBlockchain:
         self.target = 2**(256 - self.difficulty)
         self.consensus = consensus
         self.create_genesis_block()
-        self.miner_address = None  # Add miner_address attribute
+        self.miner_address = None
         self.security_manager = SecurityManager(secret_key)
         self.quantum_state_manager = QuantumStateManager()
-        self.node_directory = NodeDirectory()
-        self.blockchain = Blockchain()  # Initialize Blockchain
-        
+        self.node_directory = node_directory
         self.blocks_since_last_adjustment = 0
-    def get_chain(self):
-        return self.chain
 
-    async def propagate_transaction_to_all_peers(self, transaction_data):
-        nodes = self.node_directory.discover_nodes()
-        for node in nodes:
-            async with grpc.aio.insecure_channel(f'{node["ip_address"]}:{node["port"]}') as channel:
-                stub = DAGKnightStub(channel)
-                transaction_request = FullStateRequest(
-                    # Populate with necessary fields from transaction_data
-                )
-                await stub.FullStateSync(transaction_request)
+        # Event listeners
+        self.new_block_listeners = []
+        self.new_transaction_listeners = []
+
+    def on_new_block(self, callback):
+        self.new_block_listeners.append(callback)
+
+    def on_new_transaction(self, callback):
+        self.new_transaction_listeners.append(callback)
+
+    def get_recent_transactions(self, limit):
+        transactions = []
+        for block in reversed(self.chain):
+            transactions.extend(block.transactions)
+            if len(transactions) >= limit:
+                break
+        return transactions[:limit]
+
+    def get_block_by_hash(self, block_hash):
+        for block in self.chain:
+            if block.hash == block_hash:
+                return block
+        return None
+
+    def calculate_average_block_time(self):
+        if len(self.chain) < 2:
+            return 0
+        block_times = [self.chain[i].timestamp - self.chain[i-1].timestamp for i in range(1, len(self.chain))]
+        return sum(block_times) / len(block_times)
+
+    def calculate_qhins(self):
+        return sum(block.reward for block in self.chain)  # Example calculation
+
+    def calculate_entanglement_strength(self):
+        total_entanglement = sum(block.quantum_signature.count('1') for block in self.chain)
+        return total_entanglement / len(self.chain) if self.chain else 0
+
+    def create_genesis_block(self):
+        genesis_block = QuantumBlock(
+            previous_hash="0",
+            data="Genesis Block",
+            quantum_signature="00",
+            reward=0,
+            transactions=[]
+        )
+        genesis_block.timestamp = time.time()
+        genesis_block.hash = genesis_block.compute_hash()
+        self.chain.append(genesis_block)
+
+    def get_total_supply(self):
+        return sum(self.balances.values())
+
+    def add_new_block(self, data, quantum_signature, transactions, miner_address):
+        previous_block = self.chain[-1]
+        previous_hash = previous_block.hash
+        reward = self.get_block_reward()
+        total_supply = self.get_total_supply()
+
+        if total_supply + reward > self.max_supply:
+            reward = self.max_supply - total_supply
+
+        new_block = QuantumBlock(
+            previous_hash=previous_hash,
+            data=data,
+            quantum_signature=quantum_signature,
+            reward=reward,
+            transactions=transactions,
+            timestamp=time.time()
+        )
+
+        new_block.mine_block(self.difficulty)
+        logger.info(f"Adding new block: {new_block.to_dict()}")
+
+        if self.consensus.validate_block(new_block):
+            self.chain.append(new_block)
+            self.process_transactions(transactions)
+            self.balances[miner_address] = self.balances.get(miner_address, 0) + reward
+            self.update_total_supply(reward)
+            return reward
+        else:
+            logger.error("Block validation failed. Block not added.")
+            raise ValueError("Invalid block")
+
+    def update_total_supply(self, reward):
+        # Example implementation
+        pass
+
+    def process_transactions(self, transactions):
+        for tx in transactions:
+            if isinstance(tx, dict):
+                sender = tx['sender']
+                receiver = tx['receiver']
+                amount = tx['amount']
+            else:
+                sender = tx.sender
+                receiver = tx.receiver
+                amount = tx.amount
+            
+            if self.balances.get(sender, 0) >= amount:
+                self.balances[sender] = self.balances.get(sender, 0) - amount
+                self.balances[receiver] = self.balances.get(receiver, 0) + amount
+            else:
+                logger.warning(f"Insufficient balance for transaction: {tx}")
+
+    def get_block_reward(self):
+        return self.current_reward()
+
+    def current_reward(self):
+        elapsed_time = time.time() - self.start_time
+        halvings = int(elapsed_time // self.halving_interval)
+        reward = self.initial_reward / (2 ** halvings)
+        return reward
 
     def validate_block(self, block):
         logger.info(f"Validating block: {block.to_dict()}")
@@ -611,34 +733,194 @@ class QuantumBlockchain:
         logger.info("Block validation successful")
         return True
 
+    def add_block(self, block):
+        current_time = time.time()
+        if block.timestamp > current_time + 300:  # Allow for a 5-minute future timestamp window
+            logger.warning(f"Block timestamp too far in the future. Current time: {current_time}, Block time: {block.timestamp}")
+            return False
+
+        if not self.validate_block(block):
+            logger.warning("Block validation failed. Block not added.")
+            return False
+
+        self.chain.append(block)
+        self.blocks_since_last_adjustment += 1
+
+        if self.blocks_since_last_adjustment >= self.adjustment_interval:
+            self.adjust_difficulty()
+            self.blocks_since_last_adjustment = 0
+
+        for listener in self.new_block_listeners:
+            listener(block)
+        return True
 
 
+    def adjust_difficulty(self):
+        if len(self.chain) >= self.adjustment_interval:
+            start_block = self.chain[-self.adjustment_interval]
+            end_block = self.chain[-1]
+            
+            total_time = end_block.timestamp - start_block.timestamp
+            
+            if total_time <= 0:
+                logger.error("Total time between blocks is zero or negative. Cannot adjust difficulty.")
+                return
+            
+            avg_time = total_time / (self.adjustment_interval - 1)
+            target_time = self.target_block_time
+            
+            logger.info(f"Start block timestamp: {start_block.timestamp}")
+            logger.info(f"End block timestamp: {end_block.timestamp}")
+            logger.info(f"Total time for last {self.adjustment_interval} blocks: {total_time:.2f} seconds")
+            logger.info(f"Average time per block: {avg_time:.2f} seconds")
+            logger.info(f"Target block time: {target_time:.2f} seconds")
+            logger.info(f"Current difficulty: {self.difficulty}")
+
+            # Calculate the adjustment factor
+            adjustment_factor = target_time / avg_time
+            logger.info(f"Adjustment factor: {adjustment_factor:.2f}")
+
+            # Adjust difficulty based on the adjustment factor
+            if adjustment_factor > 1:
+                new_difficulty = min(int(self.difficulty * adjustment_factor), 256)
+                logger.info(f"Increasing difficulty: {self.difficulty} -> {new_difficulty}")
+            else:
+                new_difficulty = max(int(self.difficulty / adjustment_factor), 1)
+                logger.info(f"Decreasing difficulty: {self.difficulty} -> {new_difficulty}")
+
+            # Update difficulty and target
+            self.difficulty = new_difficulty
+            self.target = 2**(256 - self.difficulty)
+            logger.info(f"New difficulty: {self.difficulty}")
+            logger.info(f"New target: {self.target:.2e}")
+        else:
+            logger.info(f"Not enough blocks to adjust difficulty. Current chain length: {len(self.chain)}")
+
+    def get_balance(self, address):
+        balance = self.balances.get(address, 0)
+        logger.info(f"Balance for {address}: {balance}")
+        return balance
+
+    def add_transaction(self, transaction):
+        logger.debug(f"Adding transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
+        logger.debug(f"Sender balance before transaction: {self.balances.get(transaction.sender, 0)}")
+
+        if self.balances.get(transaction.sender, 0) >= transaction.amount:
+            wallet = Wallet()
+            message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
+            if wallet.verify_signature(message, transaction.signature, transaction.public_key):
+                self.pending_transactions.append(transaction.to_dict())
+                logger.debug(f"Transaction added. Pending transactions count: {len(self.pending_transactions)}")
+
+                for listener in self.new_transaction_listeners:
+                    listener(transaction)
+                return True
+            else:
+                logger.debug(f"Transaction signature verification failed for transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
+        else:
+            logger.debug(f"Transaction failed. Insufficient balance for sender {transaction.sender}")
+
+        return False
 
 
+    async def propagate_transaction_to_all_peers(self, transaction_data):
+        nodes = self.node_directory.discover_nodes()
+        for node in nodes:
+            async with grpc.aio.insecure_channel(f'{node["ip_address"]}:{node["port"]}') as channel:
+                stub = DAGKnightStub(channel)
+                transaction_request = FullStateRequest(
+                    # Populate with necessary fields from transaction_data
+                )
+                await stub.FullStateSync(transaction_request)
 
+    async def propagate_block_to_all_peers(self, block_data):
+        nodes = self.node_directory.discover_nodes()
+        tasks = [self.propagate_block(f"http://{node['ip_address']}:{node['port']}/receive_block", block_data) for node in nodes]
+        results = await asyncio.gather(*tasks)
+        successful_propagations = sum(results)
+        logger.info(f"Successfully propagated block to {successful_propagations}/{len(nodes)} peers")
 
+    async def propagate_block(self, node_url, block_data, retries=5):
+        for attempt in range(retries):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(node_url, json=block_data) as response:
+                        if response.status == 200:
+                            logger.info(f"Block successfully propagated to {node_url}")
+                            return True
+                        else:
+                            logger.warning(f"Failed to propagate block to {node_url}. Status: {response.status}")
+            except Exception as e:
+                logger.error(f"Error propagating block to {node_url}: {str(e)}")
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+        return False
 
+    async def sync_state(self, directory_ip, directory_port):
+        async with grpc.aio.insecure_channel(f'{directory_ip}:{directory_port}') as channel:
+            stub = dagknight_pb2_grpc.DAGKnightStub(channel)
+            request = dagknight_pb2.FullStateRequest()
+            response = await stub.FullStateSync(request)
+            
+            self.chain = [QuantumBlock(
+                previous_hash=blk.previous_hash,
+                data=blk.data,
+                quantum_signature=blk.quantum_signature,
+                reward=blk.reward,
+                transactions=[tx for tx in blk.transactions]
+            ) for blk in response.chain]
+            self.balances = {k: v for k, v in response.balances.items()}
+            self.stakes = {k: v for k, v in response.stakes.items()}
 
+    def stake_coins(self, address, amount):
+        if self.balances.get(address, 0) >= amount:
+            self.balances[address] -= amount
+            self.stakes[address] = self.stakes.get(address, 0) + amount
+            return True
+        return False
 
+    def unstake_coins(self, address, amount):
+        if self.stakes.get(address, 0) >= amount:
+            self.stakes[address] -= amount
+            self.balances[address] = self.balances.get(address, 0) + amount
+            return True
+        return False
 
+    def get_staked_balance(self, address):
+        return self.stakes.get(address, 0)
 
-    def create_genesis_block(self):
-        genesis_block = QuantumBlock(
-            previous_hash="0",
-            data="Genesis Block",
-            quantum_signature="00",
-            reward=0,
-            transactions=[]
+    def get_transactions(self, address):
+        transactions = []
+        for block in self.chain:
+            for tx in block.transactions:
+                if tx['sender'] == address or tx['receiver'] == address:
+                    transactions.append(tx)
+        return transactions
+
+    def full_state_sync(self, request, context):
+        return dagknight_pb2.FullStateResponse(
+            chain=[dagknight_pb2.Block(
+                previous_hash=block.previous_hash,
+                data=block.data,
+                quantum_signature=block.quantum_signature,
+                reward=block.reward,
+                transactions=[dagknight_pb2.Transaction(sender=tx['sender'], receiver=tx['receiver'], amount=tx['amount']) for tx in block.transactions]
+            ) for block in self.chain],
+            balances=self.balances,
+            stakes=self.stakes
         )
-        genesis_block.timestamp = time.time()  # Set the timestamp to the current time
-        genesis_block.hash = genesis_block.compute_hash()
-        self.chain.append(genesis_block)
 
+    def update_balances(self, new_block):
+        for tx in new_block.transactions:
+            transaction = Transaction.from_dict(tx)
+            self.balances[transaction.sender] = self.balances.get(transaction.sender, 0) - transaction.amount
+            self.balances[transaction.receiver] = self.balances.get(transaction.receiver, 0) + transaction.amount
+            logger.info(f"Updated balance for sender {transaction.sender}: {self.balances[transaction.sender]}")
+            logger.info(f"Updated balance for receiver {transaction.receiver}: {self.balances[transaction.receiver]}")
 
-    def get_total_supply(self):
-        total_supply = sum(self.balances.values())
-        logger.info(f"Total supply: {total_supply}")
-        return total_supply
+            # Log total supply after each transaction
+            total_supply = self.get_total_supply()
+            logger.info(f"Total supply after transaction: {total_supply}")
+
     def generate_quantum_signature(self):
         max_attempts = 100
         for _ in range(max_attempts):
@@ -707,261 +989,36 @@ class QuantumBlockchain:
     def hamming_distance(self, s1, s2):
         return sum(c1 != c2 for c1, c2 in zip(s1, s2))
 
-    def adjust_difficulty(self):
-        if len(self.chain) >= self.adjustment_interval:
-            start_block = self.chain[-self.adjustment_interval]
-            end_block = self.chain[-1]
-            
-            total_time = end_block.timestamp - start_block.timestamp
-            
-            if total_time <= 0:
-                logger.error("Total time between blocks is zero or negative. Cannot adjust difficulty.")
-                return
-            
-            avg_time = total_time / (self.adjustment_interval - 1)
-            target_time = self.target_block_time
-            
-            logger.info(f"Start block timestamp: {start_block.timestamp}")
-            logger.info(f"End block timestamp: {end_block.timestamp}")
-            logger.info(f"Total time for last {self.adjustment_interval} blocks: {total_time:.2f} seconds")
-            logger.info(f"Average time per block: {avg_time:.2f} seconds")
-            logger.info(f"Target block time: {target_time:.2f} seconds")
-            logger.info(f"Current difficulty: {self.difficulty}")
-
-            # Calculate the adjustment factor
-            adjustment_factor = target_time / avg_time
-            logger.info(f"Adjustment factor: {adjustment_factor:.2f}")
-
-            # Adjust difficulty based on the adjustment factor
-            if adjustment_factor > 1:
-                new_difficulty = min(int(self.difficulty * adjustment_factor), 256)
-                logger.info(f"Increasing difficulty: {self.difficulty} -> {new_difficulty}")
-            else:
-                new_difficulty = max(int(self.difficulty / adjustment_factor), 1)
-                logger.info(f"Decreasing difficulty: {self.difficulty} -> {new_difficulty}")
-
-            # Update difficulty and target
-            self.difficulty = new_difficulty
-            self.target = 2**(256 - self.difficulty)
-            logger.info(f"New difficulty: {self.difficulty}")
-            logger.info(f"New target: {self.target:.2e}")
-        else:
-            logger.info(f"Not enough blocks to adjust difficulty. Current chain length: {len(self.chain)}")
-
-    def current_reward(self):
-        elapsed_time = time.time() - self.start_time
-        halvings = int(elapsed_time // self.halving_interval)
-        reward = self.initial_reward / (2 ** halvings)
-        logger.info(f"Current reward: {reward}")
-        return reward
-    def get_block_reward(self):
-        return self.current_reward()
-    def add_block(self, block):
-        current_time = time.time()
-        if block.timestamp > current_time + 300:  # Allow for a 5-minute future timestamp window
-            logger.warning(f"Block timestamp too far in the future. Current time: {current_time}, Block time: {block.timestamp}")
-            return False
-
-        if not self.validate_block(block):
-            logger.warning("Block validation failed. Block not added.")
-            return False
-
-        self.chain.append(block)
-        self.blocks_since_last_adjustment += 1
-
-        if self.blocks_since_last_adjustment >= self.adjustment_interval:
-            self.adjust_difficulty()
-            self.blocks_since_last_adjustment = 0
-
-        return True
-
-
-
-
-
-    def add_new_block(self, data, quantum_signature, transactions, miner_address):
-        previous_block = self.chain[-1]
-        previous_hash = previous_block.hash
-        reward = self.get_block_reward()
-        total_supply = self.get_total_supply()
-
-        if total_supply + reward > self.max_supply:
-            reward = self.max_supply - total_supply
-
-        new_block = QuantumBlock(
-            previous_hash=previous_hash,
-            data=data,
-            quantum_signature=quantum_signature,
-            reward=reward,
-            transactions=transactions,
-            timestamp=time.time()
-        )
-
-        new_block.mine_block(self.difficulty)
-        logger.info(f"Adding new block: {new_block.to_dict()}")
-
-        if self.consensus.validate_block(new_block):
-            self.chain.append(new_block)
-            
-            # Process transactions before adding the reward
-            self.process_transactions(transactions)
-            
-            # Add the reward to the miner's balance
-            self.balances[miner_address] = self.balances.get(miner_address, 0) + reward
-            logger.info(f"Updated balance for miner {miner_address}: {self.balances[miner_address]}")
-            
-            # Update total supply after adding the reward
-            self.update_total_supply(reward)
-
-            total_supply = self.get_total_supply()
-            logger.info(f"Total supply after adding block: {total_supply:.2e}")
-
-            return reward
-        else:
-            logger.error("Block validation failed. Block not added to the chain.")
-            raise ValueError("Invalid block")
-
-
-
-    def update_balances(self, new_block):
-        for tx in new_block.transactions:
-            transaction = Transaction.from_dict(tx)
-            self.balances[transaction.sender] = self.balances.get(transaction.sender, 0) - transaction.amount
-            self.balances[transaction.receiver] = self.balances.get(transaction.receiver, 0) + transaction.amount
-            logger.info(f"Updated balance for sender {transaction.sender}: {self.balances[transaction.sender]}")
-            logger.info(f"Updated balance for receiver {transaction.receiver}: {self.balances[transaction.receiver]}")
-
-            # Log total supply after each transaction
-            total_supply = self.get_total_supply()
-            logger.info(f"Total supply after transaction: {total_supply}")
-    def process_transactions(self, transactions):
-        for tx in transactions:
-            if isinstance(tx, dict):
-                sender = tx['sender']
-                receiver = tx['receiver']
-                amount = tx['amount']
-            else:  # Assume it's a Transaction object
-                sender = tx.sender
-                receiver = tx.receiver
-                amount = tx.amount
-            
-            if self.balances.get(sender, 0) >= amount:
-                self.balances[sender] = self.balances.get(sender, 0) - amount
-                self.balances[receiver] = self.balances.get(receiver, 0) + amount
-                logger.info(f"Updated balance for sender {sender}: {self.balances[sender]}")
-                logger.info(f"Updated balance for receiver {receiver}: {self.balances[receiver]}")
-            else:
-                logger.warning(f"Insufficient balance for transaction: {tx}")
-
-        total_supply = self.get_total_supply()
-        logger.info(f"Total supply after processing transactions: {total_supply}")
-
-    def add_transaction(self, transaction):
-        logger.debug(f"Adding transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
-        logger.debug(f"Sender balance before transaction: {self.balances.get(transaction.sender, 0)}")
-
-        # Check if the sender has enough balance
-        if self.balances.get(transaction.sender, 0) >= transaction.amount:
-            # Verify the transaction signature
-            wallet = Wallet()
-            message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
-            if wallet.verify_signature(message, transaction.signature, transaction.public_key):
-                self.pending_transactions.append(transaction.to_dict())
-                logger.debug(f"Transaction added. Pending transactions count: {len(self.pending_transactions)}")
-                return True
-            else:
-                logger.debug(f"Transaction signature verification failed for transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
-        else:
-            logger.debug(f"Transaction failed. Insufficient balance for sender {transaction.sender}")
-
-        return False
-
-
-
-
-    def get_balance(self, address):
-        balance = self.balances.get(address, 0)
-        logger.info(f"Balance for {address}: {balance}")
-        return balance
-
-    def stake_coins(self, address, amount):
-        if self.balances.get(address, 0) >= amount:
-            self.balances[address] -= amount
-            self.stakes[address] = self.stakes.get(address, 0) + amount
-            return True
-        return False
-
-    def unstake_coins(self, address, amount):
-        if self.stakes.get(address, 0) >= amount:
-            self.stakes[address] -= amount
-            self.balances[address] = self.balances.get(address, 0) + amount
-            return True
-        return False
-
-    def get_staked_balance(self, address):
-        return self.stakes.get(address, 0)
-
-    def get_transactions(self, address):
-        transactions = []
-        for block in self.chain:
-            for tx in block.transactions:
-                if tx['sender'] == address or tx['receiver'] == address:
-                    transactions.append(tx)
-        return transactions
-
-    def full_state_sync(self, request, context):
-        return dagknight_pb2.FullStateResponse(
-            chain=[dagknight_pb2.Block(
-                previous_hash=block.previous_hash,
-                data=block.data,
-                quantum_signature=block.quantum_signature,
-                reward=block.reward,
-                transactions=[dagknight_pb2.Transaction(sender=tx['sender'], receiver=tx['receiver'], amount=tx['amount']) for tx in block.transactions]
-            ) for block in self.chain],
-            balances=self.balances,
-            stakes=self.stakes
-        )
     def update_total_supply(self, reward):
         total_supply = self.get_total_supply()
         new_total_supply = total_supply + reward
         logger.info(f"Total supply updated from {total_supply:.2e} to {new_total_supply:.2e}")
-    async def propagate_block_to_all_peers(self, block_data):
-        nodes = self.node_directory.discover_nodes()
-        tasks = [self.propagate_block(f"http://{node['ip_address']}:{node['port']}/receive_block", block_data) for node in nodes]
-        results = await asyncio.gather(*tasks)
-        successful_propagations = sum(results)
-        logger.info(f"Successfully propagated block to {successful_propagations}/{len(nodes)} peers")
+    def get_recent_transactions(self, limit):
+        transactions = []
+        for block in reversed(self.chain):
+            transactions.extend(block.transactions)
+            if len(transactions) >= limit:
+                break
+        return transactions[:limit]
 
-    async def propagate_block(self, node_url, block_data, retries=5):
-        for attempt in range(retries):
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(node_url, json=block_data) as response:
-                        if response.status == 200:
-                            logger.info(f"Block successfully propagated to {node_url}")
-                            return True
-                        else:
-                            logger.warning(f"Failed to propagate block to {node_url}. Status: {response.status}")
-            except Exception as e:
-                logger.error(f"Error propagating block to {node_url}: {str(e)}")
-            await asyncio.sleep(2 ** attempt)  # Exponential backoff
-        return False
+    def get_block_by_hash(self, block_hash):
+        for block in self.chain:
+            if block.hash == block_hash:
+                return block
+        return None
 
-    async def sync_state(self, directory_ip, directory_port):
-        async with grpc.aio.insecure_channel(f'{directory_ip}:{directory_port}') as channel:
-            stub = dagknight_pb2_grpc.DAGKnightStub(channel)
-            request = dagknight_pb2.FullStateRequest()
-            response = await stub.FullStateSync(request)
-            
-            self.chain = [QuantumBlock(
-                previous_hash=blk.previous_hash,
-                data=blk.data,
-                quantum_signature=blk.quantum_signature,
-                reward=blk.reward,
-                transactions=[tx for tx in blk.transactions]
-            ) for blk in response.chain]
-            self.balances = {k: v for k, v in response.balances.items()}
-            self.stakes = {k: v for k, v in response.stakes.items()}
+    def calculate_average_block_time(self):
+        if len(self.chain) < 2:
+            return 0
+        block_times = [self.chain[i].timestamp - self.chain[i-1].timestamp for i in range(1, len(self.chain))]
+        return sum(block_times) / len(block_times)
+
+    def calculate_qhins(self):
+        return sum(block.reward for block in self.chain)
+
+    def calculate_entanglement_strength(self):
+        total_entanglement = sum(block.quantum_signature.count('1') for block in self.chain)
+        return total_entanglement / len(self.chain) if self.chain else 0
 
 
 from pydantic import BaseModel, Field
@@ -1042,11 +1099,17 @@ class Wallet(BaseModel):
         return decrypted_message.decode('utf-8')
 
     def get_address(self):
-        return hashlib.sha256(self.get_public_key().encode()).hexdigest()
+        public_key_bytes = self.get_public_key().encode()
+        address = "plata" + hashlib.sha256(public_key_bytes).hexdigest()
+        return address
+
+    def generate_unique_alias(self):
+        alias_length = 8  # Length of the alias
+        alias = ''.join(random.choices(string.ascii_lowercase + string.digits, k=alias_length))
+        return alias
 
     class Config:
         arbitrary_types_allowed = True
-
 
 
 
@@ -1267,14 +1330,45 @@ consensus.blockchain = blockchain
 
 class ImportWalletRequest(BaseModel):
     mnemonic: str
-
-
 @app.post("/import_wallet")
 def import_wallet(request: ImportWalletRequest, pincode: str = Depends(authenticate)):
-    wallet = Wallet(mnemonic=request.mnemonic)
-    address = wallet.get_address()
-    private_key = wallet.private_key_pem()
-    return {"address": address, "private_key": private_key}
+    mnemonic = Mnemonic("english")
+    seed = mnemonic.to_seed(request.mnemonic)
+
+    # Use the first 32 bytes of the seed to generate a deterministic private key
+    private_key = ec.derive_private_key(
+        int.from_bytes(seed[:32], byteorder="big"),
+        ec.SECP256R1(),
+        default_backend()
+    )
+
+    public_key = private_key.public_key()
+
+    # Generate address from public key
+    address = generate_wallet_address(public_key)
+
+    # Serialize private key
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    ).decode('utf-8')
+
+    # Update the user's wallet in the database
+    if pincode in fake_users_db:
+        alias = generate_unique_alias()
+        fake_users_db[pincode].wallet = {
+            "address": address,
+            "private_key": private_key_pem,
+            "mnemonic": request.mnemonic,
+            "alias": alias  # Store the alias
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Pincode not registered")
+
+    # Fetch and return the balance for the imported wallet
+    balance = blockchain.get_balance(address)
+    return {"address": address, "private_key": private_key_pem, "mnemonic": request.mnemonic, "balance": balance, "alias": alias}
 
 
 @app.post("/create_pq_wallet")
@@ -1284,51 +1378,93 @@ def create_pq_wallet(pincode: str = Depends(authenticate)):
     pq_public_key = pq_wallet.get_pq_public_key()
     return {"address": address, "pq_public_key": pq_public_key}
 
-
 @app.post("/create_wallet")
 def create_wallet(pincode: str = Depends(authenticate)):
     wallet = Wallet()
     address = wallet.get_address()
     private_key = wallet.private_key_pem()
     mnemonic = wallet.generate_mnemonic()
-    return {"address": address, "private_key": private_key, "mnemonic": mnemonic}
+    alias = generate_unique_alias()
+    
+    if pincode in fake_users_db:
+        fake_users_db[pincode].wallet = {
+            "address": address,
+            "private_key": private_key,
+            "mnemonic": mnemonic,
+            "alias": alias  # Store the alias
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Pincode not registered")
+
+    return {"address": address, "private_key": private_key, "mnemonic": mnemonic, "alias": alias}
 
 
 class AddressRequest(BaseModel):
     address: str
-
+class WalletRequest(BaseModel):
+    wallet_address: str
 
 @app.post("/get_balance")
-def get_balance(request: AddressRequest, pincode: str = Depends(authenticate)):
-    address = request.address
-    balance = blockchain.get_balance(address)
-    transactions = [
-        {
-            "tx_hash": tx['hash'],
-            "sender": tx['sender'],
-            "receiver": tx['receiver'],
-            "amount": tx['amount'],
-            "timestamp": tx['timestamp']
-        } for tx in blockchain.get_transactions(address)
-    ]
-    return {"balance": balance, "transactions": transactions}
+def get_balance(request: WalletRequest):
+    wallet_address = request.wallet_address
+    try:
+        # Ensure the wallet address is valid
+        if not wallet_address or not re.match(r'^plata[a-f0-9]{64}$', wallet_address):
+            logger.error(f"Invalid wallet address format: {wallet_address}")
+            raise HTTPException(status_code=422, detail="Invalid wallet address format")
+
+        balance = blockchain.get_balance(wallet_address)
+        transactions = [
+            {
+                "tx_hash": tx.get('hash', 'unknown'),
+                "sender": tx.get('sender', 'unknown'),
+                "receiver": tx.get('receiver', 'unknown'),
+                "amount": tx.get('amount', 0.0),
+                "timestamp": tx.get('timestamp', 'unknown')
+            }
+            for tx in blockchain.get_transactions(wallet_address)
+        ]
+        logger.info(f"Balance retrieved for address {wallet_address}: {balance}")
+        return {"balance": balance, "transactions": transactions}
+    except KeyError as e:
+        logger.error(f"Missing key in transaction: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: missing key {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 
 @app.post("/send_transaction")
-def send_transaction(transaction: Transaction, pincode: str = Depends(authenticate)):
+async def send_transaction(transaction: Transaction, pincode: str = Depends(authenticate)):
     try:
-        logger.info("Received transaction request.")
-        
+        logger.info(f"Received transaction request: {transaction}")
+
+        # Check if receiver is an alias and get the corresponding address
+        if transaction.receiver.startswith("plata"):
+            receiver_address = transaction.receiver
+        else:
+            receiver_alias = transaction.receiver
+            receiver_address = None
+            for user in fake_users_db.values():
+                if user.wallet['alias'] == receiver_alias:
+                    receiver_address = user.wallet['address']
+                    break
+            if not receiver_address:
+                raise HTTPException(status_code=400, detail="Invalid receiver alias")
+
+        transaction.receiver = receiver_address
+
         # Create a wallet from the private key
         wallet = Wallet(private_key=transaction.private_key)
         logger.info("Created wallet from private key.")
-        
+
         # Create the message to sign
         message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
-        
+
         # Sign the message
         transaction.signature = wallet.sign_message(message)
         logger.info(f"Transaction signed with signature: {transaction.signature}")
-        
+
         # Add the public key to the transaction
         transaction.public_key = wallet.get_public_key()
         logger.info(f"Public key added to transaction: {transaction.public_key}")
@@ -1336,6 +1472,11 @@ def send_transaction(transaction: Transaction, pincode: str = Depends(authentica
         # Verify if the transaction can be added to the blockchain
         if blockchain.add_transaction(transaction):
             logger.info(f"Transaction from {transaction.sender} to {transaction.receiver} added to blockchain.")
+
+            # Broadcast the new balance to all connected clients
+            new_balance = blockchain.get_balance(transaction.sender)
+            await manager.broadcast(f"New balance for {transaction.sender}: {new_balance}")
+
             return {"success": True, "message": "Transaction added successfully."}
         else:
             logger.info(f"Transaction from {transaction.sender} to {transaction.receiver} failed to add: insufficient balance")
@@ -1349,6 +1490,7 @@ def send_transaction(transaction: Transaction, pincode: str = Depends(authentica
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 
 @app.post("/send_batch_transactions")
@@ -1394,6 +1536,9 @@ def deploy_contract(request: DeployContractRequest):
 
 class MineBlockRequest(BaseModel):
     node_id: str
+    wallet_address: str  
+    node_ip: str
+    node_port: int
 
 
 class QuantumHolographicNetwork:
@@ -1574,73 +1719,81 @@ def mining_algorithm(iterations=5):
         logging.error(f"Error in mining_algorithm: {str(e)}")
         logging.error(traceback.format_exc())  # Log the traceback
         return {"success": False, "message": f"Error in mining_algorithm: {str(e)}"}
-
 @app.post("/mine_block")
-def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
+async def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
     global continue_mining
     node_id = request.node_id
-    miner_address = request.node_id
+    wallet_address = request.wallet_address
+    node_ip = request.node_ip
+    node_port = request.node_port
 
     try:
-        logging.info(f"Starting mining process for node {node_id}")
+        logger.info(f"Received mining request: {request.dict()}")
+    except Exception as e:
+        logger.error(f"Error parsing request: {str(e)}")
+        raise HTTPException(status_code=422, detail="Invalid request format")
+
+    try:
+        logger.info(f"Starting mining process for node {node_id} with wallet {wallet_address} at {node_ip}:{node_port}")
         iteration_count = 0
-        max_iterations = 20  # Set a maximum number of iterations to prevent endless looping
+        max_iterations = 20
 
         while continue_mining and iteration_count < max_iterations:
             start_time = time.time()
 
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(mining_algorithm, iterations=5)  # Run the simulation multiple times
+                future = executor.submit(mining_algorithm, iterations=2)
                 try:
-                    result = future.result(timeout=300)  # 5 minutes timeout
-                    logging.info("Mining algorithm completed within timeout")
+                    result = future.result(timeout=300)
+                    logger.info("Mining algorithm completed within timeout")
                 except TimeoutError:
-                    logging.error("Mining algorithm timed out after 5 minutes")
-                    continue  # Continue mining even if there's a timeout
+                    logger.error("Mining algorithm timed out after 5 minutes")
+                    continue
 
             if isinstance(result, dict) and not result.get("success", True):
-                logging.error(f"Mining algorithm failed: {result.get('message')}")
-                continue  # Continue mining even if there's an error
+                logger.error(f"Mining algorithm failed: {result.get('message')}")
+                continue
 
             counts, energy, entanglement_matrix, qhins, hashrate = result
             end_time = time.time()
 
-            logging.info(f"Quantum Annealing Simulation completed in {end_time - start_time:.2f} seconds")
-            logging.info("Checking mining conditions")
+            logger.info(f"Quantum Annealing Simulation completed in {end_time - start_time:.2f} seconds")
+            logger.info("Checking mining conditions")
 
-            # Log the probabilities of all states
-            for state, probability in counts.items():
-                logging.info(f"State: {state}, Probability: {probability:.6f}")
-
-            # New condition to check if any probability exceeds a lower threshold
             max_state = max(counts, key=counts.get)
             max_prob = counts[max_state]
 
-            # Cumulative probability of top N states
             top_n = 10
             sorted_probs = sorted(counts.values(), reverse=True)
             cumulative_prob = sum(sorted_probs[:top_n])
 
-            if cumulative_prob > 0.01:  # Adjusted cumulative threshold to be lower
-                logging.info(f"Mining condition met with cumulative probability of top {top_n} states: {cumulative_prob:.6f}, generating quantum signature")
+            if cumulative_prob > 0.01:
+                logger.info(f"Mining condition met with cumulative probability of top {top_n} states: {cumulative_prob:.6f}, generating quantum signature")
                 quantum_signature = blockchain.generate_quantum_signature()
 
-                logging.info("Adding block to blockchain")
-                reward = blockchain.add_new_block(f"Block mined by {node_id}", quantum_signature, blockchain.pending_transactions, miner_address)
+                logger.info("Adding block to blockchain")
+                reward = blockchain.add_new_block(f"Block mined by {node_id}", quantum_signature, blockchain.pending_transactions, wallet_address)
                 blockchain.pending_transactions = []
+                logger.info(f"Reward of {reward} QuantumDAGKnight Coins added to wallet {wallet_address}")
 
-                # Adjust the difficulty after adding a block
                 blockchain.adjust_difficulty()
 
-                logging.info(f"Node {node_id} mined a block and earned {reward} QuantumDAGKnight Coins")
-                propagate_block_to_peers(f"Block mined by {node_id}", quantum_signature, blockchain.chain[-1].transactions, miner_address)
+                logger.info(f"Node {node_id} mined a block and earned {reward} QuantumDAGKnight Coins")
+                propagate_block_to_peers(f"Block mined by {node_id}", quantum_signature, blockchain.chain[-1].transactions, wallet_address)
 
                 hash_rate = 1 / (end_time - start_time)
-                logging.info(f"Mining Successful. Hash Rate: {hash_rate:.2f} hashes/second")
-                logging.info(f"Mining Time: {end_time - start_time:.2f} seconds")
-                logging.info(f"Quantum State Probabilities: {counts}")
-                logging.info(f"Entanglement Matrix: {entanglement_matrix.tolist()}")
-                logging.info(f"Quantum Hash Information Number: {qhins:.6f}")
+                logger.info(f"Mining Successful. Hash Rate: {hash_rate:.2f} hashes/second")
+                logger.info(f"Mining Time: {end_time - start_time:.2f} seconds")
+                logger.info(f"Quantum State Probabilities: {counts}")
+                logger.info(f"Entanglement Matrix: {entanglement_matrix.tolist()}")
+                logger.info(f"Quantum Hash Information Number: {qhins:.6f}")
+
+                updated_balance = blockchain.get_balance(wallet_address)
+                await manager.broadcast(json.dumps({
+                    "type": "balance_update",
+                    "wallet_address": wallet_address,
+                    "balance": updated_balance
+                }))
 
                 return {
                     "success": True,
@@ -1653,18 +1806,18 @@ def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
                     "hashrate": hashrate
                 }
             else:
-                logging.warning(f"Mining failed. Condition not met. Highest probability state: {max_state} with probability: {max_prob:.6f}")
+                logger.warning(f"Mining failed. Condition not met. Highest probability state: {max_state} with probability: {max_prob:.6f}")
                 iteration_count += 1
                 if iteration_count >= max_iterations:
-                    logging.error(f"Maximum number of iterations ({max_iterations}) reached. Stopping mining.")
-                    break  # Stop mining if maximum iterations reached
-                continue  # Continue mining even if the condition is not met
+                    logger.error(f"Maximum number of iterations ({max_iterations}) reached. Stopping mining.")
+                    break
+                continue
 
         return {"success": False, "message": "Mining failed after maximum iterations."}
 
     except Exception as e:
-        logging.error(f"Error during mining: {str(e)}")
-        logging.error(traceback.format_exc())  # Log the traceback
+        logger.error(f"Error during mining: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error during mining: {str(e)}")
 
 async def propagate_block(node_url, block_data, retries=5):
@@ -2260,6 +2413,199 @@ def run_tests():
     suite = loader.discover('.', pattern='test_*.py')  # Adjust pattern to match your test files
     runner = unittest.TextTestRunner()
     runner.run(suite)
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+        self.subscriptions = {}
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+        for client_id in list(self.subscriptions.keys()):
+            if websocket in self.subscriptions[client_id]:
+                self.subscriptions[client_id].remove(websocket)
+                if not self.subscriptions[client_id]:
+                    del self.subscriptions[client_id]
+
+    async def subscribe(self, websocket: WebSocket, client_id: str):
+        if client_id not in self.subscriptions:
+            self.subscriptions[client_id] = []
+        self.subscriptions[client_id].append(websocket)
+
+    async def unsubscribe(self, websocket: WebSocket, client_id: str):
+        if client_id in self.subscriptions:
+            self.subscriptions[client_id].remove(websocket)
+            if not self.subscriptions[client_id]:
+                del self.subscriptions[client_id]
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+    async def broadcast_new_block(self, block: QuantumBlock):
+        message = json.dumps({
+            "type": "new_block",
+            "data": block.to_dict()
+        })
+        await self.broadcast(message)
+
+    async def broadcast_new_transaction(self, transaction: Transaction):
+        message = json.dumps({
+            "type": "new_transaction",
+            "data": transaction.to_dict()
+        })
+        await self.broadcast(message)
+
+    async def broadcast_network_stats(self, stats: dict):
+        message = json.dumps({
+            "type": "network_stats",
+            "data": stats
+        })
+        await self.broadcast(message)
+async def periodic_network_stats_update():
+    while True:
+        stats = await get_network_stats()
+        await manager.broadcast_network_stats(stats)
+        await asyncio.sleep(60)  # Update every minute
+@app.get("/network_stats")
+async def get_network_stats(pincode: str = Depends(authenticate)):
+    try:
+        total_nodes = len(node_directory.discover_nodes())
+        total_transactions = blockchain.globalMetrics.totalTransactions
+        total_blocks = len(blockchain.chain)
+        average_block_time = calculate_average_block_time(blockchain.chain)
+        current_difficulty = blockchain.difficulty
+        total_supply = blockchain.get_total_supply()
+        
+        return {
+            "total_nodes": total_nodes,
+            "total_transactions": total_transactions,
+            "total_blocks": total_blocks,
+            "average_block_time": average_block_time,
+            "current_difficulty": current_difficulty,
+            "total_supply": total_supply
+        }
+    except Exception as e:
+        logger.error(f"Error fetching network stats: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching network stats")
+@app.get("/get_node_details/{node_id}")
+def get_node_details(node_id: str):
+    node_details = node_directory.get_node_details(node_id)
+    if not node_details:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return node_details
+@app.get("/node_performance/{node_id}")
+async def get_node_performance(node_id: str, pincode: str = Depends(authenticate)):
+    try:
+        node_stats = node_directory.get_performance_stats()
+        return {
+            "node_id": node_id,
+            "avg_mining_time": node_stats.get("avg_mining_time", 0),
+            "total_blocks_mined": node_stats.get("total_blocks_mined", 0),
+            "hash_rate": node_stats.get("hash_rate", 0),
+            "uptime": node_stats.get("uptime", 0)
+        }
+    except Exception as e:
+        logger.error(f"Error fetching node performance: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching node performance")
+
+@app.get("/quantum_metrics")
+async def get_quantum_metrics(pincode: str = Depends(authenticate)):
+    try:
+        qhins = calculate_qhins(blockchain.chain)
+        entanglement_strength = calculate_entanglement_strength(blockchain.chain)
+        coherence_ratio = blockchain.globalMetrics.coherenceRatio
+        return {
+            "qhins": qhins,
+            "entanglement_strength": entanglement_strength,
+            "coherence_ratio": coherence_ratio
+        }
+    except Exception as e:
+        logger.error(f"Error fetching quantum metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching quantum metrics")
+
+@app.get("/recent_transactions")
+async def get_recent_transactions(limit: int = 10, pincode: str = Depends(authenticate)):
+    try:
+        recent_txs = blockchain.get_recent_transactions(limit)
+        return [tx.to_dict() for tx in recent_txs]
+    except Exception as e:
+        logger.error(f"Error fetching recent transactions: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching recent transactions")
+
+@app.get("/block_details/{block_hash}")
+async def get_block_details(block_hash: str, pincode: str = Depends(authenticate)):
+    try:
+        block = blockchain.get_block_by_hash(block_hash)
+        if block:
+            return block.to_dict()
+        else:
+            raise HTTPException(status_code=404, detail="Block not found")
+    except Exception as e:
+        logger.error(f"Error fetching block details: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching block details")
+# Helper function to calculate average block time
+def calculate_average_block_time(chain):
+    if len(chain) < 2:
+        return 0  # Not enough blocks to calculate an average
+    
+    block_times = []
+    for i in range(1, len(chain)):
+        block_time = chain[i].timestamp - chain[i - 1].timestamp
+        block_times.append(block_time)
+    
+    if block_times:
+        return sum(block_times) / len(block_times)
+    else:
+        return 0
+
+# Helper function to calculate Quantum Hash Information Number (QHIN)
+def calculate_qhins(chain):
+    # Assume that each block has a 'quantum_hash_rate' attribute for QHIN calculation
+    qhins = sum(block.quantum_hash_rate for block in chain) / len(chain)
+    return qhins
+
+# Helper function to calculate entanglement strength
+def calculate_entanglement_strength(chain):
+    total_entanglement_strength = 0
+    for block in chain:
+        total_entanglement_strength += sum(tx['entanglement_strength'] for tx in block.transactions)
+    
+    average_entanglement_strength = total_entanglement_strength / len(chain)
+    return average_entanglement_strength
+
+manager = ConnectionManager()
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Handle received data if necessary
+            await manager.broadcast(f"Client {client_id} says: {data}")
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        await manager.broadcast(f"Client {client_id} left the chat")
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    user = verify_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return user
+# Endpoint to get address from alias
+@app.post("/get_address_from_alias")
+def get_address_from_alias(alias: str):
+    for user in fake_users_db.values():
+        if user.wallet['alias'] == alias:
+            return {"address": user.wallet['address']}
+    raise HTTPException(status_code=400, detail="Alias not found")
+
+
+@app.get("/")
+def get():
+    return {"message": "WebSocket server is running"}
 
 def main():
     import sys
@@ -2269,7 +2615,7 @@ def main():
         return
 
     # Node details
-    node_id = os.getenv("NODE_ID", "node_1")  # Use environment variables or change manually
+    node_id = os.getenv("NODE_ID", "node_1")
     public_key = "public_key_example"
     ip_address = os.getenv("IP_ADDRESS", "127.0.0.1")
     grpc_port = int(os.getenv("GRPC_PORT", 50502))
@@ -2284,7 +2630,11 @@ def main():
     consensus = Consensus(blockchain=None)
 
     # Initialize the blockchain with the consensus and secret key
+    global blockchain  # Make blockchain global so it can be accessed by endpoints
     blockchain = QuantumBlockchain(consensus, secret_key, node_directory)
+
+    # Update the consensus to point to the correct blockchain
+    consensus.blockchain = blockchain
 
     # Start the directory service in a separate thread
     directory_service_thread = threading.Thread(target=serve_directory_service)
@@ -2301,8 +2651,21 @@ def main():
     discovery_thread = threading.Thread(target=periodically_discover_nodes, args=(directory_ip, directory_port))
     discovery_thread.start()
 
+    # Set up event loop for asynchronous tasks
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Start periodic network stats update
+    loop.create_task(periodic_network_stats_update())
+
+    # Set up blockchain event listeners
+    blockchain.on_new_block(manager.broadcast_new_block)
+    blockchain.on_new_transaction(manager.broadcast_new_transaction)
+
     # Start the FastAPI server
-    uvicorn.run(app, host="0.0.0.0", port=api_port)
+    config = uvicorn.Config(app, host="0.0.0.0", port=api_port)
+    server = uvicorn.Server(config)
+    loop.run_until_complete(server.serve())
 
 if __name__ == "__main__":
     main()
