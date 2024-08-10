@@ -1,6 +1,6 @@
-# BitKnight Coin
+# Plata Coin
 
-🚀 Introducing BitKnight Coin - the future of blockchain technology! 🌐 Our Quantum DAGKnight node leverages the power of the Quantum Holographic Information Network (QHIN) for unparalleled security and efficiency. Join us in revolutionizing the crypto world! #Blockchain #QuantumComputing #CryptoInnovation #BitKnightCoin #QHIN #TechRevolution 💎
+🚀 Introducing Plata Coin - the future of blockchain technology! 🌐 Our Quantum DAGKnight node leverages the power of the Quantum Holographic Information Network (QHIN) for unparalleled security and efficiency. Join us in revolutionizing the crypto world! #Blockchain #QuantumComputing #CryptoInnovation #BitKnightCoin #QHIN #TechRevolution 💎 qhin.cashewstable.com
 
 ## Table of Contents
 
@@ -14,7 +14,7 @@
 
 ## Introduction
 
-BitKnight Coin is a cutting-edge cryptocurrency that utilizes quantum algorithms to secure the network and validate transactions. By leveraging the Quantum Holographic Information Network (QHIN), BitKnight Coin aims to solve complex scientific problems while ensuring the highest level of security and efficiency.
+Plata Coin is a cutting-edge cryptocurrency that utilizes quantum algorithms to secure the network and validate transactions. By leveraging the Quantum Holographic Information Network (QHIN), Plata Coin aims to solve complex scientific problems while ensuring the highest level of security and efficiency.
 
 ## Features
 
@@ -24,7 +24,7 @@ BitKnight Coin is a cutting-edge cryptocurrency that utilizes quantum algorithms
 
 ## Installation
 
-To install BitKnight Coin, follow these steps:
+To install Plata Coin, follow these steps:
 
 1. Clone the repository:
     ```bash
@@ -45,7 +45,7 @@ To install BitKnight Coin, follow these steps:
 
 ## Usage
 
-To run the BitKnight Coin project, use the following commands:
+To run the PLata Coin project, use the following commands:
 
 
 1. Start the gRPC server:
@@ -63,7 +63,7 @@ export SECRET_KEY="your_secret_key"
 
 ## Mining
 
-Quantum mining in BitKnight leverages quantum algorithms to solve complex problems, securing the network and validating transactions. Quantum miners engage in computations that not only secure the network but also contribute to solving profound scientific problems.
+Quantum mining in Plata leverages quantum algorithms to solve complex problems, securing the network and validating transactions. Quantum miners engage in computations that not only secure the network but also contribute to solving profound scientific problems.
 
 ### Quantum Algorithms for Network Security and Transaction Validation
 
@@ -77,7 +77,7 @@ Quantum mining in BitKnight leverages quantum algorithms to solve complex proble
 
 ## Contributing
 
-We welcome contributions to BitKnight Coin! If you would like to contribute, please follow these steps:
+We welcome contributions to Plata  Coin! If you would like to contribute, please follow these steps:
 
 1. Fork the repository.
 2. Create a new branch (`git checkout -b feature-branch`).
