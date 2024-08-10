@@ -2,36 +2,58 @@ syntax = "proto3";
 
 package dagknight;
 
+// The DAGKnight service definition.
 service DAGKnight {
-  rpc SendQuantumState (QuantumStateRequest) returns (QuantumStateResponse);
-  rpc RequestConsensus (ConsensusRequest) returns (ConsensusResponse);
-  rpc RegisterNode (RegisterNodeRequest) returns (RegisterNodeResponse);
-  rpc DiscoverNodes (DiscoverNodesRequest) returns (DiscoverNodesResponse);
-  rpc MineBlock (MineBlockRequest) returns (MineBlockResponse);
-  rpc StakeCoins (StakeCoinsRequest) returns (StakeCoinsResponse);
-  rpc UnstakeCoins (UnstakeCoinsRequest) returns (UnstakeCoinsResponse);
-  rpc GetStakedBalance (GetStakedBalanceRequest) returns (GetStakedBalanceResponse);
+  // Method to sync full state
+  rpc FullStateSync (FullStateRequest) returns (FullStateResponse) {}
+
+  // Method to register a node
+  rpc RegisterNode (RegisterNodeRequest) returns (RegisterNodeResponse) {}
+  
+  // Method to discover nodes
+  rpc DiscoverNodes (DiscoverNodesRequest) returns (DiscoverNodesResponse) {}
+  
+  // Method to propagate a block
+  rpc PropagateBlock (PropagateBlockRequest) returns (PropagateBlockResponse) {}
+  
+  // Method to request consensus
+  rpc RequestConsensus (ConsensusRequest) returns (ConsensusResponse) {}
+  
+  // Method to mine a block
+  rpc MineBlock (MineBlockRequest) returns (MineBlockResponse) {}
+  
+  // Method to add a transaction
+  rpc AddTransaction (AddTransactionRequest) returns (AddTransactionResponse) {}
+  
+  // Method to get a block
+  rpc GetBlock (GetBlockRequest) returns (GetBlockResponse) {}
+  
+  // Method to get a transaction
+  rpc GetTransaction (GetTransactionRequest) returns (GetTransactionResponse) {}
+  
+  // Method to get balance
+  rpc GetBalance (GetBalanceRequest) returns (GetBalanceResponse) {}
+
+  // Method to get blockchain
+  rpc GetBlockchain (GetBlockchainRequest) returns (GetBlockchainResponse) {}
+
+  // New RPC methods for exchange actions
+  rpc PropagateOrder (PropagateOrderRequest) returns (PropagateOrderResponse) {}
+  rpc PropagateTrade (PropagateTradeRequest) returns (PropagateTradeResponse) {}
+  rpc PropagateLiquidityChange (PropagateLiquidityChangeRequest) returns (PropagateLiquidityChangeResponse) {}
 }
 
-message QuantumStateRequest {
-  string node_id = 1;
-  string quantum_state = 2;
-  int32 shard_id = 3;
+// Request message for FullStateSync
+message FullStateRequest {}
+
+// Response message for FullStateSync
+message FullStateResponse {
+  repeated Block chain = 1;
+  map<string, float> balances = 2;
+  map<string, float> stakes = 3;
 }
 
-message QuantumStateResponse {
-  bool success = 1;
-}
-
-message ConsensusRequest {
-  repeated string node_ids = 1;
-  float network_quality = 2;
-}
-
-message ConsensusResponse {
-  string consensus_result = 1;
-}
-
+// Request message for RegisterNode
 message RegisterNodeRequest {
   string node_id = 1;
   string public_key = 2;
@@ -39,49 +61,169 @@ message RegisterNodeRequest {
   int32 port = 4;
 }
 
+// Response message for RegisterNode
 message RegisterNodeResponse {
   bool success = 1;
+  string magnet_link = 2;
 }
 
+// Request message for DiscoverNodes
 message DiscoverNodesRequest {}
 
+// Response message for DiscoverNodes
 message DiscoverNodesResponse {
   repeated string magnet_links = 1;
 }
 
+// Request message for PropagateBlock
+message PropagateBlockRequest {
+  Block block = 1;
+  string miner_address = 2;
+}
+
+// Response message for PropagateBlock
+message PropagateBlockResponse {
+  bool success = 1;
+}
+
+// Request message for Consensus
+message ConsensusRequest {
+  repeated string node_ids = 1;
+  float network_quality = 2;
+}
+
+// Response message for Consensus
+message ConsensusResponse {
+  string consensus_result = 1;
+}
+
+// Block message definition
+message Block {
+  string previous_hash = 1;
+  string data = 2;
+  string quantum_signature = 3;
+  float reward = 4;
+  repeated Transaction transactions = 5;
+  string hash = 6;
+  int64 timestamp = 7;
+  int64 nonce = 8;
+}
+
+// Transaction message definition
+message Transaction {
+  string sender = 1;
+  string receiver = 2;
+  int64 amount = 3;
+  string private_key = 4;
+  string public_key = 5;
+  string signature = 6;
+  string buyer_id = 7;     // New field
+  string seller_id = 8;    // New field
+  int64 price = 9;         // New field (assuming price is an integer)
+}
+
+
+
+// Request message for MineBlock
 message MineBlockRequest {
   string node_id = 1;
+  string data = 2;
+  string quantum_signature = 3;
+  repeated Transaction transactions = 4;
+  string miner_address = 5;
 }
 
+// Response message for MineBlock
 message MineBlockResponse {
   bool success = 1;
-  string message = 2;
 }
 
-message StakeCoinsRequest {
-  string address = 1;
-  float amount = 2;
+// Request message for AddTransaction
+message AddTransactionRequest {
+  Transaction transaction = 1;
 }
 
-message StakeCoinsResponse {
+// Response message for AddTransaction
+message AddTransactionResponse {
   bool success = 1;
-  string message = 2;
 }
 
-message UnstakeCoinsRequest {
+// Request message for GetBlock
+message GetBlockRequest {
+  string block_hash = 1;
+}
+
+// Response message for GetBlock
+message GetBlockResponse {
+  Block block = 1;
+}
+
+// Request message for GetTransaction
+message GetTransactionRequest {
+  string transaction_hash = 1;
+}
+
+// Response message for GetTransaction
+message GetTransactionResponse {
+  Transaction transaction = 1;
+}
+
+// Request message for GetBalance
+message GetBalanceRequest {
   string address = 1;
-  float amount = 2;
 }
 
-message UnstakeCoinsResponse {
-  bool success = 1;
-  string message = 2;
-}
-
-message GetStakedBalanceRequest {
-  string address = 1;
-}
-
-message GetStakedBalanceResponse {
+// Response message for GetBalance
+message GetBalanceResponse {
   float balance = 1;
+}
+
+// Request message for GetBlockchain
+message GetBlockchainRequest {}
+
+// Response message for GetBlockchain
+message GetBlockchainResponse {
+  repeated Block chain = 1;
+}
+
+// New message definitions for exchange actions
+message PropagateOrderRequest {
+  string user_id = 1;
+  string order_type = 2;
+  string base_currency = 3;
+  string quote_currency = 4;
+  string amount = 5;
+  string price = 6;
+}
+
+message PropagateOrderResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message PropagateTradeRequest {
+  string buyer_id = 1;
+  string seller_id = 2;
+  string base_currency = 3;
+  string quote_currency = 4;
+  string amount = 5;
+  string price = 6;
+}
+
+message PropagateTradeResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message PropagateLiquidityChangeRequest {
+  string user_id = 1;
+  string pool_id = 2;
+  string amount_a = 3;
+  string amount_b = 4;
+  bool is_add = 5;
+}
+
+message PropagateLiquidityChangeResponse {
+  bool success = 1;
+  string message = 2;
 }

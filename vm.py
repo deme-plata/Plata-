@@ -12,6 +12,11 @@ from collections import defaultdict
 from merkletools import MerkleTools  # Ensure you have the merkletools package installed
 from enum import Enum, auto
 import requests
+import logging
+from SecureHybridZKStark import SecureHybridZKStark
+from finite_field_factory import FiniteFieldFactory
+
+logger = logging.getLogger(__name__)
 
 
 class PersistentStorage:
@@ -97,7 +102,7 @@ class AccessControlSystem:
         if not isinstance(role, Role) or not isinstance(permission, Permission):
             raise ValueError("Invalid role or permission")
         self.role_permissions[role].discard(permission)
-
+import random  # Import random module
 
 class PBFTConsensus:
     def __init__(self, nodes, node_id):
@@ -108,6 +113,12 @@ class PBFTConsensus:
         self.prepared = defaultdict(set)
         self.committed = defaultdict(set)
         self.node_id = node_id
+        self.current_leader = self.elect_leader()
+    def elect_leader(self):
+        # Assuming the leader is chosen based on the current view number
+        if not self.nodes:
+            return None
+        return self.nodes[self.current_view % len(self.nodes)]
 
     def propose(self, client_request):
         self.sequence_number += 1
@@ -138,6 +149,20 @@ class PBFTConsensus:
             self.prepare(self.node_id, message)
         elif "TYPE:COMMIT" in message:
             self.commit(self.node_id, message)
+    def validate_block(self, block):
+        # Implement your block validation logic here
+        # For example:
+        # 1. Check the block's hash
+        # 2. Validate the transactions within the block
+        # 3. Ensure the block's height is correct
+        # 4. Check the signature of the block
+
+        if not block.is_valid():  # Assuming your block has an is_valid method
+            print(f"Block {block.hash} is invalid.")
+            return False
+        print(f"Block {block.hash} is valid.")
+        return True
+
 
 
 class Node:
@@ -158,7 +183,7 @@ class Node:
 
 
 class SimpleVM:
-    def __init__(self, gas_limit=10000, number_of_shards=10, nodes=None):
+    def __init__(self, gas_limit=10000, number_of_shards=10, nodes=None, max_supply=1000000, security_level=2):
         self.global_scope = {}
         self.scope_stack = [self.global_scope]
         self.functions = {}
@@ -184,14 +209,42 @@ class SimpleVM:
         self.access_control = AccessControlSystem()  # For sophisticated permissions and access control
         self.nodes = nodes if nodes else []
         self.consensus = PBFTConsensus(self.nodes, self.nodes[0].node_id) if self.nodes else None
+        self.contracts = {} 
+        self.balances = {}
+        self.max_supply = max_supply
+        self.total_supply = 0
+        self.finite_field = FiniteFieldFactory.get_instance(security_level=security_level)
+        self.zk_system = SecureHybridZKStark(security_level=security_level, field=self.finite_field)
+        self.zk_proofs = {}  # Store ZK proofs for transactions
+        self.security_level = security_level
+
+        logger.info(f"SimpleVM initialized with gas_limit={gas_limit}, number_of_shards={number_of_shards}, nodes={nodes}")
+
+    def save_state(self):
+        self.persistent_storage.save('balances', self.balances)
+        self.persistent_storage.save('total_supply', self.total_supply)
+        self.persistent_storage.save('token_balances', self.token_balances)
+        self.persistent_storage.save('nfts', self.nfts)
 
     def load_state(self):
+        self.balances = self.persistent_storage.load('balances')
+        self.total_supply = self.persistent_storage.load('total_supply')
         self.token_balances = self.persistent_storage.load('token_balances')
         self.nfts = self.persistent_storage.load('nfts')
 
-    def save_state(self):
-        self.persistent_storage.save('token_balances', self.token_balances)
-        self.persistent_storage.save('nfts', self.nfts)
+    def mint(self, address, amount):
+        if self.total_supply + amount > self.max_supply:
+            raise Exception("Minting amount exceeds maximum supply")
+        if address in self.balances:
+            self.balances[address] += amount
+        else:
+            self.balances[address] = amount
+        self.total_supply += amount
+        logger.info(f"Minted {amount} to {address}. New balance: {self.balances[address]}. Total supply: {self.total_supply}")
+        self.save_state()  # Ensure state is saved after updating balance
+
+    def get_balance(self, address):
+        return self.balances.get(address, 0)
 
     def generate_contract_address(self, sender_address):
         nonce = self.nonces.get(sender_address, 0)
@@ -226,6 +279,18 @@ class SimpleVM:
             return False
 
         return True
+        
+    def contract_exists(self, contract_class):
+        for contract in self.global_scope.values():
+            if isinstance(contract["code"], contract_class):
+                return True
+        return False
+    def get_existing_contract(self, contract_class):
+        for address, contract in self.contracts.items():
+            if isinstance(contract, contract_class):
+                return address, contract
+        raise ValueError(f"Contract of type {contract_class.__name__} does not exist")
+
 
     def apply_state_transition(self, transaction, execution_result):
         if 'new_state' in execution_result:
@@ -309,18 +374,24 @@ class SimpleVM:
 
     def get_events(self):
         return self.events
-
-    def deploy_contract(self, sender_address, code, permissions=None):
-        contract_address = self.generate_contract_address(sender_address)
-        parsed_permissions = self.parse_permissions(code)
-        self.global_scope[contract_address] = {
-            "code": code,
-            "storage": {},
-            "is_executing": False,
-            "permissions": parsed_permissions,
-            "version": 1  # Initial version of the contract
-        }
+    def deploy_contract(self, sender, contract_class, *args):
+        contract_instance = contract_class(self, *args)
+        contract_address = "0x" + hashlib.sha256(f"{contract_class.__name__}{time.time()}".encode()).hexdigest()[:40]
+        self.contracts[contract_address] = contract_instance
+        print(f"Deployed contract at address: {contract_address}")  # Add this line for debugging
         return contract_address
+
+    def get_contract(self, contract_address):
+        contract = self.contracts.get(contract_address)
+        if not contract:
+            raise ValueError(f"Contract at address {contract_address} not found")
+        return contract
+
+
+
+
+
+
 
     def upgrade_contract(self, contract_address, new_code):
         if contract_address in self.global_scope:
@@ -521,3 +592,149 @@ class SimpleVM:
 
     def propose_transaction(self, transaction):
         self.consensus.propose(transaction)
+    def validate_transaction(self, transaction):
+        if not self.verify_signature(transaction.signature, transaction.sender_public_key, str(transaction.data)):
+            print("Invalid transaction signature.")
+            return False
+
+        if transaction.contract_address not in self.global_scope:
+            print(f"Contract at address {transaction.contract_address} does not exist.")
+            return False
+
+        return True
+
+    def add_transaction(self, transaction):
+        if self.validate_transaction(transaction):
+            self.transaction_queue.append(transaction)
+        else:
+            print("Transaction validation failed.")
+
+    async def process_transactions(self):
+        loop = asyncio.get_event_loop()
+
+        async def execute_transaction(transaction):
+            await loop.run_in_executor(self.executor, self.execute_contract,
+                                       transaction.to,
+                                       transaction.data,
+                                       transaction.gas_limit,
+                                       transaction.user_id,
+                                       transaction.sender_public_key,
+                                       transaction.signature)
+
+        tasks = [execute_transaction(transaction) for transaction in self.transaction_queue]
+        await asyncio.gather(*tasks)
+        self.transaction_queue.clear()
+
+    def propose_transaction(self, transaction):
+        self.consensus.propose(transaction)
+    def get_existing_contract(self, contract_class):
+        for address, contract in self.contracts.items():
+            if isinstance(contract, contract_class):
+                return address, contract
+        return None, None
+    async def execute_contract_with_zk(self, contract_address, input_data, gas_limit, user_id, sender_public_key, signature):
+        execution_result = await self.execute_contract(contract_address, input_data, gas_limit, user_id, sender_public_key, signature)
+        
+        if 'error' not in execution_result:
+            # Generate ZK proof for the execution
+            public_input = self.zk_system.stark.hash(contract_address, str(input_data), str(execution_result['output']))
+            secret = self.gas_used  # Use gas_used as the secret
+            zk_proof = self.zk_system.prove(secret, public_input)
+            self.zk_proofs[contract_address] = zk_proof
+            
+            execution_result['zk_proof'] = zk_proof
+        
+        return execution_result
+
+    def verify_zk_proof(self, contract_address, input_data, output_data):
+        if contract_address not in self.zk_proofs:
+            return False
+        
+        zk_proof = self.zk_proofs[contract_address]
+        public_input = self.zk_system.stark.hash(contract_address, str(input_data), str(output_data))
+        return self.zk_system.verify(public_input, zk_proof)
+
+    async def process_transactions_with_zk(self):
+        loop = asyncio.get_event_loop()
+
+        async def execute_transaction_with_zk(transaction):
+            result = await self.execute_contract_with_zk(
+                transaction["to"],
+                transaction["data"],
+                transaction.get("gas_limit", self.gas_limit),
+                transaction["user_id"],
+                transaction["sender_public_key"],
+                transaction["signature"]
+            )
+            return result
+
+        tasks = [execute_transaction_with_zk(transaction) for transaction in self.transaction_queue]
+        results = await asyncio.gather(*tasks)
+        self.transaction_queue.clear()
+        return results
+
+    def create_zk_token(self, creator_address, token_name, total_supply):
+        result = self.create_token(creator_address, token_name, total_supply)
+        if result:
+            public_input = self.zk_system.stark.hash(creator_address, token_name, total_supply)
+            zk_proof = self.zk_system.prove(total_supply, public_input)
+            self.zk_proofs[token_name] = zk_proof
+        return result
+    async def zk_transfer_token(self, from_address, to_address, token_address, amount):
+        contract = self.get_contract(token_address)
+        transfer_proof = contract.transfer(from_address, to_address, amount)
+        is_valid = self.zk_system.verify(
+            self.zk_system.stark.hash(from_address, to_address, amount),
+            transfer_proof
+        )
+        if is_valid:
+            return transfer_proof
+        else:
+            raise ValueError("Invalid transfer")
+
+
+    def verify_zk_token_transfer(self, from_address, to_address, token_name, amount):
+        proof_key = f"{token_name}_{from_address}_{to_address}"
+        if proof_key not in self.zk_proofs:
+            return False
+        
+        zk_proof = self.zk_proofs[proof_key]
+        public_input = self.zk_system.stark.hash(from_address, to_address, token_name, amount)
+        return self.zk_system.verify(public_input, zk_proof)
+
+class ZKContract:
+    def __init__(self, vm):
+        self.vm = vm
+
+    def generate_zk_proof(self, function_name, *args):
+        public_input = self.vm.zk_system.stark.hash(function_name, *args)
+        secret = hash(tuple(args))  # Use a hash of args as the secret
+        return self.vm.zk_system.prove(secret, public_input)
+
+    def verify_zk_proof(self, function_name, proof, *args):
+        public_input = self.vm.zk_system.stark.hash(function_name, *args)
+        return self.vm.zk_system.verify(public_input, proof)
+class ZKTokenContract:
+    def __init__(self, vm, total_supply):
+        self.vm = vm
+        self.total_supply = total_supply
+        self.balances = {}
+
+    def mint(self, address, amount):
+        if sum(self.balances.values()) + amount > self.total_supply:
+            return False
+        self.balances[address] = self.balances.get(address, 0) + amount
+        return self.vm.zk_system.prove(amount, self.vm.zk_system.stark.hash(address, amount))
+
+    def transfer(self, from_address, to_address, amount):
+        if self.balances.get(from_address, 0) < amount:
+            return False
+        self.balances[from_address] -= amount
+        self.balances[to_address] = self.balances.get(to_address, 0) + amount
+        return self.vm.zk_system.prove(amount, self.vm.zk_system.stark.hash(from_address, to_address, amount))
+
+
+    def balance_of(self, address):
+        balance = self.balances.get(address, 0)
+        proof = self.vm.zk_system.prove(balance, self.vm.zk_system.stark.hash(address))
+        return balance, proof
