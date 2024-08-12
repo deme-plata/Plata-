@@ -74,7 +74,6 @@ import logging
 import threading
 import grpc
 import uvicorn
-import dagknight_pb2
 import dagknight_pb2_grpc
 from dagknight_pb2 import *
 from dagknight_pb2_grpc import DAGKnightStub
@@ -104,6 +103,7 @@ from vm import SimpleVM
 import pytest
 import httpx
 
+import curses
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, validator  # Ensure validator is imported
 from pydantic import BaseModel, field_validator  # Use field_validator for Pydantic V2
@@ -128,9 +128,18 @@ from typing import Any, Dict  # Ensure Any and Dict are imported
 from Order import Order
 from SecureHybridZKStark import SecureHybridZKStark
 from enhanced_exchange import EnhancedExchange,LiquidityPoolManager,PriceOracle,MarginAccount,AdvancedOrderTypes
+from enhanced_exchange import EnhancedExchangeWithZKStarks
 
 from EnhancedOrderBook import EnhancedOrderBook
 from enhanced_exchange import EnhancedExchange,LiquidityPoolManager,PriceOracle,MarginAccount
+from zk_vm import ZKVM
+from common import QuantumBlock, Transaction, NodeState
+from P2PNode import P2PNode
+import curses
+
+# Replace SimpleVM initialization with ZKVM
+vm = ZKVM(security_level=2)
+
 
 tracemalloc.start()
 
@@ -138,6 +147,12 @@ tracemalloc.start()
 import logging
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(
+    filename='dashboard_ui.log',  # Log file name
+    filemode='w',  # Overwrite the log file each run
+    level=logging.DEBUG,  # Log all levels DEBUG and above
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 NUM_NODES = 5
 
 MAX_SUPPLY = 21000000  
@@ -148,7 +163,9 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key_here")
  
 templates = Jinja2Templates(directory="templates")
 
-                    
+def initialize_dashboard_ui():
+    from curses_dashboard.dashboard import DashboardUI
+    return DashboardUI
 class Trade:
     def __init__(self, buyer_id, seller_id, base_currency, quote_currency, amount, price):
         self.buyer_id = buyer_id
@@ -222,94 +239,8 @@ class SecurityManager:
             return True
         except:
             return False
-            
-class QuantumBlock:
-    def __init__(self, previous_hash, data, quantum_signature, reward, transactions, timestamp=None):
-        self.previous_hash = previous_hash
-        self.data = data
-        self.quantum_signature = quantum_signature
-        self.reward = reward
-        self.transactions = transactions  # Ensure transactions are stored as Transaction objects
-        self.timestamp = timestamp or time.time()
-        self.nonce = 0
-        self.hash = self.compute_hash()
-        logger.debug(f"Initialized QuantumBlock: {self.to_dict()}")
 
-    def compute_hash(self):
-        block_string = json.dumps({
-            "previous_hash": self.previous_hash,
-            "data": self.data,
-            "quantum_signature": self.quantum_signature,
-            "reward": self.reward,
-            "transactions": [txn.to_dict() if hasattr(txn, 'to_dict') else txn for txn in self.transactions],
-            "timestamp": self.timestamp,
-            "nonce": self.nonce
-        }, sort_keys=True)
-        block_hash = sha256(block_string.encode()).hexdigest()
-        logger.debug(f"Computed hash: {block_hash} for nonce: {self.nonce}")
-        return block_hash
-    def mine_block(self, difficulty):
-        target = 2 ** (256 - difficulty)
-        initial_hash = self.hash
-        logger.debug(f"Starting mining with initial hash: {initial_hash}")
-        while int(self.hash, 16) >= target:
-            self.nonce += 1
-            self.hash = self.compute_hash()
-        logger.info(f"Block mined with nonce: {self.nonce}, initial hash: {initial_hash}, final hash: {self.hash}")
 
-    def to_dict(self):
-        return {
-            "previous_hash": self.previous_hash,
-            "data": self.data,
-            "quantum_signature": self.quantum_signature,
-            "reward": self.reward,
-            "transactions": [txn.to_dict() if hasattr(txn, 'to_dict') else txn for txn in self.transactions],
-            "hash": self.hash,
-            "timestamp": self.timestamp,
-            "nonce": self.nonce
-        }
-
-    @classmethod
-    def from_dict(cls, block_data):
-        block = cls(
-            previous_hash=block_data["previous_hash"],
-            data=block_data["data"],
-            quantum_signature=block_data["quantum_signature"],
-            reward=block_data["reward"],
-            transactions=block_data["transactions"],
-            timestamp=block_data["timestamp"]
-        )
-        block.nonce = block_data["nonce"]
-        block.hash = block_data["hash"]
-        return block
-
-    def set_hash(self, hash_value):
-        self.hash = hash_value
-
-    def recompute_hash(self):
-        self.hash = self.compute_hash()
-
-    def hash_block(self):
-        self.hash = self.compute_hash()
-    def is_valid(self):
-        # Implement the validation logic here
-        # Example checks:
-        # 1. Check if the block's hash matches the computed hash
-        # 2. Validate all transactions in the block
-        # 3. Ensure the block's timestamp is reasonable
-        # 4. Check if the previous hash is correct
-
-        if self.hash != self.compute_hash():
-            print(f"Block hash {self.hash} is invalid.")
-            return False
-
-        # Add more checks as needed
-        for transaction in self.transactions:
-            if not transaction.is_valid():
-                print(f"Transaction {transaction.id} in block is invalid.")
-                return False
-
-        return True
 
 class NodeDirectory:
     def __init__(self):
@@ -413,11 +344,12 @@ node_directory = NodeDirectory()
 from decimal import Decimal
 from typing import Dict
 class NativeCoinContract:
-    def __init__(self, vm, max_supply):
+    def __init__(self, vm, total_supply, zk_system):
         self.vm = vm
-        self.max_supply = max_supply
-        self.total_supply = Decimal('0')
+        self.total_supply = total_supply
+        self.zk_system = zk_system
         self.balances = {}
+
 
 
     def mint(self, user: str, amount: Decimal):
@@ -431,12 +363,23 @@ class NativeCoinContract:
             raise ValueError("Insufficient balance")
         self.balances[user] -= amount
         self.total_supply -= amount
-
-    def transfer(self, sender: str, receiver: str, amount: Decimal):
+    async def transfer(self, sender, receiver, amount):
         if self.balances.get(sender, Decimal('0')) < amount:
             raise ValueError("Insufficient balance")
+        public_input = self.zk_system.hash(sender, receiver, str(amount))
+        secret = int(self.balances[sender])
+        zk_proof = self.zk_system.prove(secret, public_input)
         self.balances[sender] -= amount
         self.balances[receiver] = self.balances.get(receiver, Decimal('0')) + amount
+        return zk_proof
+
+
+    @staticmethod
+    def verify_transfer(sender: str, receiver: str, amount: Decimal, zk_proof, zk_system):
+        public_input = zk_system.stark.hash(sender, receiver, str(amount))
+        return zk_system.verify(public_input, zk_proof)
+
+
 
     def get_balance(self, user: str) -> Decimal:
         return self.balances.get(user, Decimal('0'))
@@ -501,16 +444,34 @@ class Token:
     def revoke_burner(self, user: str):
         if user != self.creator:
             self.authorized_burners.discard(user)
+
+
+async def get_transaction_history():
+    try:
+        # Assuming blockchain stores transaction history
+        transaction_history = blockchain.get_transaction_history()  # Fetch transaction history
+        return transaction_history
+    except Exception as e:
+        logger.error(f"Error fetching transaction history: {str(e)}")
+        raise
+from dataclasses import dataclass
+from typing import List, Dict
+from decimal import Decimal
 from vm import SimpleVM, Permission, Role, PBFTConsensus
 
 
 class QuantumBlockchain:
     def __init__(self, consensus, secret_key, node_directory, vm):
+        self.globalMetrics = {
+                'totalTransactions': 0,
+                'totalBlocks': 0,
+                # Add more metrics as needed
+            }
         self.initial_reward = 50.0
         self.chain = []
         self.pending_transactions = []
         self.consensus = consensus
-        if vm is None:
+        if vm is None:  
             raise ValueError("VM cannot be None. Check SimpleVM initialization.")
 
         self.vm = vm
@@ -545,6 +506,106 @@ class QuantumBlockchain:
         self.tokens: Dict[str, Token] = {}
         self.liquidity_pool_manager = LiquidityPoolManager()
         self.zk_system = SecureHybridZKStark(security_level=2)  # Adjust security level as needed
+        self.p2p_node = None  # Will be initialized later
+        self.start_time = time.time()
+    async def get_transaction_history(self, limit=10):
+        try:
+            # Assuming the blockchain stores a list of blocks, and each block has transactions
+            transactions = []
+            for block in reversed(self.chain):  # Start from the most recent block
+                for transaction in block.transactions:
+                    # Assuming each transaction has a date, amount, and recipient field
+                    tx_info = {
+                        "date": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(transaction.timestamp)),
+                        "amount": transaction.amount,
+                        "recipient": transaction.receiver
+                    }
+                    transactions.append(tx_info)
+                    if len(transactions) >= limit:
+                        break
+                if len(transactions) >= limit:
+                    break
+
+            return transactions
+
+        except Exception as e:
+            logger.error(f"Error fetching transaction history: {str(e)}")
+            return []
+
+    def get_node_state(self) -> NodeState:
+        return NodeState(
+            blockchain_length=len(self.chain),
+            latest_block_hash=self.chain[-1].hash if self.chain else None,
+            pending_transactions_count=len(self.pending_transactions),
+            total_supply=self.get_total_supply(),
+            difficulty=self.difficulty,
+            mempool_size=len(self.mempool),
+            connected_peers=len(self.p2p_node.peers),
+            active_liquidity_pools=len(self.liquidity_pools),
+            node_uptime=time.time() - self.start_time
+        )
+
+
+    async def set_p2p_node(self, p2p_node):
+        from P2PNode import P2PNode  # Move the import here
+
+        self.p2p_node = p2p_node
+
+    async def initialize_p2p(self, host, port):
+        logger.debug(f"Initializing P2P node on {host}:{port}")
+        self.p2p_node = P2PNode(host, port, self)
+        try:
+            await asyncio.wait_for(self.p2p_node.start(), timeout=10)
+            logger.debug("P2P node started successfully")
+        except asyncio.TimeoutError:
+            logger.error("Timeout while starting P2P node")
+            raise
+
+
+
+    def get_blocks_since(self, last_known_block_index):
+        """
+        Returns the blocks added since the given block index.
+        """
+        return self.chain[last_known_block_index + 1:]
+
+    async def mine_block(self, miner_address):
+        # Implementation of block mining
+        # This is a placeholder, implement according to your needs
+        block = QuantumBlock(
+            previous_hash=self.chain[-1].hash if self.chain else "0",
+            data="Mined block",
+            quantum_signature=self.generate_quantum_signature(),
+            reward=self.get_block_reward(),
+            transactions=self.pending_transactions[:10],
+            timestamp=time.time()
+        )
+        
+        # Generate ZK proof for the block
+        block_data = f"{block.previous_hash}{block.data}{block.quantum_signature}{block.reward}"
+        public_input = self.zk_system.hash(block_data)
+        block.zk_proof = self.zk_system.prove(int(block.timestamp), public_input)
+
+        if self.consensus.validate_block(block):
+            self.chain.append(block)
+            return block.reward
+        return None
+    def batch_verify_transactions(self, transactions):
+        proofs = []
+        public_inputs = []
+
+        for tx in transactions:
+            # Since zk_system.hash is synchronous, do not await it
+            public_input = self.zk_system.hash(tx.sender, tx.receiver, str(tx.amount))
+            public_inputs.append(public_input)
+            proofs.append(tx.zk_proof)
+
+        combined_public_input = self.zk_system.hash(*public_inputs)
+        return self.zk_system.verify(combined_public_input, proofs)
+
+
+
+
 
     async def import_token(self, address: str, user: str) -> Token:
         if address in self.tokens:
@@ -727,21 +788,24 @@ class QuantumBlockchain:
     async def get_balance(self, user_id: str, currency: str) -> Decimal:
         balance = self.balances.get(address, 0)
         return balance
+        
+        
+            
+            
     def initialize_native_coin_contract(self):
         try:
-            self.native_coin_contract_address, self.native_coin_contract = self.vm.get_existing_contract(NativeCoinContract)
-            if not self.native_coin_contract:
-                logger.info("NativeCoinContract does not exist, deploying new contract...")
-                self.native_coin_contract_address = self.vm.deploy_contract(self.genesis_wallet_address, NativeCoinContract, self.max_supply)
-                self.native_coin_contract = self.vm.contracts[self.native_coin_contract_address]
-                logger.info(f"NativeCoinContract deployed at address {self.native_coin_contract_address}")
+            result = self.vm.get_existing_contract(NativeCoinContract)
+            if result and len(result) == 2:
+                self.native_coin_contract_address, self.native_coin_contract = result
             else:
-                logger.info(f"NativeCoinContract already exists at address {self.native_coin_contract_address}")
-        except AttributeError as e:
+                # Handle the case where the contract doesn't exist
+                self.native_coin_contract_address = None
+                self.native_coin_contract = None
+        except Exception as e:
             logger.error(f"Error initializing NativeCoinContract: {str(e)}")
             self.native_coin_contract_address = None
             self.native_coin_contract = None
-            logger.warning("Continuing without NativeCoinContract")
+
 
 
 
@@ -810,7 +874,7 @@ class QuantumBlockchain:
 
     def get_total_supply(self):
         return sum(self.balances.values())
-    def add_new_block(self, data, quantum_signature, transactions, miner_address):
+    def add_new_block(self, data, transactions, miner_address):
         previous_block = self.chain[-1]
         previous_hash = previous_block.hash
         reward = self.get_block_reward()
@@ -819,20 +883,14 @@ class QuantumBlockchain:
         if total_supply + Decimal(reward) > Decimal(MAX_SUPPLY):
             reward = Decimal(MAX_SUPPLY) - total_supply
 
-        # Convert transactions to Transaction objects if they are not already
-        processed_transactions = []
-        for tx in transactions:
-            if isinstance(tx, dict):
-                # Assuming tx is a dictionary, instantiate a Transaction object
-                tx = Transaction(**tx)
-            processed_transactions.append(tx)
+        quantum_signature = self.generate_quantum_signature()  # Call the method here
 
         new_block = QuantumBlock(
             previous_hash=previous_hash,
             data=data,
             quantum_signature=quantum_signature,
             reward=reward,
-            transactions=processed_transactions,
+            transactions=transactions,
             timestamp=time.time()
         )
 
@@ -841,12 +899,13 @@ class QuantumBlockchain:
 
         if self.consensus.validate_block(new_block):
             self.chain.append(new_block)
-            self.process_transactions(processed_transactions)
+            self.process_transactions(transactions)
             self.native_coin_contract.mint(miner_address, Decimal(reward))
             return reward
         else:
             logger.error("Block validation failed. Block not added.")
             raise ValueError("Invalid block")
+
 
 
     def update_total_supply(self, reward):
@@ -900,7 +959,6 @@ class QuantumBlockchain:
 
         logger.info("Block validation successful")
         return True
-
     def add_block(self, block):
         current_time = time.time()
         if block.timestamp > current_time + 300:  # Allow for a 5-minute future timestamp window
@@ -917,6 +975,9 @@ class QuantumBlockchain:
         if self.blocks_since_last_adjustment >= self.adjustment_interval:
             self.adjust_difficulty()
             self.blocks_since_last_adjustment = 0
+
+        # Asynchronously propagate the block to the P2P network
+        asyncio.create_task(self.p2p_node.propagate_block(block))
 
         for listener in self.new_block_listeners:
             listener(block)
@@ -967,21 +1028,29 @@ class QuantumBlockchain:
     async def get_balance(self, user_id: str, currency: str) -> Decimal:
         balance = self.balances.get(address, 0)
         logger.info(f"Balance for {address}: {balance}")
-        return balance
+        return balanceasync 
     async def add_transaction(self, transaction: Transaction):
+        # Step 1: Verify the transaction using ZKP
         if not transaction.verify_transaction(self.zk_system):
             raise ValueError("Invalid transaction or ZKP verification failed")
-
+        
         logger.debug(f"Adding transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
         logger.debug(f"Sender balance before transaction: {self.balances.get(transaction.sender, 0)}")
 
+        # Step 2: Check if the sender has enough balance
         if self.balances.get(transaction.sender, 0) >= transaction.amount:
+            # Step 3: Verify the transaction signature
             wallet = Wallet()
             message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
             if wallet.verify_signature(message, transaction.signature, transaction.public_key):
+                # Step 4: Add the transaction to pending transactions
                 self.pending_transactions.append(transaction.to_dict())
                 logger.debug(f"Transaction added. Pending transactions count: {len(self.pending_transactions)}")
 
+                # Step 5: Propagate the transaction to the P2P network
+                await self.p2p_node.propagate_transaction(transaction)
+
+                # Step 6: Notify any listeners about the new transaction
                 for listener in self.new_transaction_listeners:
                     listener(transaction)
                 return True
@@ -991,6 +1060,9 @@ class QuantumBlockchain:
             logger.debug(f"Transaction failed. Insufficient balance for sender {transaction.sender}")
 
         return False
+
+
+
 
 
     async def propagate_transaction_to_all_peers(self, transaction_data):
@@ -1204,9 +1276,35 @@ class QuantumBlockchain:
         self.wallets.append(wallet)
         self.balances[wallet.address] = 0
 
-    def add_transaction(self, transaction):
-        self.transactions.append(transaction)
-        self.pending_transactions.append(transaction)
+    async def add_transaction(self, transaction: Transaction):
+        # Step 1: Verify the transaction using ZKP
+        if not transaction.verify_transaction(self.zk_system):
+            raise ValueError("Invalid transaction or ZKP verification failed")
+        
+        logger.debug(f"Adding transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
+        logger.debug(f"Sender balance before transaction: {self.balances.get(transaction.sender, 0)}")
+
+        # Step 2: Check if the sender has enough balance
+        if self.balances.get(transaction.sender, 0) >= transaction.amount:
+            # Step 3: Verify the transaction signature
+            wallet = Wallet()
+            message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
+            if wallet.verify_signature(message, transaction.signature, transaction.public_key):
+                # Step 4: Add the transaction to pending transactions
+                self.pending_transactions.append(transaction.to_dict())
+                logger.debug(f"Transaction added. Pending transactions count: {len(self.pending_transactions)}")
+
+                # Step 5: Notify any listeners about the new transaction
+                for listener in self.new_transaction_listeners:
+                    listener(transaction)
+                return True
+            else:
+                logger.debug(f"Transaction signature verification failed for transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
+        else:
+            logger.debug(f"Transaction failed. Insufficient balance for sender {transaction.sender}")
+
+        return False
+
 
     def add_contract(self, contract):
         self.contracts.append(contract)
@@ -1220,6 +1318,12 @@ class QuantumBlockchain:
     def search_contracts(self, query):
         return [contract for contract in self.contracts if query in contract.address.lower() or query in contract.creator.lower()]
 
+    async def get_balance(self, address, currency):
+        # Assuming `balances` is a dictionary of dictionaries, where each key is an address,
+        # and the value is another dictionary with currencies as keys and amounts as values.
+        address_balances = self.balances.get(address, {})
+        balance = address_balances.get(currency, 0)
+        return balance
 
 class Consensus:
     def __init__(self, blockchain):
@@ -1250,6 +1354,9 @@ class Consensus:
 
         if block.hash != block.compute_hash():
             logger.warning(f"Invalid block hash. Computed {block.compute_hash()}, got {block.hash}")
+            return False
+        if not self.blockchain.batch_verify_transactions(block.transactions):
+            logger.warning("Batch transaction verification failed")
             return False
 
         current_time = int(time.time())
@@ -1372,6 +1479,8 @@ SECRET_KEY = "your-secret-key"
 ALGORITHM = "HS256"
 
 async def initialize_components():
+    from P2PNode import P2PNode  # Move the import here
+
     global node_directory, blockchain, exchange, vm, plata_contract, price_feed, genesis_address, bot
 
     try:
@@ -1391,7 +1500,13 @@ async def initialize_components():
             raise ValueError("Failed to initialize QuantumBlockchain")
 
         price_oracle = PriceOracle()
-        exchange = EnhancedExchange(blockchain, vm, price_oracle, node_directory)
+        logger.info(f"Instantiating EnhancedExchange: {EnhancedExchange}")
+
+        exchange = EnhancedExchangeWithZKStarks(blockchain, vm, price_oracle, node_directory, desired_security_level=1, host="localhost", port=8765)
+        await exchange.start_p2p()
+        await blockchain.set_p2p_node(exchange.p2p_node)
+        logger.info(f"EnhancedExchange instance created: {exchange}")
+
         exchange.order_book = EnhancedOrderBook()
 
 
@@ -1402,12 +1517,15 @@ async def initialize_components():
         genesis_address = "your_genesis_address_here"  # Replace with actual genesis address generation/retrieval
 
         bot = MarketMakerBot(exchange, "BTC_PLATA", Decimal('0.01'))
-
-        # Initialize native coin contract
         native_coin_contract_address, native_coin_contract = vm.get_existing_contract(NativeCoinContract)
+        security_level = 20  # Replace with the appropriate level for your system
+
+        # Initialize zk_system with the security_level
+        zk_system = SecureHybridZKStark(security_level)
+
         if native_coin_contract is None:
             max_supply = 21000000  # Example max supply
-            native_coin_contract_address = vm.deploy_contract(genesis_address, NativeCoinContract, max_supply)
+            native_coin_contract_address = vm.deploy_contract(genesis_address, NativeCoinContract, max_supply, zk_system)
             native_coin_contract = vm.contracts[native_coin_contract_address]
 
         blockchain.native_coin_contract_address = native_coin_contract_address
@@ -1485,13 +1603,53 @@ class PlataContract:
 
 # Instantiate plata_contract
 plata_contract = PlataContract(address="contract_address")
-
 class PriceFeed:
-    async def get_price(self, asset):
-        return Decimal('1.00')  # Simplified for example
+    def __init__(self):
+        self.api_url = 'https://api.coingecko.com/api/v3/simple/price'
+        self.supported_assets = ['bitcoin', 'ethereum', 'polkadot', 'plata']  # Add supported assets here
+        self.vs_currency = 'usd'
+        self.cache = {}
+        self.cache_expiry = 60  # Cache prices for 60 seconds
+        self.last_update_time = 0
 
-# Instantiate price_feed
+    async def get_price(self, asset: str) -> Decimal:
+        print(f"get_price called with asset: {asset}")
+        current_time = time.time()
+        if (current_time - self.last_update_time) > self.cache_expiry:
+            await self.update_prices()
+            self.last_update_time = current_time
+
+        asset_lower = asset.lower()
+        if asset_lower in self.cache:
+            return self.cache[asset_lower]
+        else:
+            raise ValueError(f"Asset {asset} is not supported or price data is unavailable.")
+
+
+    async def update_prices(self):
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = {
+                    'ids': ','.join(self.supported_assets),
+                    'vs_currencies': self.vs_currency
+                }
+                async with session.get(self.api_url, params=params) as response:
+                    data = await response.json()
+
+                    for asset in self.supported_assets:
+                        asset_lower = asset.lower()
+                        if asset_lower in data:
+                            price = Decimal(str(data[asset_lower][self.vs_currency]))
+                            self.cache[asset_lower] = price
+                        else:
+                            self.cache[asset_lower] = Decimal('0')
+
+        except Exception as e:
+            print(f"Error updating prices: {str(e)}")
+
+# Instantiate the price feed
 price_feed = PriceFeed()
+
 class MarketPriceRequest(BaseModel):
     trading_pair: str
 class MarketPriceResponse(BaseModel):
@@ -1546,7 +1704,7 @@ def derive_address_from_mnemonic(mnemonic):
 
 
 class QuantumInspiredMarketBot:
-    def __init__(self, exchange, vm, plata_contract, price_feed, initial_capital: Dict[str, Decimal]):
+    def __init__(self, exchange: EnhancedExchange, vm, plata_contract, price_feed, initial_capital: Dict[str, Decimal]):
         self.exchange = exchange
         self.vm = vm
         self.plata_contract = plata_contract
@@ -1563,6 +1721,8 @@ class QuantumInspiredMarketBot:
         self.price_tolerance = Decimal('0.005')  # 0.5% tolerance
         self.max_single_trade_size = Decimal('10000')  # Max size for a single trade
         self.slippage_tolerance = Decimal('0.01')  # 1% slippage tolerance
+        logger.info(f"Class type before calling get_tradable_assets: {type(self.exchange)}")
+        print(dir(self.exchange))
 
         # Ensure 'PLATA' key is always present in the capital dictionary
         if 'PLATA' not in self.capital:
@@ -1636,19 +1796,39 @@ class QuantumInspiredMarketBot:
         except Exception as e:
             self.logger.error(f"Error rebalancing portfolio: {e}")
             self.logger.error(traceback.format_exc())
-
     async def _manage_plata_supply(self):
         try:
+            # Fetch the current price of PLATA
             plata_price = await self.price_feed.get_price("PLATA")
-            if plata_price > self.target_price + self.price_tolerance:
-                amount_to_mint = (plata_price - self.target_price) * self.plata_contract.total_supply / self.target_price
-                await self._mint_plata(amount_to_mint)
-            elif plata_price < self.target_price - self.price_tolerance:
-                amount_to_burn = (self.target_price - plata_price) * self.plata_contract.total_supply / self.target_price
-                await self._burn_plata(amount_to_burn)
+            
+            # Calculate the difference from the target price
+            price_difference = plata_price - self.target_price
+            
+            # Determine the action based on the price difference
+            if price_difference > self.price_tolerance:
+                # Price is higher than the target, mint more PLATA
+                amount_to_mint = (price_difference * self.plata_contract.total_supply) / self.target_price
+                if amount_to_mint > 0:
+                    await self._mint_plata(amount_to_mint)
+                else:
+                    self.logger.warning("Calculated mint amount is not positive; minting skipped.")
+            
+            elif price_difference < -self.price_tolerance:
+                # Price is lower than the target, burn some PLATA
+                amount_to_burn = (-price_difference * self.plata_contract.total_supply) / self.target_price
+                if amount_to_burn > 0:
+                    await self._burn_plata(amount_to_burn)
+                else:
+                    self.logger.warning("Calculated burn amount is not positive; burning skipped.")
+            
+            else:
+                # Price is within the acceptable range, no action needed
+                self.logger.info("PLATA price is within the target range; no minting or burning required.")
+        
         except Exception as e:
             self.logger.error(f"Error managing PLATA supply: {e}")
             self.logger.error(traceback.format_exc())
+
 
     async def _execute_quantum_trading_strategy(self):
         try:
@@ -1832,7 +2012,7 @@ class QuantumInspiredMarketBot:
             total_value = Decimal('0')
 
             for asset, amount in self.capital.items():
-                price = await self.price_feed.get_price(asset)
+                price = await self.price_feed.get_price("PLATA")
                 total_value += amount * price
 
             for asset, amount in self.capital.items():
@@ -1846,19 +2026,18 @@ class QuantumInspiredMarketBot:
         except Exception as e:
             self.logger.error(f"Error managing risk: {e}")
             self.logger.error(traceback.format_exc())
-
     async def handle_black_swan_events(self):
         try:
             tradable_assets = await self.exchange.get_tradable_assets()
-
             for asset in tradable_assets:
-                if asset == "PLATA":
-                    continue
-
-                await self._sell_asset(asset, self.max_single_trade_size)
+                try:
+                    # Handle black swan event for the specific asset
+                    pass
+                except Exception as e:
+                    self.logger.error(f"Error handling asset {asset}: {e}")
         except Exception as e:
-            self.logger.error(f"Error handling asset {asset}: {e}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"Error handling black swan events: {e}")
+
 class StandardCrypto:
     @staticmethod
     def sign_message(private_key, message):
@@ -2586,212 +2765,6 @@ class InitialDataResponse(BaseModel):
     recent_trades: List[TradeResponse]
     price_history: List[float]
 
-
-
-        
-class EnhancedExchange:
-    def __init__(self, blockchain, vm, price_oracle, node_directory):
-        self.blockchain = blockchain
-        self.vm = vm
-        self.price_oracle = price_oracle
-        self.node_directory = node_directory
-        self.order_book = EnhancedOrderBook()
-        self.liquidity_pools: Dict[str, LiquidityPool] = {}
-        self.fee_percent = Decimal('0.001')  # 0.1% fee
-        self.margin_accounts: Dict[str, MarginAccount] = {}
-        self.lending_pools: Dict[str, LendingPool] = {}
-        self.stop_loss_orders = []
-        self.take_profit_orders = []
-        self.trailing_stop_orders = []
-        self.advanced_order_types = AdvancedOrderTypes()
-        self.quantum_features = QuantumInspiredFeatures()
-        self.zk_system = blockchain.zk_system  # Initialize the zk_system for zero-knowledge proofs
-    async def place_order(self, order_data: Dict[str, Any]):
-        try:
-            # Create the order instance
-            order = Order(
-                user_id=order_data['user_id'],
-                type=order_data['type'],
-                order_type=order_data['order_type'],
-                pair=order_data['pair'],
-                base_currency=order_data['base_currency'],
-                quote_currency=order_data['quote_currency'],
-                amount=Decimal(order_data['amount']),
-                price=Decimal(order_data['price']),
-                from_currency=order_data['from_currency'],
-                to_currency=order_data['to_currency']
-            )
-
-            # Add the order to the order book
-            self.order_book.add_order(order)
-
-            # Create a private transaction for the order using zero-knowledge proof
-            transaction = Transaction(
-                sender=order.user_id,
-                receiver=self.contract_address,
-                amount=order.amount * order.price if order.order_type == 'buy' else order.amount
-            )
-            transaction.sign_transaction(self.zk_system)
-
-            # Add the transaction to the blockchain
-            await self.blockchain.add_transaction(transaction)
-
-            # Return success with the order ID
-            return {"status": "success", "order_id": str(order.id)}
-
-        except Exception as e:
-            # Log the error and return an error message
-            logger.error(f"Error placing order: {str(e)}")
-            return {"status": "error", "message": str(e)}
-
-
-    def _validate_order(self, order):
-        required_fields = ['user_id', 'type', 'order_type', 'pair', 'base_currency', 'quote_currency', 'amount', 'price', 'from_currency', 'to_currency']
-        return all(field in order for field in required_fields)
-
-    async def _execute_trade(self, matched_order):
-        # Implement trade execution logic
-        await self.execute_trade(
-            matched_order['buyer'],
-            matched_order['seller'],
-            matched_order['pair'],
-            matched_order['amount'],
-            matched_order['price'],
-            matched_order['order_type']
-        )
-    async def sync_state(self):
-        try:
-            # Simulate fetching orders from other nodes
-            remote_orders = []
-            nodes = self.node_directory.discover_nodes()
-            for node in nodes:
-                if node['is_active']:
-                    try:
-                        async with grpc.aio.insecure_channel(f"{node['ip_address']}:{node['port']}") as channel:
-                            stub = dagknight_pb2_grpc.DAGKnightStub(channel)
-                            request = dagknight_pb2.GetOrdersRequest()
-                            response = await stub.GetOrders(request)
-                            remote_orders.extend(response.orders)
-                    except Exception as e:
-                        logger.error(f"Failed to get orders from node {node['node_id']}: {str(e)}")
-
-            local_orders = self.order_book.get_orders()
-
-            # Add new orders from remote
-            for remote_order in remote_orders:
-                if remote_order not in local_orders:
-                    self.order_book.add_order(remote_order)
-
-            # Remove local orders not in remote
-            for local_order in local_orders:
-                if local_order not in remote_orders:
-                    self.order_book.cancel_order(local_order.id)
-
-            logger.info(f"After sync, order book contains {len(self.order_book.get_orders())} orders")
-        except Exception as e:
-            logger.error(f"Error in sync_state: {str(e)}")
-
-
-
-
-    def _update_local_state(self, response):
-        self.order_book = EnhancedOrderBook.from_proto(response.order_book)
-        logger.info(f"Updated order book with {len(self.order_book.get_orders())} orders")
-
-
-    async def _propagate_order(self, order):
-        nodes = self.node_directory.discover_nodes()
-        for node in nodes:
-            try:
-                async with grpc.aio.insecure_channel(f"{node['ip_address']}:{node['port']}") as channel:
-                    stub = dagknight_pb2_grpc.DAGKnightStub(channel)
-                    request = dagknight_pb2.PropagateOrderRequest(
-                        user_id=order['user_id'],
-                        order_type=order['order_type'],
-                        base_currency=order['base_currency'],
-                        quote_currency=order['quote_currency'],
-                        amount=str(order['amount']),
-                        price=str(order['price'])
-                    )
-                    await stub.PropagateOrder(request)
-            except Exception as e:
-                logger.error(f"Failed to propagate order to node {node['node_id']}: {str(e)}")
-    def _update_local_state(self, sync_response):
-        """
-        Update local state based on sync response.
-        This method updates the local state based on the data received from other nodes.
-
-        :param sync_response: The response received from the SyncState RPC call containing the state data.
-        """
-        try:
-            # Update order book
-            if sync_response.HasField('order_book'):
-                self.order_book.update(sync_response.order_book)
-
-            # Update liquidity pools
-            for pool_data in sync_response.liquidity_pools:
-                if pool_data.pair not in self.liquidity_pools:
-                    self.liquidity_pools[pool_data.pair] = LiquidityPool(pool_data.pair)
-                self.liquidity_pools[pool_data.pair].update(pool_data)
-
-            # Update margin accounts
-            for margin_account_data in sync_response.margin_accounts:
-                if margin_account_data.user_id not in self.margin_accounts:
-                    self.margin_accounts[margin_account_data.user_id] = MarginAccount(margin_account_data.user_id)
-                self.margin_accounts[margin_account_data.user_id].update(margin_account_data)
-
-            # Update lending pools
-            for lending_pool_data in sync_response.lending_pools:
-                if lending_pool_data.currency not in self.lending_pools:
-                    self.lending_pools[lending_pool_data.currency] = LendingPool(lending_pool_data.currency)
-                self.lending_pools[lending_pool_data.currency].update(lending_pool_data)
-
-            # Update advanced order types
-            if sync_response.HasField('advanced_order_types'):
-                self.advanced_order_types.update(sync_response.advanced_order_types)
-
-            # Update quantum features
-            if sync_response.HasField('quantum_features'):
-                self.quantum_features.update(sync_response.quantum_features)
-
-            logger.info("Local state updated successfully.")
-        except Exception as e:
-            logger.error(f"Failed to update local state: {str(e)}")
-            raise
-
-
-    async def get_exchange_stats(self):
-        total_liquidity = sum(pool.reserve_a + pool.reserve_b for pool in self.liquidity_pools.values())
-        total_lending = sum(pool.total_supplied for pool in self.lending_pools.values())
-        total_borrowing = sum(pool.total_borrowed for pool in self.lending_pools.values())
-
-        return {
-            "total_liquidity": total_liquidity,
-            "total_lending": total_lending,
-            "total_borrowing": total_borrowing,
-            "active_pairs": list(self.liquidity_pools.keys()),
-            "lending_currencies": list(self.lending_pools.keys())
-        }
-
-        type=order.type,
-        pair=order.pair,
-        order_type=order.order_type,
-        amount=Decimal(str(order.amount)),
-        price=Decimal(str(order.price)) if order.price else None
-
-        # Place the order using your QuantumDAGKnight logic
-        result = await blockchain.place_order(new_order)
-
-        # Return the result
-        return OrderResponse(
-            id=result.id,
-            type=result.type,
-            pair=result.pair,
-            order_type=result.order_type,
-            amount=float(result.amount),
-            price=float(result.price) if result.price else None,
-            status=result.status
-        )
   
     # Keep all other existing methods as they are
     # ...
@@ -3833,11 +3806,22 @@ from cryptography.exceptions import InvalidSignature
 import base64
 import hashlib
 from typing import Optional
+from pydantic import BaseModel, Field, validator
+from typing import Optional
+from mnemonic import Mnemonic
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding
+from cryptography.hazmat.backends import default_backend
+from cryptography.exceptions import InvalidSignature
+import base64
+import hashlib
+import random
+import string
 class Wallet(BaseModel):
     private_key: Optional[ec.EllipticCurvePrivateKey] = None
-    public_key: str
+    public_key: Optional[str] = None
     mnemonic: Optional[Mnemonic] = None
-    address: str
+    address: Optional[str] = None
 
     def __init__(self, private_key=None, mnemonic=None, **data):
         super().__init__(**data)
@@ -3849,7 +3833,10 @@ class Wallet(BaseModel):
             self.private_key = serialization.load_pem_private_key(private_key.encode(), password=None, backend=default_backend())
         else:
             self.private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
-        self.public_key = self.private_key.public_key()
+
+        # Generate public key and address after private key is initialized
+        self.public_key = self.get_public_key()
+        self.address = self.get_address()
 
     def private_key_pem(self) -> str:
         return self.private_key.private_bytes(
@@ -3859,7 +3846,7 @@ class Wallet(BaseModel):
         ).decode('utf-8')
 
     def get_public_key(self) -> str:
-        return self.public_key.public_bytes(
+        return self.private_key.public_key().public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         ).decode('utf-8')
@@ -3902,7 +3889,7 @@ class Wallet(BaseModel):
         )
         return decrypted_message.decode('utf-8')
 
-    def get_address(self):
+    def get_address(self) -> str:
         public_key_bytes = self.get_public_key().encode()
         address = "plata" + hashlib.sha256(public_key_bytes).hexdigest()
         return address
@@ -3941,132 +3928,6 @@ class PQWallet(Wallet):
         cipher = PKCS1_OAEP.new(self.rsa_keypair)
         decrypted_message = cipher.decrypt(base64.b64decode(ciphertext))
         return decrypted_message.decode('utf-8')
-from pydantic import BaseModel, Field
-from typing import Optional
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-import base64
-class Transaction(BaseModel):
-    sender: str
-    receiver: str
-    amount: Decimal
-    price: Decimal
-    buyer_id: str
-    seller_id: str
-    public_key: Optional[str] = None
-    signature: Optional[str] = None
-    zk_proof: Optional[Tuple[Tuple, Tuple]] = None
-    wallet: Optional[Any] = None
-    def sign_transaction(self, zk_system: SecureHybridZKStark):
-        if not self.wallet:
-            raise ValueError("Wallet is required to sign the transaction")
-        message = f"{self.sender}{self.receiver}{self.amount}{self.price}{self.buyer_id}{self.seller_id}"
-        self.signature = self.wallet.sign_message(message)
-        self.public_key = self.wallet.get_public_key()
-        
-        secret = int(self.amount * 10**18)  # Convert Decimal to integer
-        public_input = int(hashlib.sha256(message.encode()).hexdigest(), 16)
-        self.zk_proof = zk_system.prove(secret, public_input)
-    def verify_transaction(self, zk_system: SecureHybridZKStark) -> bool:
-        if not self.signature or not self.public_key or not self.zk_proof:
-            return False
-        
-        message = f"{self.sender}{self.receiver}{self.amount}{self.price}{self.buyer_id}{self.seller_id}"
-        if not self.wallet.verify_signature(message, self.signature, self.public_key):
-            return False
-        
-        public_input = int(hashlib.sha256(message.encode()).hexdigest(), 16)
-        return zk_system.verify(public_input, self.zk_proof)
-
-
-
-
-
-    def compute_hash(self):
-        """
-        Compute a unique hash for the transaction using its attributes.
-        """
-        transaction_data = f"{self.sender}{self.receiver}{self.amount}{self.signature}{self.public_key}{self.price}{self.buyer_id}{self.seller_id}"
-        return hashlib.sha256(transaction_data.encode()).hexdigest()
-    class Config:
-        arbitrary_types_allowed = True
-    def to_grpc(self):
-        return dagknight_pb2.Transaction(
-            sender=self.sender,
-            receiver=self.receiver,
-            amount=int(self.amount),  # Convert Decimal to int
-            public_key=self.public_key,
-            signature=self.signature,
-            price=int(self.price),  # Convert Decimal to int
-            buyer_id=self.buyer_id,
-            seller_id=self.seller_id
-        )
-
-
-
-
-
-    def to_dict(self):
-        return {
-            "sender": self.sender,
-            "receiver": self.receiver,
-            "amount": self.amount,
-            "signature": self.signature,
-            "public_key": self.public_key
-        }
-
-    @classmethod
-    def from_dict(cls, data):
-        return cls(**data)
-
-    @classmethod
-    def from_proto(cls, proto):
-        return cls(
-            sender=proto.sender,
-            receiver=proto.receiver,
-            amount=Decimal(proto.amount),
-            public_key=proto.public_key,
-            signature=proto.signature,
-            price=Decimal(proto.price),
-            buyer_id=proto.buyer_id,
-            seller_id=proto.seller_id
-        )
-    def is_valid(self, zk_system=None):
-
-        # 1. Ensure the amount is positive
-        if self.amount <= 0:
-            return False
-
-        # 2. Ensure sender and receiver are valid addresses
-        if not self.sender or not self.receiver:
-            return False
-
-        # 3. Verify that the transaction signature is valid
-        if not self.signature or not self.public_key:
-            return False
-
-        # Assuming `verify_signature` is a method that checks the signature's validity
-        if not self.verify_signature():
-            return False
-
-        # 4. (Optional) If using Zero-Knowledge Proofs, verify the transaction's ZKP
-        if zk_system and not self.verify_zkp(zk_system):
-            return False
-
-        # If all checks pass, the transaction is valid
-        return True
-
-    def verify_signature(self):
-        # Example signature verification logic:
-        # Ensure that the signature is valid based on the public key and transaction data
-        message = f"{self.sender}{self.receiver}{self.amount}"
-        # Assuming wallet is an object that can verify signatures
-        return self.wallet.verify_message(message, self.signature)
-
-    def verify_zkp(self, zk_system):
-        # Example ZKP verification logic:
-        # Use the provided zk_system to verify the Zero-Knowledge Proof
-        return zk_system.verify(self.public_key, self.signature)
 
 
 
@@ -4330,12 +4191,14 @@ def deploy_contract(request: DeployContractRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-
 class MineBlockRequest(BaseModel):
     node_id: str
-    wallet_address: str  
+    wallet: str  # Ensure this matches the expected type
+    wallet_address: str
     node_ip: str
     node_port: int
+    pincode: Optional[str] = None
+
 
 async def mine_block(miner_address):
     logger.info(f"Starting to mine block for miner address: {miner_address}")
@@ -4565,7 +4428,6 @@ async def create_new_block(miner_address: str):
     except ValueError as e:
         logger.error(f"Block creation failed: {str(e)}")
         return None
-
 @app.post("/mine_block")
 async def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
     global continue_mining
@@ -4573,6 +4435,7 @@ async def mine_block(request: MineBlockRequest, pincode: str = Depends(authentic
     wallet_address = request.wallet_address
     node_ip = request.node_ip
     node_port = request.node_port
+    wallet = request.wallet
 
     try:
         logger.info(f"Received mining request: {request.dict()}")
@@ -4605,7 +4468,7 @@ async def mine_block(request: MineBlockRequest, pincode: str = Depends(authentic
                 logger.error(f"Mining algorithm failed: {result.get('message')}")
                 continue
 
-            counts, energy, entanglement_matrix, qhins, hashrate = result
+            counts, energy, entanglement_matrix, qhins, hashrate = result["counts"], result["energy"], result["entanglement_matrix"], result["qhins"], result["hashrate"]
             end_time = time.time()
 
             logger.info(f"Quantum Annealing Simulation completed in {end_time - start_time:.2f} seconds")
@@ -4623,12 +4486,34 @@ async def mine_block(request: MineBlockRequest, pincode: str = Depends(authentic
                 quantum_signature = blockchain.generate_quantum_signature()
 
                 logger.info("Adding block to blockchain")
+
+                # Create transaction objects with ZKP integration
+                transactions = [
+                    Transaction(
+                        sender='sender_address',
+                        receiver='receiver_address',
+                        amount=Decimal(10),
+                        price=Decimal(100),
+                        buyer_id='buyer_id_value',
+                        seller_id='seller_id_value',
+                        wallet=wallet
+                    )
+                ]
+
+                # Sign and verify each transaction using ZKP
+                zk_system = SecureHybridZKStark()
+                for tx in transactions:
+                    tx.sign_transaction(zk_system)
+                    if not tx.verify_transaction(zk_system):
+                        logger.error(f"Transaction verification failed for transaction {tx.id}")
+                        raise HTTPException(status_code=400, detail=f"Invalid transaction: {tx.id}")
+
                 new_block = QuantumBlock(
                     previous_hash=blockchain.chain[-1].hash,
                     data="Some data to be included in the block",
                     quantum_signature=quantum_signature,
                     reward=blockchain.get_block_reward(),
-                    transactions=[{'sender': 'sender_address', 'receiver': 'receiver_address', 'amount': 10}],
+                    transactions=transactions,
                     timestamp=time.time()
                 )
                 new_block.mine_block(blockchain.difficulty)
@@ -4647,7 +4532,9 @@ async def mine_block(request: MineBlockRequest, pincode: str = Depends(authentic
                     blockchain.adjust_difficulty()
 
                     logger.info(f"Node {node_id} mined a block and earned {new_block.reward} QuantumDAGKnight Coins")
-                    await blockchain.propagate_block_to_peers(new_block)
+                    
+                    # Use P2P node to propagate the new block
+                    await blockchain.p2p_node.propagate_block(new_block)
 
                     hash_rate = 1 / (end_time - start_time)
                     logger.info(f"Mining Successful. Hash Rate: {hash_rate:.2f} hashes/second")
@@ -4657,11 +4544,16 @@ async def mine_block(request: MineBlockRequest, pincode: str = Depends(authentic
                     logger.info(f"Quantum Hash Information Number: {qhins:.6f}")
 
                     updated_balance = blockchain.get_balance(wallet_address)
-                    await manager.broadcast(json.dumps({
-                        "type": "balance_update",
-                        "wallet_address": wallet_address,
-                        "balance": float(updated_balance)  # Ensure balance is serializable
-                    }))
+                    
+                    # Use P2P node to broadcast balance update
+                    balance_update_message = Message(
+                        type=MessageType.BALANCE_UPDATE.value,
+                        payload={
+                            "wallet_address": wallet_address,
+                            "balance": float(updated_balance)
+                        }
+                    )
+                    await blockchain.p2p_node.broadcast(balance_update_message)
 
                     return {
                         "success": True,
@@ -4689,20 +4581,52 @@ async def mine_block(request: MineBlockRequest, pincode: str = Depends(authentic
         logger.error(f"Error during mining: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error during mining: {str(e)}")
+async def get_mining_stats():
+    try:
+        # Assume these are global variables or can be fetched from the blockchain or another source
+        total_blocks_mined = len(blockchain.chain)
+        latest_block = blockchain.chain[-1] if blockchain.chain else None
+        hash_rate = None
+        mining_reward = None
+
+        if latest_block:
+            mining_reward = latest_block.reward
+            # Calculate hash rate based on the latest block's timestamp and the previous block's timestamp
+            if len(blockchain.chain) > 1:
+                previous_block = blockchain.chain[-2]
+                time_difference = latest_block.timestamp - previous_block.timestamp
+                hash_rate = 1 / time_difference if time_difference > 0 else None
+
+        mining_stats = {
+            "total_blocks_mined": total_blocks_mined,
+            "current_hashrate": hash_rate,
+            "mining_reward": mining_reward,
+            "last_block_hash": latest_block.hash if latest_block else None,
+            "last_block_time": latest_block.timestamp if latest_block else None,
+        }
+        return mining_stats
+    except Exception as e:
+        logger.error(f"Error fetching mining stats: {str(e)}")
+        raise
+        
 
 # Function to periodically trigger mining
-async def periodic_mining(miner_address: str):
+async def periodic_mining(miner_address: str, wallet: str):
     while True:
         try:
             await mine_block(MineBlockRequest(
                 node_id="automated_miner",
+                wallet=wallet,  # Include the wallet here
                 wallet_address=miner_address,
                 node_ip="127.0.0.1",
-                node_port=8000
-            ), pincode="automated_miner_pincode")
+                node_port=8000,
+                pincode="automated_miner_pincode"
+            ))
         except Exception as e:
             logger.error(f"Error in periodic mining: {str(e)}")
-        await asyncio.sleep(600)  # Wait for 10 minutes before next mining attempt
+            logger.error(traceback.format_exc())
+        await asyncio.sleep(600)  # Wait for 10 minutes before the next mining attempt
+
 
 
 
@@ -4900,18 +4824,124 @@ class ViewChange:
 
 
 view_change = ViewChange()
+class NodeClient:
+    def __init__(self, address):
+        self.address = address
+        self.channel = aio.insecure_channel(address)
+        self.stub = dagknight_pb2_grpc.DAGKnightStub(self.channel)
+    async def propagate_transaction(self, transaction):
+        try:
+            request = dagknight_pb2.Transaction(
+                sender=transaction.sender,
+                receiver=transaction.receiver,
+                amount=int(transaction.amount),
+                price=int(transaction.price),
+                buyer_id=transaction.buyer_id,
+                seller_id=transaction.seller_id,
+                public_key=transaction.public_key,
+                signature=transaction.signature,
+                public_input=transaction.public_input,  # Add this
+                zk_proof=transaction.zk_proof  # Add this
+            )
+            response = await self.stub.PropagateTransaction(request)
+            return response
+        except Exception as e:
+            logger.error(f"Failed to propagate transaction to {self.address}: {str(e)}")
+            return None
+
+
+    async def sync_state(self, last_known_block):
+        try:
+            request = dagknight_pb2.SyncRequest(last_known_block=last_known_block)
+            response = await self.stub.SyncState(request)
+            return response
+        except Exception as e:
+            logger.error(f"Failed to sync state with {self.address}: {str(e)}")
+            return None
+
+    async def verify_zkp(self, public_input, zk_proof):
+        try:
+            request = dagknight_pb2.ZKPVerificationRequest(public_input=public_input, zk_proof=zk_proof)
+            response = await self.stub.VerifyZKP(request)
+            return response
+        except Exception as e:
+            logger.error(f"Failed to verify ZKP with {self.address}: {str(e)}")
+            return None
+
+    async def full_state_sync(self):
+        try:
+            request = dagknight_pb2.FullStateSyncRequest()
+            response = await self.stub.FullStateSync(request)
+            return response
+        except Exception as e:
+            logger.error(f"Failed to perform full state sync with {self.address}: {str(e)}")
+            return None
+
+async def connect_to_peers(node_directory):
+    peers = {}
+    for address in node_directory.discover_nodes():
+        peers[address] = NodeClient(address)
+    return peers
+
+async def periodic_sync(blockchain, peers):
+    while True:
+        for peer in peers.values():
+            try:
+                last_block = blockchain.get_last_block()
+                response = await peer.sync_state(last_block.number)
+                if response and response.new_blocks:
+                    for block_proto in response.new_blocks:
+                        block = QuantumBlock(
+                            previous_hash=block_proto.previous_hash,
+                            data=block_proto.data,
+                            quantum_signature=block_proto.quantum_signature,
+                            reward=Decimal(str(block_proto.reward)),
+                            transactions=[Transaction.from_proto(tx) for tx in block_proto.transactions],
+                            timestamp=block_proto.timestamp
+                        )
+                        block.hash = block_proto.hash
+                        block.nonce = block_proto.nonce
+                        blockchain.add_block(block)
+            except Exception as e:
+                logger.error(f"Error during periodic sync with peer {peer.address}: {str(e)}")
+        await asyncio.sleep(60)  # Sync every 60 seconds
+
+async def run_node():
+    # Initialize components
+    secret_key = os.getenv("SECRET_KEY", "your_secret_key_here")
+    node_directory = NodeDirectory()
+    vm = SimpleVM(gas_limit=10000, number_of_shards=10, nodes=[])
+    consensus = PBFTConsensus(nodes=[], node_id="node_1")
+    blockchain = QuantumBlockchain(consensus, secret_key, node_directory, vm)
+    zk_system = SecureHybridZKStark(security_level=20)
+
+    # Start gRPC server
+    server, servicer = await serve(secret_key, node_directory, vm, blockchain, zk_system)
+
+    # Connect to peers
+    peers = await connect_to_peers(node_directory)
+
+    # Start periodic sync
+    sync_task = asyncio.create_task(periodic_sync(blockchain, peers))
+
+    try:
+        await server.wait_for_termination()
+    except KeyboardInterrupt:
+        logger.info("Shutting down node...")
+        sync_task.cancel()
+        await server.stop(0)
 
 # Example usage
 if not pbft.committed:
     view_change.initiate_view_change()
 
-
 class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
-    def __init__(self, secret_key, node_directory, vm):
+    def __init__(self, secret_key, node_directory, vm, zk_system):
         self.secret_key = secret_key
         self.node_directory = node_directory
         self.consensus = Consensus(blockchain=None)
         self.blockchain = QuantumBlockchain(self.consensus, secret_key, node_directory, vm)
+        self.zk_system = zk_system
 
         self.consensus.blockchain = self.blockchain
         self.private_key = self.load_or_generate_private_key()
@@ -4919,6 +4949,7 @@ class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
         self.security_manager = SecurityManager(secret_key)
         self.transaction_pool = []
         self.node_stubs = []  # Initialize the list for node stubs
+
     def get_all_node_stubs(self):
         return self.node_stubs
 
@@ -5255,6 +5286,307 @@ class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
     def add_node_stub(self, node_stub):
         self.node_stubs.append(node_stub)
 
+    def get_all_node_stubs(self):
+        return self.node_stubs
+
+    def add_node_stub(self, node_stub):
+        self.node_stubs.append(node_stub)
+
+    def store_transaction(self, transaction_hash, transaction):
+        self.node_directory.store_transaction(transaction_hash, transaction)
+        print(f"Transaction with hash {transaction_hash} stored successfully.")
+
+    def compute_transaction_hash(self, transaction):
+        transaction_data = f"{transaction.sender}{transaction.receiver}{transaction.amount}{transaction.signature}{transaction.public_key}{transaction.price}{transaction.buyer_id}{transaction.seller_id}"
+        return hashlib.sha256(transaction_data.encode()).hexdigest()
+
+    async def PropagateOrder(self, request, context):
+        try:
+            order = Order(
+                user_id=request.user_id,
+                order_type=request.order_type,
+                base_currency=request.base_currency,
+                quote_currency=request.quote_currency,
+                amount=Decimal(request.amount),
+                price=Decimal(request.price)
+            )
+            await self.exchange.place_order(order)
+            return dagknight_pb2.PropagateOrderResponse(success=True, message="Order propagated successfully")
+        except Exception as e:
+            return dagknight_pb2.PropagateOrderResponse(success=False, message=str(e))
+
+    async def PropagateTrade(self, request, context):
+        try:
+            trade = Trade(
+                buyer_id=request.buyer_id,
+                seller_id=request.seller_id,
+                base_currency=request.base_currency,
+                quote_currency=request.quote_currency,
+                amount=Decimal(request.amount),
+                price=Decimal(request.price)
+            )
+            await self.exchange.execute_trade(trade)
+            return dagknight_pb2.PropagateTradeResponse(success=True, message="Trade propagated successfully")
+        except Exception as e:
+            return dagknight_pb2.PropagateTradeResponse(success=False, message=str(e))
+
+    async def PropagateLiquidityChange(self, request, context):
+        try:
+            if request.is_add:
+                await self.exchange.add_liquidity(request.user_id, request.pool_id, Decimal(request.amount_a), Decimal(request.amount_b))
+            else:
+                await self.exchange.remove_liquidity(request.user_id, request.pool_id, Decimal(request.amount_a), Decimal(request.amount_b))
+            return dagknight_pb2.PropagateLiquidityChangeResponse(success=True, message="Liquidity change propagated successfully")
+        except Exception as e:
+            return dagknight_pb2.PropagateLiquidityChangeResponse(success=False, message=str(e))
+
+    def GetBlockchain(self, request, context):
+        try:
+            blockchain = self.blockchain.get_chain()
+            chain = []
+            for block in blockchain:
+                chain.append(dagknight_pb2.Block(
+                    previous_hash=block.previous_hash,
+                    data=block.data,
+                    quantum_signature=block.quantum_signature,
+                    reward=block.reward,
+                    transactions=[dagknight_pb2.Transaction(
+                        sender=tx.sender,
+                        receiver=tx.receiver,
+                        amount=tx.amount,
+                        private_key=tx.private_key,
+                        public_key=tx.public_key,
+                        signature=tx.signature
+                    ) for tx in block.transactions],
+                    hash=block.hash,
+                    timestamp=int(block.timestamp),
+                    nonce=int(block.nonce)
+                ))
+            return dagknight_pb2.GetBlockchainResponse(chain=chain)
+        except Exception as e:
+            logger.error(f"Error in GetBlockchain: {e}")
+            context.set_details(f"Error retrieving blockchain: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return dagknight_pb2.GetBlockchainResponse()
+
+    def AddTransaction(self, request, context):
+        transaction = request.transaction
+        print(f"Received transaction in AddTransaction: {transaction}")
+        print(f"Transaction fields - sender: {transaction.sender}, receiver: {transaction.receiver}, price: {transaction.price}, buyer_id: {transaction.buyer_id}, seller_id: {transaction.seller_id}")
+
+        # Convert Protobuf Transaction to Custom Transaction Class
+        transaction_obj = Transaction.from_proto(transaction)
+
+        print(f"Converted Transaction Object: {transaction_obj}")
+        
+        # Validate the transaction
+        if not self.validate_transaction(transaction_obj):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details('Invalid transaction!')
+            return dagknight_pb2.AddTransactionResponse(success=False)
+
+        # Compute the hash of the transaction and store it
+        transaction_hash = self.compute_transaction_hash(transaction_obj)
+        self.node_directory.store_transaction(transaction_hash, transaction_obj)
+        
+        # Optionally, propagate the transaction to other nodes
+        self.propagate_transaction(transaction_obj)
+
+        return dagknight_pb2.AddTransactionResponse(success=True)
+
+    def validate_transaction(self, transaction):
+        # Basic validation logic
+        if not transaction.sender or not transaction.receiver or not transaction.signature:
+            return False
+        if transaction.amount <= 0 or transaction.price <= 0:
+            return False
+        return True
+
+    def FullStateSync(self, request, context):
+        try:
+            chain = [dagknight_pb2.Block(
+                previous_hash=block.previous_hash,
+                data=block.data,
+                quantum_signature=block.quantum_signature,
+                reward=block.reward,
+                transactions=[dagknight_pb2.Transaction(
+                    sender=tx.sender, receiver=tx.receiver, amount=tx.amount) for tx in block.transactions]
+            ) for block in self.blockchain.chain]
+
+            balances = {k: v for k, v in self.blockchain.balances.items()}
+            stakes = {k: v for k, v in self.blockchain.stakes.items()}
+
+            return dagknight_pb2.FullStateResponse(chain=chain, balances=balances, stakes=stakes)
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Error syncing state: {str(e)}")
+            return dagknight_pb2.FullStateResponse()
+
+    def PropagateTransaction(self, request, context):
+        try:
+            # Verify ZKP
+            is_valid = self.zk_system.verify(request.public_input, request.zk_proof)
+            if not is_valid:
+                return dagknight_pb2.PropagationResponse(success=False, message="Invalid ZKP")
+
+            # Add transaction to blockchain
+            success = self.blockchain.add_transaction(request)
+            return dagknight_pb2.PropagationResponse(success=success, message="Transaction propagated successfully" if success else "Failed to propagate transaction")
+        except Exception as e:
+            return dagknight_pb2.PropagationResponse(success=False, message=str(e))
+
+    def SyncState(self, request, context):
+        try:
+            new_blocks = self.blockchain.get_blocks_since(request.last_known_block)
+            return dagknight_pb2.SyncResponse(new_blocks=new_blocks)
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return dagknight_pb2.SyncResponse()
+
+    def VerifyZKP(self, request, context):
+        try:
+            is_valid = self.zk_system.verify(request.public_input, request.zk_proof)
+            return dagknight_pb2.ZKPVerificationResponse(is_valid=is_valid)
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return dagknight_pb2.ZKPVerificationResponse(is_valid=False)
+
+    def MineBlock(self, request, context):
+        try:
+            node_id = request.node_id
+            data = request.data
+            quantum_signature = request.quantum_signature
+            transactions = [Transaction.from_proto(t) for t in request.transactions]
+            miner_address = request.miner_address
+
+            logger.info(f"Mining block for node {node_id} with {len(transactions)} transactions")
+
+            block = QuantumBlock(
+                previous_hash=self.blockchain.chain[-1].hash,
+                data=data,
+                quantum_signature=quantum_signature,
+                reward=self.blockchain.get_block_reward(),
+                transactions=transactions
+            )
+            block.mine_block(self.blockchain.difficulty)
+
+            if self.blockchain.validate_block(block):
+                self.blockchain.add_block(block)
+                logger.info(f"Block mined successfully by {miner_address}")
+                return dagknight_pb2.MineBlockResponse(success=True)
+            else:
+                logger.error("Failed to validate mined block")
+                return dagknight_pb2.MineBlockResponse(success=False)
+        except Exception as e:
+            logger.error(f"Error during mining: {str(e)}")
+            context.set_details(f'Error during mining: {str(e)}')
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return dagknight_pb2.MineBlockResponse(success=False)
+
+    def GetBalance(self, request, context):
+        try:
+            address = request.address
+            balance = self.blockchain.get_balance(address)
+            return dagknight_pb2.GetBalanceResponse(balance=balance)
+        except Exception as e:
+            logger.error(f"Error getting balance: {str(e)}")
+            context.set_details(f'Error getting balance: {str(e)}')
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return dagknight_pb2.GetBalanceResponse(balance=0)
+    async def PropagateTransaction(self, request, context):
+        try:
+            # Verify ZKP
+            # Note: We need to add public_input and zk_proof to the Transaction message in the .proto file
+            public_input = request.public_input if hasattr(request, 'public_input') else None
+            zk_proof = request.zk_proof if hasattr(request, 'zk_proof') else None
+            
+            if public_input is None or zk_proof is None:
+                print("Missing public_input or zk_proof")
+                return dagknight_pb2.PropagationResponse(success=False, message="Missing ZKP data")
+
+            print(f"Received public_input: {public_input}")
+            print(f"Received zk_proof: {zk_proof}")
+            
+            is_valid = self.zk_system.verify(public_input, zk_proof)
+            if not is_valid:
+                print("Invalid ZKP")
+                return dagknight_pb2.PropagationResponse(success=False, message="Invalid ZKP")
+
+            # Add transaction to blockchain
+            success = await self.blockchain.add_transaction(request)
+            return dagknight_pb2.PropagationResponse(success=success, message="Transaction propagated successfully" if success else "Failed to propagate transaction")
+        except Exception as e:
+            print(f"Exception in PropagateTransaction: {str(e)}")
+            print(f"Exception traceback: {traceback.format_exc()}")
+            return dagknight_pb2.PropagationResponse(success=False, message=str(e))
+
+
+
+
+
+
+    async def SyncState(self, request, context):
+        try:
+            last_known_block = request.last_known_block
+            new_blocks = self.blockchain.get_blocks_since(last_known_block)
+            return dagknight_pb2.SyncResponse(new_blocks=[self._block_to_proto(block) for block in new_blocks])
+        except Exception as e:
+            logger.error(f"Error in SyncState: {str(e)}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Internal error: {str(e)}")
+            return dagknight_pb2.SyncResponse()
+
+    async def VerifyZKP(self, request, context):
+        try:
+            is_valid = self.zk_system.verify(request.public_input, request.zk_proof)
+            return dagknight_pb2.ZKPVerificationResponse(is_valid=is_valid)
+        except Exception as e:
+            logger.error(f"Error in VerifyZKP: {str(e)}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Internal error: {str(e)}")
+            return dagknight_pb2.ZKPVerificationResponse(is_valid=False)
+
+    async def FullStateSync(self, request, context):
+        try:
+            chain = self.blockchain.chain
+            balances = self.blockchain.balances
+            stakes = self.blockchain.stakes
+            return dagknight_pb2.FullStateSyncResponse(
+                chain=[self._block_to_proto(block) for block in chain],
+                balances={k: float(v) for k, v in balances.items()},
+                stakes={k: float(v) for k, v in stakes.items()}
+            )
+        except Exception as e:
+            logger.error(f"Error in FullStateSync: {str(e)}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Internal error: {str(e)}")
+            return dagknight_pb2.FullStateSyncResponse()
+
+    def _block_to_proto(self, block):
+        return dagknight_pb2.Block(
+            previous_hash=block.previous_hash,
+            data=block.data,
+            quantum_signature=block.quantum_signature,
+            reward=float(block.reward),
+            transactions=[self._transaction_to_proto(tx) for tx in block.transactions],
+            hash=block.hash,
+            timestamp=int(block.timestamp),
+            nonce=int(block.nonce)
+        )
+
+    def _transaction_to_proto(self, tx):
+        return dagknight_pb2.Transaction(
+            sender=tx.sender,
+            receiver=tx.receiver,
+            amount=float(tx.amount),
+            price=float(tx.price),
+            buyer_id=tx.buyer_id,
+            seller_id=tx.seller_id,
+            public_key=tx.public_key,
+            signature=tx.signature
+        )
 
 
 @app.post("/token", response_model=Token)
@@ -5333,24 +5665,55 @@ def serve_directory_service(node_directory):
     server.start()
     logger.info(f"Directory service started on port {directory_port}")
     server.wait_for_termination()
+async def serve(secret_key, node_directory, vm, blockchain, zk_system):
+    print("Entering serve function")
+    try:
+        print("Creating gRPC server")
+        server = aio.server(
+            futures.ThreadPoolExecutor(max_workers=10),
+            options=[
+                ('grpc.max_send_message_length', 50 * 1024 * 1024),
+                ('grpc.max_receive_message_length', 50 * 1024 * 1024)
+            ]
+        )
+        print("gRPC server created")
 
-def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    node_directory = NodeDirectory()  # Ensure this is the correct initialization
-    dagknight_servicer = SecureDAGKnightServicer(SECRET_KEY, node_directory,vm)
-    dagknight_pb2_grpc.add_DAGKnightServicer_to_server(dagknight_servicer, server)
+        print("Initializing SecureDAGKnightServicer")
+        servicer = SecureDAGKnightServicer(secret_key, node_directory, vm, zk_system)
+        print("Adding servicer to server")
+        dagknight_pb2_grpc.add_DAGKnightServicer_to_server(servicer, server)
+        print("Servicer added to server")
 
-    grpc_port = int(os.getenv("GRPC_PORT", 50502))
-    service_names = (
-        dagknight_pb2.DESCRIPTOR.services_by_name['DAGKnight'].full_name,
-        reflection.SERVICE_NAME,
-    )
-    reflection.enable_server_reflection(service_names, server)
-    server.add_insecure_port(f'[::]:{grpc_port}')
-    server.start()
-    logger.info(f"gRPC server started on port {grpc_port}")
-    print(f"gRPC server started on port {grpc_port}. Connect using grpcurl or any gRPC client.")
-    return server, dagknight_servicer  # Return the server and servicer for testing purposes
+        print("Enabling server reflection")
+        service_names = (
+            dagknight_pb2.DESCRIPTOR.services_by_name['DAGKnight'].full_name,
+            reflection.SERVICE_NAME,
+        )
+        reflection.enable_server_reflection(service_names, server)
+        print("Server reflection enabled")
+
+        grpc_port = int(os.getenv("GRPC_PORT", 50502))
+        server_address = f'[::]:{grpc_port}'
+        print(f"Adding insecure port {server_address}")
+        server.add_insecure_port(server_address)
+        print(f"Insecure port {server_address} added")
+
+        print("Starting server")
+        await server.start()
+        print(f"gRPC server started on {server_address}")
+
+        print("Waiting for server termination")
+        await server.wait_for_termination()
+    except Exception as e:
+        print(f"Exception in serve function: {e}")
+        print(f"Exception traceback: {traceback.format_exc()}")
+    finally:
+        if 'server' in locals():
+            await server.stop(0)
+            print("gRPC server shutdown complete")
+
+
+
 
 
 def register_node_with_grpc(node_id, public_key, ip_address, port, directory_ip, directory_port):
@@ -5502,11 +5865,10 @@ async def periodic_network_stats_update():
         stats = await get_network_stats()
         await manager.broadcast_network_stats(stats)
         await asyncio.sleep(60)  # Update every minute
-
 async def get_network_stats():
     try:
         total_nodes = len(node_directory.discover_nodes())
-        total_transactions = blockchain.globalMetrics.totalTransactions
+        total_transactions = blockchain.globalMetrics['totalTransactions']  # Accessing totalTransactions from the globalMetrics dictionary
         total_blocks = len(blockchain.chain)
         average_block_time = calculate_average_block_time(blockchain.chain)
         current_difficulty = blockchain.difficulty
@@ -5523,6 +5885,7 @@ async def get_network_stats():
     except Exception as e:
         logger.error(f"Error fetching network stats: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching network stats")
+
 @app.get("/network_stats")
 async def get_network_stats_endpoint(pincode: str = Depends(authenticate)):
     return await get_network_stats()
@@ -6317,6 +6680,40 @@ class YieldFarm:
         return (self.balances.get(user, Decimal('0')) * (self._reward_per_token() - self.user_reward_per_token_paid.get(user, Decimal('0'))) / Decimal('1e18')) + self.rewards.get(user, Decimal('0'))
         
 node_directory = NodeDirectory()
+class SmartContract:
+    def __init__(self, address, code):
+        self.address = address
+        self.code = code
+        self.storage = {}
+
+    def execute(self, input_data):
+        # This is a simplified execution model. In a real implementation,
+        # you would have a more sophisticated execution environment.
+        context = {
+            'storage': self.storage,
+            'input': input_data
+        }
+        exec(self.code, {'input': input_data})
+        return locals().get('output', None)
+
+
+class PrivateSmartContract(SmartContract):
+    def __init__(self, address, code, zk_system):
+        super().__init__(address, code)
+        self.zk_system = zk_system
+    async def execute(self, input_data):
+        result = super().execute(input_data)
+        public_input = self.zk_system.hash(str(input_data), str(result))
+        secret = int.from_bytes(os.urandom(32), 'big')
+        zk_proof = self.zk_system.prove(secret, public_input)
+        return result, zk_proof
+
+
+
+    @staticmethod
+    def verify_execution(input_data, result, zk_proof, zk_system):
+        public_input = zk_system.stark.hash(str(input_data), str(result))
+        return zk_system.verify(public_input, zk_proof)
 
 
 @app.get("/get_node_details/{node_id}")
@@ -6734,16 +7131,69 @@ async def test_order_placement_benchmark_with_metrics(test_nodes):
     for node in test_nodes:
         order_book = node['exchange'].order_book.get_orders()
         assert len(order_book) == num_orders, f"Expected {num_orders} orders, but got {len(order_book)} for node {node['node_id']}"
+async def run_dashboard(blockchain, exchange):
+    from curses_dashboard.dashboard import DashboardUI
+    def curses_main(stdscr):
+        ui = DashboardUI(stdscr, blockchain, exchange)
+        asyncio.run(ui.run())
+
+    curses.wrapper(curses_main)
+
+async def run_curses_dashboard(blockchain, exchange):
+    from curses_dashboard.dashboard import DashboardUI
+    def curses_main(stdscr):
+        try:
+            # Initialize colors
+            curses.start_color()
+            curses.use_default_colors()
+            for i in range(0, curses.COLORS):
+                curses.init_pair(i + 1, i, -1)
+
+            # Initialize the dashboard UI
+            dashboard = DashboardUI(stdscr, blockchain, exchange)
+            
+            # Run the dashboard
+            asyncio.run(dashboard.run())
+        
+        except Exception as e:
+            # Handle any exceptions that occur during the dashboard's execution
+            logging.error(f"Error running curses dashboard: {str(e)}")
+            logging.error(traceback.format_exc())
+        
+        finally:
+            # Clean up curses settings and return terminal to normal state
+            curses.nocbreak()
+            stdscr.keypad(False)
+            curses.echo()
+            curses.endwin()
+
+    # Use curses.wrapper to handle initialization and cleanup
+    curses.wrapper(curses_main)
 
 
 
+def start_grpc_server(secret_key, node_directory, vm, blockchain, zk_system):
+    print("Entering start_grpc_server function")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        print("About to run serve function")
+        loop.run_until_complete(serve(secret_key, node_directory, vm, blockchain, zk_system))
+    except Exception as e:
+        print(f"Exception in start_grpc_server: {e}")
+        print(f"Exception traceback: {traceback.format_exc()}")
+    finally:
+        print("Closing event loop")
+        loop.close()
 async def async_main():
+    from curses_dashboard.dashboard import DashboardUI
     try:
         # Initialize the VM and create the genesis wallet
         vm = SimpleVM(gas_limit=10000, number_of_shards=10, nodes=[])
         logger.info("SimpleVM initialized successfully")
 
-        # Check if vm is properly initialized
+        # Check if VM is properly initialized
         if vm is None:
             raise ValueError("Failed to initialize VM")
 
@@ -6792,18 +7242,38 @@ async def async_main():
         exchange = EnhancedExchange(blockchain, vm, price_oracle, node_directory)
         exchange.order_book = EnhancedOrderBook()
 
-
-
         # Start the directory service in a separate thread
         directory_service_thread = threading.Thread(target=serve_directory_service, args=(node_directory,))
         directory_service_thread.start()
 
-        # Start the gRPC server in a separate thread
-        grpc_server_thread = threading.Thread(target=serve)
-        grpc_server_thread.start()
+        # Initialize zk_system for gRPC server
+        zk_system = SecureHybridZKStark(security_level=2)
+
+        print("About to start gRPC server thread")
+        try:
+            # Start the gRPC server in a separate thread
+            grpc_server_thread = threading.Thread(
+                target=start_grpc_server,
+                args=(secret_key, node_directory, vm, blockchain, zk_system)
+            )
+            grpc_server_thread.start()
+            print("gRPC server thread started")
+            logger.info("gRPC server thread started successfully.")
+
+            # Add a small delay to allow the gRPC server to initialize
+            await asyncio.sleep(5)
+
+            print("Checking if gRPC server thread is alive")
+            if grpc_server_thread.is_alive():
+                print("gRPC server thread is still running")
+            else:
+                print("gRPC server thread has stopped")
+        except Exception as e:
+            print(f"Failed to start the gRPC server thread: {e}")
+            logger.error(f"Failed to start the gRPC server thread: {e}")
 
         # Ensure the gRPC server is ready
-        time.sleep(2)
+        await asyncio.sleep(2)
 
         # Periodically discover nodes
         discovery_thread = threading.Thread(target=periodically_discover_nodes, args=(directory_ip, directory_port))
@@ -6816,46 +7286,21 @@ async def async_main():
         blockchain.on_new_block(manager.broadcast_new_block)
         blockchain.on_new_transaction(manager.broadcast_new_transaction)
 
-        # Define periodic mining function
-        async def periodic_mining(miner_address: str):
-            while True:
-                try:
-                    await mine_block(MineBlockRequest(
-                        node_id="automated_miner",
-                        wallet_address=miner_address,
-                        node_ip="127.0.0.1",
-                        node_port=8000
-                    ), pincode="automated_miner_pincode")
-                except Exception as e:
-                    logger.error(f"Error in periodic mining: {str(e)}")
-                await asyncio.sleep(600)  # Wait for 10 minutes before next mining attempt
+        # Start the curses dashboard directly in the event loop
+        def curses_main(stdscr):
+            # Initialize and run the dashboard UI
+            dashboard_ui = DashboardUI(stdscr, blockchain, exchange)
+            asyncio.run(dashboard_ui.run())
 
-        # Update the startup event
-        @app.on_event("startup")
-        async def startup_event():
-            await initialize_components()
-            asyncio.create_task(update_prices_periodically())
-            asyncio.create_task(periodic_mining(genesis_address))
-            asyncio.create_task(deploy_and_run_market_bot(exchange, vm, plata_contract, price_feed))
+        # Start the curses wrapper directly in the event loop
+        await asyncio.gather(
+            run_node(),  # Your existing gRPC node or FastAPI server
+            asyncio.to_thread(curses.wrapper, curses_main)  # Run the curses UI within the event loop
+        )
 
-
-
-        # Start the FastAPI server
-        config = uvicorn.Config(app, host="0.0.0.0", port=api_port)
-        server = uvicorn.Server(config)
-        await server.serve()
-        
     except Exception as e:
         logger.error(f"Error in async_main function: {str(e)}")
-        logger.error(traceback.format_exc())
         raise
 
-def main():
-    try:
-        asyncio.run(async_main())
-    except Exception as e:
-        logger.error(f"Unhandled error in main function: {str(e)}")
-        logger.error(traceback.format_exc())
-
 if __name__ == "__main__":
-    main()
+    asyncio.run(async_main())

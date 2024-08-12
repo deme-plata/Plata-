@@ -1,0 +1,18 @@
+[
+  "test_curses.py::TestDashboardUI::test_draw_network_stats",
+  "test_curses.py::TestDashboardUI::test_handle_input",
+  "test_curses.py::TestDashboardUI::test_send_transaction_ui",
+  "test_curses.py::TestDashboardUI::test_toggle_mining",
+  "test_curses.py::TestDashboardUI::test_update_mining_info",
+  "test_curses.py::TestDashboardUI::test_update_node_info",
+  "test_curses.py::TestDashboardUI::test_update_transactions",
+  "test_curses.py::TestDashboardUI::test_update_wallet_info",
+  "test_curses.py::TestExchangeDashboardUI::test_add_liquidity_ui",
+  "test_curses.py::TestExchangeDashboardUI::test_cancel_order_ui",
+  "test_curses.py::TestExchangeDashboardUI::test_handle_input",
+  "test_curses.py::TestExchangeDashboardUI::test_place_trade_ui",
+  "test_curses.py::TestExchangeDashboardUI::test_update_liquidity_pools",
+  "test_curses.py::TestExchangeDashboardUI::test_update_network_status",
+  "test_curses.py::TestExchangeDashboardUI::test_update_order_book",
+  "test_curses.py::TestExchangeDashboardUI::test_update_trading_pairs"
+]

@@ -1,0 +1,212 @@
+import curses
+import asyncio
+from decimal import Decimal
+from typing import Dict, List
+from .blockchain_interface import blockchain_interface
+
+class ExchangeDashboardUI:
+    def __init__(self, stdscr):
+        self.stdscr = curses.initscr()  # Call initscr() first
+
+        curses.curs_set(0)
+        curses.start_color()
+        curses.use_default_colors()
+        for i in range(0, curses.COLORS):
+            curses.init_pair(i + 1, i, -1)
+        self.setup_colors()
+        self.setup_windows()
+
+    def setup_colors(self):
+        self.TITLE_COLOR = curses.color_pair(14) | curses.A_BOLD
+        self.NORMAL_COLOR = curses.color_pair(7)
+        self.HIGHLIGHT_COLOR = curses.color_pair(10) | curses.A_BOLD
+        self.WARNING_COLOR = curses.color_pair(9) | curses.A_BOLD
+        self.BUY_COLOR = curses.color_pair(2)
+        self.SELL_COLOR = curses.color_pair(1)
+
+    def setup_windows(self):
+        self.height, self.width = self.stdscr.getmaxyx()
+        self.order_book_win = curses.newwin(self.height // 2, self.width // 2, 0, 0)
+        self.trading_pairs_win = curses.newwin(self.height // 2, self.width // 2, 0, self.width // 2)
+        self.liquidity_pools_win = curses.newwin(self.height // 2, self.width // 2, self.height // 2, 0)
+        self.network_status_win = curses.newwin(self.height // 2, self.width // 2, self.height // 2, self.width // 2)
+
+    def draw_borders(self):
+        for win in [self.order_book_win, self.trading_pairs_win, self.liquidity_pools_win, self.network_status_win]:
+            win.box()
+
+    def draw_title(self, win, title, y, x):
+        win.addstr(y, x, f"╔═ {title} ═╗", self.TITLE_COLOR)
+
+    async def update_order_book(self):
+        while True:
+            self.order_book_win.clear()
+            self.draw_borders()
+            self.draw_title(self.order_book_win, "Order Book", 0, 2)
+
+            orders = await blockchain_interface.exchange.get_orders()
+            buy_orders = [order for order in orders if order.order_type == 'buy']
+            sell_orders = [order for order in orders if order.order_type == 'sell']
+
+            buy_orders.sort(key=lambda x: x.price, reverse=True)
+            sell_orders.sort(key=lambda x: x.price)
+
+            for i, order in enumerate(buy_orders[:10], start=2):
+                self.order_book_win.addstr(i, 2, f"Buy  {order.amount:.4f} @ {order.price:.2f}", self.BUY_COLOR)
+
+            for i, order in enumerate(sell_orders[:10], start=2):
+                self.order_book_win.addstr(i, 40, f"Sell {order.amount:.4f} @ {order.price:.2f}", self.SELL_COLOR)
+
+            self.order_book_win.refresh()
+            await asyncio.sleep(1)
+
+    async def update_trading_pairs(self):
+        while True:
+            self.trading_pairs_win.clear()
+            self.draw_borders()
+            self.draw_title(self.trading_pairs_win, "Trading Pairs", 0, 2)
+
+            tradable_assets = await blockchain_interface.exchange.get_tradable_assets()
+            for i, asset in enumerate(tradable_assets, start=2):
+                price = await blockchain_interface.exchange.price_oracle.get_price(asset)
+                self.trading_pairs_win.addstr(i, 2, f"{asset}: ${price:.2f}", self.NORMAL_COLOR)
+
+            self.trading_pairs_win.refresh()
+            await asyncio.sleep(5)
+
+    async def update_liquidity_pools(self):
+        while True:
+            self.liquidity_pools_win.clear()
+            self.draw_borders()
+            self.draw_title(self.liquidity_pools_win, "Liquidity Pools", 0, 2)
+
+            pools = blockchain_interface.exchange.liquidity_pools
+            for i, (pair, pool) in enumerate(pools.items(), start=2):
+                reserves = pool.get_reserves()
+                self.liquidity_pools_win.addstr(i, 2, f"{pair}: {reserves[0]:.2f} / {reserves[1]:.2f}", self.NORMAL_COLOR)
+
+            self.liquidity_pools_win.refresh()
+            await asyncio.sleep(5)
+
+    async def update_network_status(self):
+        while True:
+            self.network_status_win.clear()
+            self.draw_borders()
+            self.draw_title(self.network_status_win, "Network Status", 0, 2)
+
+            node_stats = await blockchain_interface.get_node_stats()
+            network_stats = await blockchain_interface.get_network_stats()
+
+            self.network_status_win.addstr(2, 2, f"Connected Peers: {node_stats['connected_peers']}", self.NORMAL_COLOR)
+            self.network_status_win.addstr(3, 2, f"Block Height: {node_stats['block_height']}", self.NORMAL_COLOR)
+            self.network_status_win.addstr(4, 2, f"Last Block Time: {node_stats['last_block_time']}", self.NORMAL_COLOR)
+            self.network_status_win.addstr(5, 2, f"Mempool Size: {network_stats['mempool_size']}", self.NORMAL_COLOR)
+
+            consistency = sum(network_stats['network_consistency'].values()) / len(network_stats['network_consistency'])
+            color = self.HIGHLIGHT_COLOR if consistency > 0.9 else self.WARNING_COLOR
+            self.network_status_win.addstr(6, 2, f"Network Consistency: {consistency:.2%}", color)
+
+            self.network_status_win.refresh()
+            await asyncio.sleep(5)
+
+    async def handle_input(self):
+        while True:
+            try:
+                key = self.stdscr.getch()
+                if key == ord('q'):
+                    return
+                elif key == ord('t'):
+                    await self.place_trade_ui()
+                elif key == ord('c'):
+                    await self.cancel_order_ui()
+                elif key == ord('l'):
+                    await self.add_liquidity_ui()
+            except Exception as e:
+                self.show_popup("Error", str(e))
+            await asyncio.sleep(0.1)
+
+    async def place_trade_ui(self):
+        popup = curses.newwin(12, 50, (self.height - 12) // 2, (self.width - 50) // 2)
+        popup.box()
+        popup.addstr(0, 2, " Place Trade ", self.TITLE_COLOR)
+        popup.addstr(2, 2, "Pair: ", self.NORMAL_COLOR)
+        popup.addstr(4, 2, "Type (buy/sell): ", self.NORMAL_COLOR)
+        popup.addstr(6, 2, "Amount: ", self.NORMAL_COLOR)
+        popup.addstr(8, 2, "Price: ", self.NORMAL_COLOR)
+        popup.refresh()
+
+        curses.echo()
+        pair = popup.getstr(2, 8, 10).decode('utf-8')
+        order_type = popup.getstr(4, 18, 4).decode('utf-8')
+        amount = Decimal(popup.getstr(6, 10, 10).decode('utf-8'))
+        price = Decimal(popup.getstr(8, 9, 10).decode('utf-8'))
+        curses.noecho()
+
+        result = await blockchain_interface.exchange.place_limit_order(
+            "current_user",  # Replace with actual user authentication
+            order_type,
+            pair,
+            amount,
+            price
+        )
+        self.show_popup("Trade Result", f"Order placed with ID: {result}")
+
+    async def cancel_order_ui(self):
+        popup = curses.newwin(8, 50, (self.height - 8) // 2, (self.width - 50) // 2)
+        popup.box()
+        popup.addstr(0, 2, " Cancel Order ", self.TITLE_COLOR)
+        popup.addstr(2, 2, "Order ID: ", self.NORMAL_COLOR)
+        popup.refresh()
+
+        curses.echo()
+        order_id = popup.getstr(2, 12, 36).decode('utf-8')
+        curses.noecho()
+
+        result = await blockchain_interface.exchange.cancel_order("current_user", order_id)
+        self.show_popup("Cancel Result", f"Order cancellation: {result['status']}")
+
+    async def add_liquidity_ui(self):
+        popup = curses.newwin(14, 50, (self.height - 14) // 2, (self.width - 50) // 2)
+        popup.box()
+        popup.addstr(0, 2, " Add Liquidity ", self.TITLE_COLOR)
+        popup.addstr(2, 2, "Pool ID: ", self.NORMAL_COLOR)
+        popup.addstr(4, 2, "Amount A: ", self.NORMAL_COLOR)
+        popup.addstr(6, 2, "Amount B: ", self.NORMAL_COLOR)
+        popup.refresh()
+
+        curses.echo()
+        pool_id = popup.getstr(2, 11, 20).decode('utf-8')
+        amount_a = Decimal(popup.getstr(4, 11, 10).decode('utf-8'))
+        amount_b = Decimal(popup.getstr(6, 11, 10).decode('utf-8'))
+        curses.noecho()
+
+        result = await blockchain_interface.exchange.add_liquidity("current_user", pool_id, amount_a, amount_b)
+        self.show_popup("Liquidity Result", f"Liquidity added: {result}")
+
+    def show_popup(self, title, message):
+        h, w = 8, 50
+        y, x = (self.height - h) // 2, (self.width - w) // 2
+        popup = curses.newwin(h, w, y, x)
+        popup.box()
+        popup.addstr(0, 2, f" {title} ", self.TITLE_COLOR)
+        popup.addstr(2, 2, message, self.NORMAL_COLOR)
+        popup.addstr(h-2, 2, "Press any key to close", self.NORMAL_COLOR)
+        popup.refresh()
+        popup.getch()
+
+    async def run(self):
+        tasks = [
+            self.update_order_book(),
+            self.update_trading_pairs(),
+            self.update_liquidity_pools(),
+            self.update_network_status(),
+            self.handle_input()
+        ]
+        await asyncio.gather(*tasks)
+
+async def main(stdscr):
+    ui = ExchangeDashboardUI(stdscr)
+    await ui.run()
+
+if __name__ == "__main__":
+    curses.wrapper(lambda stdscr: asyncio.run(main(stdscr)))

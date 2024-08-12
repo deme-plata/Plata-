@@ -18,6 +18,7 @@ import asyncio
 from Order import Order
 from FiniteField import FiniteField, FieldElement
 from finite_field_factory import FiniteFieldFactory
+import traceback
 
 from EnhancedOrderBook import EnhancedOrderBook
 
@@ -429,6 +430,8 @@ class EnhancedExchange:
         self.quantum_features = QuantumInspiredFeatures()
         self.node_directory = node_directory
         self.margin_positions = {}
+        self.p2p_node = blockchain.p2p_node  # Use the same P2PNode as the blockchain
+
     async def sync_state(self):
         try:
             remote_orders = []
@@ -835,15 +838,55 @@ class EnhancedExchange:
 
     async def get_orders(self) -> List[Order]:
         return self.order_book.get_orders()
+    async def get_tradable_assets(self) -> List[str]:
+        """
+        Returns a list of tradable assets on the exchange.
+        This includes all tokens that have active liquidity pools and supported trading pairs.
+        """
+        try:
+            tradable_assets = set()
+
+            # Add assets from active liquidity pools
+            for pool_id, pool in self.liquidity_pools.items():
+                if '_' in pool_id:
+                    tokens = pool_id.split('_')
+                    if len(tokens) == 2:
+                        token_a, token_b = tokens
+                        if token_a:
+                            tradable_assets.add(token_a)
+                        if token_b:
+                            tradable_assets.add(token_b)
+                    else:
+                        logger.warning(f"Skipping invalid pool_id: '{pool_id}'")
+                else:
+                    logger.warning(f"Skipping invalid pool_id: '{pool_id}'")
+
+            # Add assets from supported lending pools
+            for currency in self.lending_pools.keys():
+                if currency:
+                    tradable_assets.add(currency)
+
+            # Return the list of tradable assets
+            return list(tradable_assets)
+
+        except Exception as e:
+            logger.error(f"Error in get_tradable_assets: {e}")
+            logger.error(traceback.format_exc())
+            return []
+
+
         
 from decimal import Decimal
 from typing import Dict, List, Tuple, Any
 from SecureHybridZKStark import SecureHybridZKStark
+from P2PNode import P2PNode, Message, MessageType
 class EnhancedExchangeWithZKStarks(EnhancedExchange):
-    def __init__(self, blockchain, vm, price_oracle, node_directory, desired_security_level=128):
-        # Call the parent class constructor to initialize inherited attributes
+    def __init__(self, blockchain, vm, price_oracle, node_directory, desired_security_level, host=None, port=None):
         super().__init__(blockchain, vm, price_oracle, node_directory)
-        
+        self.p2p_node = P2PNode(host, port, self.blockchain, security_level=desired_security_level)
+        self.host = host
+        self.port = port
+
         # Initialize the FiniteField instance using a factory or method
         self.finite_field = FiniteFieldFactory.get_instance()
         
@@ -859,6 +902,12 @@ class EnhancedExchangeWithZKStarks(EnhancedExchange):
         
         # Initialize private balances as a dictionary, mapping user IDs to their respective balance dictionaries
         self.private_balances: Dict[str, Dict[str, int]] = {}
+     
+
+    async def start_p2p(self):
+        from P2PNode import P2PNode  # Move the import here
+
+        await self.p2p_node.start()
 
 
     async def private_deposit(self, user: str, currency: str, amount: Decimal):
@@ -908,18 +957,36 @@ class EnhancedExchangeWithZKStarks(EnhancedExchange):
     async def place_order(self, order_data: Dict[str, Any]) -> Dict[str, str]:
         result = await super().place_order(order_data)
         if result['status'] == 'success':
-            # Generate a zero-knowledge proof of order placement
             proof = self.zk_system.prove(int(order_data['amount'] * 10**18), self.zk_system.stark.hash(order_data['user_id'], order_data['pair'], int(order_data['amount'] * 10**18)))
             result['zk_proof'] = proof
+            
+            # Propagate the order with ZK proof
+            await self.p2p_node.broadcast({
+                'type': MessageType.PLACE_ORDER.value,
+                'payload': {
+                    'order': order_data,
+                    'zk_proof': proof
+                }
+            })
         return result
 
     async def cancel_order(self, user_id: str, order_id: str) -> Dict[str, str]:
         result = await super().cancel_order(user_id, order_id)
         if result['status'] == 'success':
-            # Generate a zero-knowledge proof of order cancellation
             proof = self.zk_system.prove(int(order_id, 16), self.zk_system.stark.hash(user_id, order_id))
             result['zk_proof'] = proof
+            
+            # Propagate the cancellation with ZK proof
+            await self.p2p_node.broadcast({
+                'type': MessageType.CANCEL_ORDER.value,
+                'payload': {
+                    'user_id': user_id,
+                    'order_id': order_id,
+                    'zk_proof': proof
+                }
+            })
         return result
+
 
     async def add_liquidity(self, user_id: str, pool_id: str, amount_a: Decimal, amount_b: Decimal):
         result = await super().add_liquidity(user_id, pool_id, amount_a, amount_b)
@@ -950,6 +1017,70 @@ class EnhancedExchangeWithZKStarks(EnhancedExchange):
         # Generate a zero-knowledge proof of margin position closing
         proof = self.zk_system.prove(int(pnl * 10**18), self.zk_system.stark.hash(user, pair, int(pnl * 10**18)))
         return pnl, proof
+    async def get_tradable_assets(self) -> List[str]:
+        """
+        Returns a list of tradable assets on the exchange.
+        This includes all tokens that have active liquidity pools and supported trading pairs.
+        """
+        try:
+            tradable_assets = set()
+
+            # Add assets from active liquidity pools
+            for pool_id, pool in self.liquidity_pools.items():
+                if '_' in pool_id:
+                    tokens = pool_id.split('_')
+                    if len(tokens) == 2:
+                        token_a, token_b = tokens
+                        if token_a:
+                            tradable_assets.add(token_a)
+                        if token_b:
+                            tradable_assets.add(token_b)
+                    else:
+                        logger.warning(f"Skipping invalid pool_id: '{pool_id}'")
+                else:
+                    logger.warning(f"Skipping invalid pool_id: '{pool_id}'")
+
+            # Add assets from supported lending pools
+            for currency in self.lending_pools.keys():
+                if currency:
+                    tradable_assets.add(currency)
+
+            # Return the list of tradable assets
+            return list(tradable_assets)
+
+        except Exception as e:
+            logger.error(f"Error in get_tradable_assets: {e}")
+            logger.error(traceback.format_exc())
+            return []
+            
+    async def get_orders(self):
+        return self.order_book.get_orders()
+
+    async def place_limit_order(self, user: str, order_type: str, pair: str, amount: Decimal, price: Decimal):
+        # Implementation details depend on your specific order book logic
+        order = Order(user_id=user, type='limit', order_type=order_type, pair=pair, amount=amount, price=price)
+        self.order_book.add_order(order)
+        return order.id
+
+    async def cancel_order(self, user: str, order_id: str):
+        # Implementation details depend on your specific order book logic
+        success = self.order_book.cancel_order(order_id)
+        return {"status": "success" if success else "failure"}
+
+    async def add_liquidity(self, user: str, pool_id: str, amount_a: Decimal, amount_b: Decimal):
+        # Implementation details depend on your liquidity pool logic
+        if pool_id not in self.liquidity_pools:
+            self.liquidity_pools[pool_id] = LiquidityPool(pool_id.split('_')[0], pool_id.split('_')[1])
+        pool = self.liquidity_pools[pool_id]
+        return await pool.add_liquidity(user, amount_a, amount_b)
+
+    async def get_tradable_assets(self):
+        # Return a list of all tradable assets
+        assets = set()
+        for pool in self.liquidity_pools.values():
+            assets.add(pool.token_a)
+            assets.add(pool.token_b)
+        return list(assets)
 
     # Other methods from EnhancedExchange remain unchanged       
 

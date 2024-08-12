@@ -41,6 +41,11 @@ service DAGKnight {
   rpc PropagateOrder (PropagateOrderRequest) returns (PropagateOrderResponse) {}
   rpc PropagateTrade (PropagateTradeRequest) returns (PropagateTradeResponse) {}
   rpc PropagateLiquidityChange (PropagateLiquidityChangeRequest) returns (PropagateLiquidityChangeResponse) {}
+
+  // Methods from plata service
+  rpc PropagateTransaction(Transaction) returns (PropagationResponse) {}
+  rpc SyncState(SyncRequest) returns (SyncResponse) {}
+  rpc VerifyZKP(ZKPVerificationRequest) returns (ZKPVerificationResponse) {}
 }
 
 // Request message for FullStateSync
@@ -120,9 +125,12 @@ message Transaction {
   string buyer_id = 7;     // New field
   string seller_id = 8;    // New field
   int64 price = 9;         // New field (assuming price is an integer)
+
+  // Fields from plata service
+  
+  bytes public_input = 11;
+  bytes zk_proof = 10;
 }
-
-
 
 // Request message for MineBlock
 message MineBlockRequest {
@@ -226,4 +234,27 @@ message PropagateLiquidityChangeRequest {
 message PropagateLiquidityChangeResponse {
   bool success = 1;
   string message = 2;
+}
+
+// Plata service messages
+message PropagationResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SyncRequest {
+  uint64 last_known_block = 1;
+}
+
+message SyncResponse {
+  repeated Block new_blocks = 1;
+}
+
+message ZKPVerificationRequest {
+  bytes zk_proof = 1;
+  bytes public_input = 2;
+}
+
+message ZKPVerificationResponse {
+  bool is_valid = 1;
 }

@@ -1,0 +1,1032 @@
+root@debian-s-1vcpu-512mb-10gb-fra1-01:/home/myuser/QuantumDagknightCoin/curses_dashboard# pytest -s -v test_curses.py
+====================================================================== test session starts =======================================================================
+platform linux -- Python 3.9.2, pytest-8.2.2, pluggy-1.5.0 -- /home/myuser/myquantumproject/myenv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/myuser/QuantumDagknightCoin/curses_dashboard
+plugins: trio-0.8.0, django-4.8.0, asyncio-0.23.7, web3-6.20.0, anyio-4.4.0, mock-3.14.0
+asyncio: mode=strict
+collecting ... The field size for security level 10 is 1031.
+[FRI INIT] Field: FiniteField(modulus=340282366920938463463374607431768211455), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+[FRI INIT] Field: FiniteField(modulus=5), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+[FRI INIT] Field: FiniteField(modulus=340282366920938463463374607431768211455), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+VM object: <vm.SimpleVM object at 0x7f6ed757f820>
+[FRI INIT] Field: FiniteField(modulus=5), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MjM0NDgzMjQsImlhdCI6MTcyMzQ0NDcyNCwic3ViIjoidXNlcl9pZCJ9.PxFRAEaltAI4U3sbUfWIHBjBPb5FC2OwThPiVbM_nNo
+VM object: <vm.SimpleVM object at 0x7f6ed757f820>
+[FRI INIT] Field: FiniteField(modulus=5), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+Deployed contract at address: 0x3be9df80b4ffc2e0df49dd29f2fd9517312b11e7
+[FRI INIT] Field: FiniteField(modulus=340282366920938463463374607431768211455), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+[FRI INIT] Field: FiniteField(modulus=5), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+[FRI INIT] Field: FiniteField(modulus=5), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+[FRI INIT] Field: FiniteField(modulus=340282366920938463463374607431768211455), Domain size: 64
+[FRI INIT] Field: FiniteField(modulus=1031), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+[FRI INIT] Field: FiniteField(modulus=340282366920938463463374607431768211455), Domain size: 64
+[FRI INIT] Field: FiniteField(modulus=5), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+[FRI INIT] Field: FiniteField(modulus=340282366920938463463374607431768211455), Domain size: 64
+[SETUP] Setup completed with g1 and g2 initialized
+[INIT] ZKSnark initialized successfully
+collected 16 items
+
+test_curses.py::TestExchangeDashboardUI::test_add_liquidity_ui FAILED
+test_curses.py::TestExchangeDashboardUI::test_cancel_order_ui FAILED
+test_curses.py::TestExchangeDashboardUI::test_handle_input FAILED
+test_curses.py::TestExchangeDashboardUI::test_place_trade_ui FAILED
+test_curses.py::TestExchangeDashboardUI::test_update_liquidity_pools FAILED
+test_curses.py::TestExchangeDashboardUI::test_update_network_status FAILED
+test_curses.py::TestExchangeDashboardUI::test_update_order_book FAILED
+test_curses.py::TestExchangeDashboardUI::test_update_trading_pairs FAILED
+test_curses.py::TestDashboardUI::test_draw_network_stats FAILED
+test_curses.py::TestDashboardUI::test_handle_input FAILED
+test_curses.py::TestDashboardUI::test_send_transaction_ui FAILED
+test_curses.py::TestDashboardUI::test_toggle_mining FAILED
+test_curses.py::TestDashboardUI::test_update_mining_info FAILED
+test_curses.py::TestDashboardUI::test_update_node_info FAILED
+test_curses.py::TestDashboardUI::test_update_transactions FAILED
+test_curses.py::TestDashboardUI::test_update_wallet_info FAILED
+
+============================================================================ FAILURES ============================================================================
+_________________________________________________________ TestExchangeDashboardUI.test_add_liquidity_ui __________________________________________________________
+
+self = <curses_dashboard.test_curses.TestExchangeDashboardUI testMethod=test_add_liquidity_ui>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.exchange = AsyncMock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+        with patch('curses_dashboard.ExchangeDashboardUI.blockchain_interface', self.mock_blockchain_interface):
+>           self.ui = ExchangeDashboardUI(self.mock_stdscr)
+
+test_curses.py:51:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+ExchangeDashboardUI.py:11: in __init__
+    curses.start_color()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def start_color():
+        import _curses, curses
+>       retval = _curses.start_color()
+E       _curses.error: must call initscr() first
+
+/usr/lib/python3.9/curses/__init__.py:44: error
+__________________________________________________________ TestExchangeDashboardUI.test_cancel_order_ui __________________________________________________________
+
+self = <curses_dashboard.test_curses.TestExchangeDashboardUI testMethod=test_cancel_order_ui>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.exchange = AsyncMock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+        with patch('curses_dashboard.ExchangeDashboardUI.blockchain_interface', self.mock_blockchain_interface):
+>           self.ui = ExchangeDashboardUI(self.mock_stdscr)
+
+test_curses.py:51:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+ExchangeDashboardUI.py:11: in __init__
+    curses.start_color()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def start_color():
+        import _curses, curses
+>       retval = _curses.start_color()
+E       _curses.error: must call initscr() first
+
+/usr/lib/python3.9/curses/__init__.py:44: error
+___________________________________________________________ TestExchangeDashboardUI.test_handle_input ____________________________________________________________
+
+self = <curses_dashboard.test_curses.TestExchangeDashboardUI testMethod=test_handle_input>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.exchange = AsyncMock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+        with patch('curses_dashboard.ExchangeDashboardUI.blockchain_interface', self.mock_blockchain_interface):
+>           self.ui = ExchangeDashboardUI(self.mock_stdscr)
+
+test_curses.py:51:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+ExchangeDashboardUI.py:11: in __init__
+    curses.start_color()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def start_color():
+        import _curses, curses
+>       retval = _curses.start_color()
+E       _curses.error: must call initscr() first
+
+/usr/lib/python3.9/curses/__init__.py:44: error
+__________________________________________________________ TestExchangeDashboardUI.test_place_trade_ui ___________________________________________________________
+
+self = <curses_dashboard.test_curses.TestExchangeDashboardUI testMethod=test_place_trade_ui>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.exchange = AsyncMock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+        with patch('curses_dashboard.ExchangeDashboardUI.blockchain_interface', self.mock_blockchain_interface):
+>           self.ui = ExchangeDashboardUI(self.mock_stdscr)
+
+test_curses.py:51:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+ExchangeDashboardUI.py:11: in __init__
+    curses.start_color()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def start_color():
+        import _curses, curses
+>       retval = _curses.start_color()
+E       _curses.error: must call initscr() first
+
+/usr/lib/python3.9/curses/__init__.py:44: error
+______________________________________________________ TestExchangeDashboardUI.test_update_liquidity_pools _______________________________________________________
+
+self = <curses_dashboard.test_curses.TestExchangeDashboardUI testMethod=test_update_liquidity_pools>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.exchange = AsyncMock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+        with patch('curses_dashboard.ExchangeDashboardUI.blockchain_interface', self.mock_blockchain_interface):
+>           self.ui = ExchangeDashboardUI(self.mock_stdscr)
+
+test_curses.py:51:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+ExchangeDashboardUI.py:11: in __init__
+    curses.start_color()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def start_color():
+        import _curses, curses
+>       retval = _curses.start_color()
+E       _curses.error: must call initscr() first
+
+/usr/lib/python3.9/curses/__init__.py:44: error
+_______________________________________________________ TestExchangeDashboardUI.test_update_network_status _______________________________________________________
+
+self = <curses_dashboard.test_curses.TestExchangeDashboardUI testMethod=test_update_network_status>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.exchange = AsyncMock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+        with patch('curses_dashboard.ExchangeDashboardUI.blockchain_interface', self.mock_blockchain_interface):
+>           self.ui = ExchangeDashboardUI(self.mock_stdscr)
+
+test_curses.py:51:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+ExchangeDashboardUI.py:11: in __init__
+    curses.start_color()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def start_color():
+        import _curses, curses
+>       retval = _curses.start_color()
+E       _curses.error: must call initscr() first
+
+/usr/lib/python3.9/curses/__init__.py:44: error
+_________________________________________________________ TestExchangeDashboardUI.test_update_order_book _________________________________________________________
+
+self = <curses_dashboard.test_curses.TestExchangeDashboardUI testMethod=test_update_order_book>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.exchange = AsyncMock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+        with patch('curses_dashboard.ExchangeDashboardUI.blockchain_interface', self.mock_blockchain_interface):
+>           self.ui = ExchangeDashboardUI(self.mock_stdscr)
+
+test_curses.py:51:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+ExchangeDashboardUI.py:11: in __init__
+    curses.start_color()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def start_color():
+        import _curses, curses
+>       retval = _curses.start_color()
+E       _curses.error: must call initscr() first
+
+/usr/lib/python3.9/curses/__init__.py:44: error
+_______________________________________________________ TestExchangeDashboardUI.test_update_trading_pairs ________________________________________________________
+
+self = <curses_dashboard.test_curses.TestExchangeDashboardUI testMethod=test_update_trading_pairs>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.exchange = AsyncMock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+        with patch('curses_dashboard.ExchangeDashboardUI.blockchain_interface', self.mock_blockchain_interface):
+>           self.ui = ExchangeDashboardUI(self.mock_stdscr)
+
+test_curses.py:51:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+ExchangeDashboardUI.py:11: in __init__
+    curses.start_color()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def start_color():
+        import _curses, curses
+>       retval = _curses.start_color()
+E       _curses.error: must call initscr() first
+
+/usr/lib/python3.9/curses/__init__.py:44: error
+____________________________________________________________ TestDashboardUI.test_draw_network_stats _____________________________________________________________
+
+self = <curses_dashboard.test_curses.TestDashboardUI testMethod=test_draw_network_stats>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_wallet_balance = AsyncMock()
+        self.mock_blockchain_interface.get_transaction_history = AsyncMock()
+        self.mock_blockchain_interface.send_transaction = AsyncMock()
+        self.mock_blockchain_interface.start_mining = AsyncMock()
+        self.mock_blockchain_interface.stop_mining = AsyncMock()
+        self.mock_blockchain_interface.get_mining_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+>       with patch('curses_dashboard.dashboard.blockchain_interface', self.mock_blockchain_interface):
+
+test_curses.py:194:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.9/unittest/mock.py:1405: in __enter__
+    original, local = self.get_original()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <unittest.mock._patch object at 0x7f6ed41e3d30>
+
+    def get_original(self):
+        target = self.getter()
+        name = self.attribute
+
+        original = DEFAULT
+        local = False
+
+        try:
+            original = target.__dict__[name]
+        except (AttributeError, KeyError):
+            original = getattr(target, name, DEFAULT)
+        else:
+            local = True
+
+        if name in _builtins and isinstance(target, ModuleType):
+            self.create = True
+
+        if not self.create and original is DEFAULT:
+>           raise AttributeError(
+                "%s does not have the attribute %r" % (target, name)
+            )
+E           AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blockchain_interface'
+
+/usr/lib/python3.9/unittest/mock.py:1378: AttributeError
+_______________________________________________________________ TestDashboardUI.test_handle_input ________________________________________________________________
+
+self = <curses_dashboard.test_curses.TestDashboardUI testMethod=test_handle_input>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_wallet_balance = AsyncMock()
+        self.mock_blockchain_interface.get_transaction_history = AsyncMock()
+        self.mock_blockchain_interface.send_transaction = AsyncMock()
+        self.mock_blockchain_interface.start_mining = AsyncMock()
+        self.mock_blockchain_interface.stop_mining = AsyncMock()
+        self.mock_blockchain_interface.get_mining_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+>       with patch('curses_dashboard.dashboard.blockchain_interface', self.mock_blockchain_interface):
+
+test_curses.py:194:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.9/unittest/mock.py:1405: in __enter__
+    original, local = self.get_original()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <unittest.mock._patch object at 0x7f6ed41fabe0>
+
+    def get_original(self):
+        target = self.getter()
+        name = self.attribute
+
+        original = DEFAULT
+        local = False
+
+        try:
+            original = target.__dict__[name]
+        except (AttributeError, KeyError):
+            original = getattr(target, name, DEFAULT)
+        else:
+            local = True
+
+        if name in _builtins and isinstance(target, ModuleType):
+            self.create = True
+
+        if not self.create and original is DEFAULT:
+>           raise AttributeError(
+                "%s does not have the attribute %r" % (target, name)
+            )
+E           AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blockchain_interface'
+
+/usr/lib/python3.9/unittest/mock.py:1378: AttributeError
+____________________________________________________________ TestDashboardUI.test_send_transaction_ui ____________________________________________________________
+
+self = <curses_dashboard.test_curses.TestDashboardUI testMethod=test_send_transaction_ui>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_wallet_balance = AsyncMock()
+        self.mock_blockchain_interface.get_transaction_history = AsyncMock()
+        self.mock_blockchain_interface.send_transaction = AsyncMock()
+        self.mock_blockchain_interface.start_mining = AsyncMock()
+        self.mock_blockchain_interface.stop_mining = AsyncMock()
+        self.mock_blockchain_interface.get_mining_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+>       with patch('curses_dashboard.dashboard.blockchain_interface', self.mock_blockchain_interface):
+
+test_curses.py:194:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.9/unittest/mock.py:1405: in __enter__
+    original, local = self.get_original()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <unittest.mock._patch object at 0x7f6ed431f130>
+
+    def get_original(self):
+        target = self.getter()
+        name = self.attribute
+
+        original = DEFAULT
+        local = False
+
+        try:
+            original = target.__dict__[name]
+        except (AttributeError, KeyError):
+            original = getattr(target, name, DEFAULT)
+        else:
+            local = True
+
+        if name in _builtins and isinstance(target, ModuleType):
+            self.create = True
+
+        if not self.create and original is DEFAULT:
+>           raise AttributeError(
+                "%s does not have the attribute %r" % (target, name)
+            )
+E           AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blockchain_interface'
+
+/usr/lib/python3.9/unittest/mock.py:1378: AttributeError
+_______________________________________________________________ TestDashboardUI.test_toggle_mining _______________________________________________________________
+
+self = <curses_dashboard.test_curses.TestDashboardUI testMethod=test_toggle_mining>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_wallet_balance = AsyncMock()
+        self.mock_blockchain_interface.get_transaction_history = AsyncMock()
+        self.mock_blockchain_interface.send_transaction = AsyncMock()
+        self.mock_blockchain_interface.start_mining = AsyncMock()
+        self.mock_blockchain_interface.stop_mining = AsyncMock()
+        self.mock_blockchain_interface.get_mining_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+>       with patch('curses_dashboard.dashboard.blockchain_interface', self.mock_blockchain_interface):
+
+test_curses.py:194:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.9/unittest/mock.py:1405: in __enter__
+    original, local = self.get_original()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <unittest.mock._patch object at 0x7f6ed41f62b0>
+
+    def get_original(self):
+        target = self.getter()
+        name = self.attribute
+
+        original = DEFAULT
+        local = False
+
+        try:
+            original = target.__dict__[name]
+        except (AttributeError, KeyError):
+            original = getattr(target, name, DEFAULT)
+        else:
+            local = True
+
+        if name in _builtins and isinstance(target, ModuleType):
+            self.create = True
+
+        if not self.create and original is DEFAULT:
+>           raise AttributeError(
+                "%s does not have the attribute %r" % (target, name)
+            )
+E           AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blockchain_interface'
+
+/usr/lib/python3.9/unittest/mock.py:1378: AttributeError
+____________________________________________________________ TestDashboardUI.test_update_mining_info _____________________________________________________________
+
+self = <curses_dashboard.test_curses.TestDashboardUI testMethod=test_update_mining_info>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_wallet_balance = AsyncMock()
+        self.mock_blockchain_interface.get_transaction_history = AsyncMock()
+        self.mock_blockchain_interface.send_transaction = AsyncMock()
+        self.mock_blockchain_interface.start_mining = AsyncMock()
+        self.mock_blockchain_interface.stop_mining = AsyncMock()
+        self.mock_blockchain_interface.get_mining_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+>       with patch('curses_dashboard.dashboard.blockchain_interface', self.mock_blockchain_interface):
+
+test_curses.py:194:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.9/unittest/mock.py:1405: in __enter__
+    original, local = self.get_original()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <unittest.mock._patch object at 0x7f6ed418e6d0>
+
+    def get_original(self):
+        target = self.getter()
+        name = self.attribute
+
+        original = DEFAULT
+        local = False
+
+        try:
+            original = target.__dict__[name]
+        except (AttributeError, KeyError):
+            original = getattr(target, name, DEFAULT)
+        else:
+            local = True
+
+        if name in _builtins and isinstance(target, ModuleType):
+            self.create = True
+
+        if not self.create and original is DEFAULT:
+>           raise AttributeError(
+                "%s does not have the attribute %r" % (target, name)
+            )
+E           AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blockchain_interface'
+
+/usr/lib/python3.9/unittest/mock.py:1378: AttributeError
+_____________________________________________________________ TestDashboardUI.test_update_node_info ______________________________________________________________
+
+self = <curses_dashboard.test_curses.TestDashboardUI testMethod=test_update_node_info>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_wallet_balance = AsyncMock()
+        self.mock_blockchain_interface.get_transaction_history = AsyncMock()
+        self.mock_blockchain_interface.send_transaction = AsyncMock()
+        self.mock_blockchain_interface.start_mining = AsyncMock()
+        self.mock_blockchain_interface.stop_mining = AsyncMock()
+        self.mock_blockchain_interface.get_mining_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+>       with patch('curses_dashboard.dashboard.blockchain_interface', self.mock_blockchain_interface):
+
+test_curses.py:194:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.9/unittest/mock.py:1405: in __enter__
+    original, local = self.get_original()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <unittest.mock._patch object at 0x7f6ed41bb580>
+
+    def get_original(self):
+        target = self.getter()
+        name = self.attribute
+
+        original = DEFAULT
+        local = False
+
+        try:
+            original = target.__dict__[name]
+        except (AttributeError, KeyError):
+            original = getattr(target, name, DEFAULT)
+        else:
+            local = True
+
+        if name in _builtins and isinstance(target, ModuleType):
+            self.create = True
+
+        if not self.create and original is DEFAULT:
+>           raise AttributeError(
+                "%s does not have the attribute %r" % (target, name)
+            )
+E           AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blockchain_interface'
+
+/usr/lib/python3.9/unittest/mock.py:1378: AttributeError
+____________________________________________________________ TestDashboardUI.test_update_transactions ____________________________________________________________
+
+self = <curses_dashboard.test_curses.TestDashboardUI testMethod=test_update_transactions>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_wallet_balance = AsyncMock()
+        self.mock_blockchain_interface.get_transaction_history = AsyncMock()
+        self.mock_blockchain_interface.send_transaction = AsyncMock()
+        self.mock_blockchain_interface.start_mining = AsyncMock()
+        self.mock_blockchain_interface.stop_mining = AsyncMock()
+        self.mock_blockchain_interface.get_mining_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+>       with patch('curses_dashboard.dashboard.blockchain_interface', self.mock_blockchain_interface):
+
+test_curses.py:194:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.9/unittest/mock.py:1405: in __enter__
+    original, local = self.get_original()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <unittest.mock._patch object at 0x7f6ed420df10>
+
+    def get_original(self):
+        target = self.getter()
+        name = self.attribute
+
+        original = DEFAULT
+        local = False
+
+        try:
+            original = target.__dict__[name]
+        except (AttributeError, KeyError):
+            original = getattr(target, name, DEFAULT)
+        else:
+            local = True
+
+        if name in _builtins and isinstance(target, ModuleType):
+            self.create = True
+
+        if not self.create and original is DEFAULT:
+>           raise AttributeError(
+                "%s does not have the attribute %r" % (target, name)
+            )
+E           AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blockchain_interface'
+
+/usr/lib/python3.9/unittest/mock.py:1378: AttributeError
+____________________________________________________________ TestDashboardUI.test_update_wallet_info _____________________________________________________________
+
+self = <curses_dashboard.test_curses.TestDashboardUI testMethod=test_update_wallet_info>
+
+    def setUp(self):
+        self.mock_stdscr = Mock()
+        self.mock_stdscr.getmaxyx.return_value = (50, 150)  # Simulate a 50x150 terminal
+
+        # Mock curses functions
+        patcher = patch.multiple(
+            'curses',
+            initscr=Mock(),
+            endwin=Mock(),
+            curs_set=Mock(),
+            color_pair=Mock(return_value=0),
+            A_BOLD=4,
+            newwin=Mock(),
+            echo=Mock(),
+            noecho=Mock()
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        # Mock blockchain_interface
+        self.mock_blockchain_interface = Mock()
+        self.mock_blockchain_interface.get_node_stats = AsyncMock()
+        self.mock_blockchain_interface.get_wallet_balance = AsyncMock()
+        self.mock_blockchain_interface.get_transaction_history = AsyncMock()
+        self.mock_blockchain_interface.send_transaction = AsyncMock()
+        self.mock_blockchain_interface.start_mining = AsyncMock()
+        self.mock_blockchain_interface.stop_mining = AsyncMock()
+        self.mock_blockchain_interface.get_mining_stats = AsyncMock()
+        self.mock_blockchain_interface.get_network_stats = AsyncMock()
+
+>       with patch('curses_dashboard.dashboard.blockchain_interface', self.mock_blockchain_interface):
+
+test_curses.py:194:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+/usr/lib/python3.9/unittest/mock.py:1405: in __enter__
+    original, local = self.get_original()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <unittest.mock._patch object at 0x7f6ed446ff70>
+
+    def get_original(self):
+        target = self.getter()
+        name = self.attribute
+
+        original = DEFAULT
+        local = False
+
+        try:
+            original = target.__dict__[name]
+        except (AttributeError, KeyError):
+            original = getattr(target, name, DEFAULT)
+        else:
+            local = True
+
+        if name in _builtins and isinstance(target, ModuleType):
+            self.create = True
+
+        if not self.create and original is DEFAULT:
+>           raise AttributeError(
+                "%s does not have the attribute %r" % (target, name)
+            )
+E           AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blockchain_interface'
+
+/usr/lib/python3.9/unittest/mock.py:1378: AttributeError
+======================================================================== warnings summary ========================================================================
+../../myquantumproject/myenv/lib/python3.9/site-packages/qiskit_aer/__init__.py:89
+  /home/myuser/myquantumproject/myenv/lib/python3.9/site-packages/qiskit_aer/__init__.py:89: DeprecationWarning: The class ``qiskit.providers.provider.Provider`` is deprecated as of qiskit 1.1. It will be removed no earlier than 3 months after the release date. The abstract Provider and ProviderV1 classes are deprecated and will be removed in 2.0. You can just remove it as the parent class and a `get_backend` method that returns the backends from `self.backend`.
+    Aer = AerProvider()  # pylint: disable=invalid-name
+
+../../myquantumproject/myenv/lib/python3.9/site-packages/pydantic/_internal/_config.py:291
+../../myquantumproject/myenv/lib/python3.9/site-packages/pydantic/_internal/_config.py:291
+../../myquantumproject/myenv/lib/python3.9/site-packages/pydantic/_internal/_config.py:291
+  /home/myuser/myquantumproject/myenv/lib/python3.9/site-packages/pydantic/_internal/_config.py:291: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.8/migration/
+    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)
+
+../quantumdagknight.py:3472
+  /home/myuser/QuantumDagknightCoin/quantumdagknight.py:3472: DeprecationWarning:
+          on_event is deprecated, use lifespan event handlers instead.
+
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+    @app.on_event("startup")
+
+../../myquantumproject/myenv/lib/python3.9/site-packages/fastapi/applications.py:4495
+../../myquantumproject/myenv/lib/python3.9/site-packages/fastapi/applications.py:4495
+../../myquantumproject/myenv/lib/python3.9/site-packages/fastapi/applications.py:4495
+  /home/myuser/myquantumproject/myenv/lib/python3.9/site-packages/fastapi/applications.py:4495: DeprecationWarning:
+          on_event is deprecated, use lifespan event handlers instead.
+
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+    return self.router.on_event(event_type)
+
+../quantumdagknight.py:3477
+  /home/myuser/QuantumDagknightCoin/quantumdagknight.py:3477: DeprecationWarning:
+          on_event is deprecated, use lifespan event handlers instead.
+
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+    @app.on_event("shutdown")
+
+../quantumdagknight.py:6785
+  /home/myuser/QuantumDagknightCoin/quantumdagknight.py:6785: DeprecationWarning:
+          on_event is deprecated, use lifespan event handlers instead.
+
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+    @app.on_event("startup")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================================================== short test summary info =====================================================================
+FAILED test_curses.py::TestExchangeDashboardUI::test_add_liquidity_ui - _curses.error: must call initscr() first
+FAILED test_curses.py::TestExchangeDashboardUI::test_cancel_order_ui - _curses.error: must call initscr() first
+FAILED test_curses.py::TestExchangeDashboardUI::test_handle_input - _curses.error: must call initscr() first
+FAILED test_curses.py::TestExchangeDashboardUI::test_place_trade_ui - _curses.error: must call initscr() first
+FAILED test_curses.py::TestExchangeDashboardUI::test_update_liquidity_pools - _curses.error: must call initscr() first
+FAILED test_curses.py::TestExchangeDashboardUI::test_update_network_status - _curses.error: must call initscr() first
+FAILED test_curses.py::TestExchangeDashboardUI::test_update_order_book - _curses.error: must call initscr() first
+FAILED test_curses.py::TestExchangeDashboardUI::test_update_trading_pairs - _curses.error: must call initscr() first
+FAILED test_curses.py::TestDashboardUI::test_draw_network_stats - AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blo...
+FAILED test_curses.py::TestDashboardUI::test_handle_input - AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blo...
+FAILED test_curses.py::TestDashboardUI::test_send_transaction_ui - AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blo...
+FAILED test_curses.py::TestDashboardUI::test_toggle_mining - AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blo...
+FAILED test_curses.py::TestDashboardUI::test_update_mining_info - AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blo...
+FAILED test_curses.py::TestDashboardUI::test_update_node_info - AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blo...
+FAILED test_curses.py::TestDashboardUI::test_update_transactions - AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blo...
+FAILED test_curses.py::TestDashboardUI::test_update_wallet_info - AttributeError: <module 'curses_dashboard.dashboard' from '/home/myuser/QuantumDagknightCoin/curses_dashboard/dashboard.py'> does not have the attribute 'blo...
+================================================================ 16 failed, 10 warnings in 11.57s ================================================================
+root@debian-s-1vcpu-512mb-10gb-fra1-01:/home/myuser/QuantumDagknightCoin/curses_dashboard#

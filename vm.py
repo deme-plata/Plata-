@@ -103,7 +103,6 @@ class AccessControlSystem:
             raise ValueError("Invalid role or permission")
         self.role_permissions[role].discard(permission)
 import random  # Import random module
-
 class PBFTConsensus:
     def __init__(self, nodes, node_id):
         self.nodes = nodes
@@ -114,16 +113,21 @@ class PBFTConsensus:
         self.committed = defaultdict(set)
         self.node_id = node_id
         self.current_leader = self.elect_leader()
+        self.view_change_triggered = False  # Flag to detect if a view change is in progress
+
     def elect_leader(self):
-        # Assuming the leader is chosen based on the current view number
+        # Elect a leader based on the current view number, rotating among nodes
         if not self.nodes:
             return None
         return self.nodes[self.current_view % len(self.nodes)]
 
     def propose(self, client_request):
-        self.sequence_number += 1
-        message = f"VIEW:{self.current_view},SEQ:{self.sequence_number},TYPE:PREPREPARE,DATA:{client_request}"
-        self.broadcast(message)
+        if self.node_id == self.current_leader.node_id:
+            self.sequence_number += 1
+            message = f"VIEW:{self.current_view},SEQ:{self.sequence_number},TYPE:PREPREPARE,DATA:{client_request}"
+            self.broadcast(message)
+        else:
+            print(f"Node {self.node_id} is not the leader. Current leader: {self.current_leader.node_id}")
 
     def prepare(self, node, message):
         self.prepared[message].add(node)
@@ -135,13 +139,14 @@ class PBFTConsensus:
         self.committed[message].add(node)
         if len(self.committed[message]) >= 2 * self.f + 1:
             self.execute_request(message)
+            self.committed.pop(message, None)  # Clean up the committed message after execution
 
     def execute_request(self, message):
         print(f"Executing request: {message}")
 
     def broadcast(self, message):
         for node in self.nodes:
-            if node.node_id != self.node_id and random.random() > 0.1:  # Simulating 10% message loss
+            if node.node_id != self.node_id and random.random() > 0.1:  # Simulate 10% message loss
                 node.receive(message)
 
     def receive(self, message):
@@ -149,19 +154,63 @@ class PBFTConsensus:
             self.prepare(self.node_id, message)
         elif "TYPE:COMMIT" in message:
             self.commit(self.node_id, message)
-    def validate_block(self, block):
-        # Implement your block validation logic here
-        # For example:
-        # 1. Check the block's hash
-        # 2. Validate the transactions within the block
-        # 3. Ensure the block's height is correct
-        # 4. Check the signature of the block
 
-        if not block.is_valid():  # Assuming your block has an is_valid method
-            print(f"Block {block.hash} is invalid.")
+    def validate_block(self, block):
+        # Block validation logic
+        # 1. Check block hash
+        if not self.validate_hash(block):
+            print(f"Invalid block hash for block {block.hash}.")
             return False
+        
+        # 2. Validate the transactions within the block
+        if not self.validate_transactions(block.transactions):
+            print(f"Invalid transactions in block {block.hash}.")
+            return False
+
+        # 3. Ensure the block's height is correct
+        if not self.validate_height(block):
+            print(f"Invalid block height for block {block.hash}.")
+            return False
+
+        # 4. Check the block's signature
+        if not self.validate_signature(block):
+            print(f"Invalid signature for block {block.hash}.")
+            return False
+
         print(f"Block {block.hash} is valid.")
         return True
+
+    def validate_hash(self, block):
+        # Implement block hash validation logic
+        expected_hash = hashlib.sha256(block.data.encode()).hexdigest()
+        return block.hash == expected_hash
+
+    def validate_transactions(self, transactions):
+        # Implement transaction validation logic
+        for tx in transactions:
+            if not tx.is_valid():
+                return False
+        return True
+
+    def validate_height(self, block):
+        # Ensure the block height is sequential
+        expected_height = len(self.nodes)
+        return block.height == expected_height
+
+    def validate_signature(self, block):
+        # Implement signature validation logic
+        return self.verify_signature(block.signature, block.data, block.public_key)
+
+    def verify_signature(self, signature, data, public_key):
+        # Example signature verification logic
+        message = hashlib.sha256(data.encode()).digest()
+        return public_key.verify(signature, message)
+
+    def trigger_view_change(self):
+        self.current_view += 1
+        self.current_leader = self.elect_leader()
+        self.view_change_triggered = True
+        print(f"View change triggered. New leader: {self.current_leader.node_id}")
 
 
 
@@ -378,8 +427,12 @@ class SimpleVM:
         contract_instance = contract_class(self, *args)
         contract_address = "0x" + hashlib.sha256(f"{contract_class.__name__}{time.time()}".encode()).hexdigest()[:40]
         self.contracts[contract_address] = contract_instance
-        print(f"Deployed contract at address: {contract_address}")  # Add this line for debugging
+        
+        # Add a debug print statement to show the deployed contract address
+        print(f"Deployed contract at address: {contract_address}")
+        
         return contract_address
+
 
     def get_contract(self, contract_address):
         contract = self.contracts.get(contract_address)
