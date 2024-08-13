@@ -254,7 +254,7 @@ class Message:
         return cls(**data)
 
 class P2PNode:
-    def __init__(self, blockchain, k: int = 20):
+    def __init__(self, blockchain, host='localhost', port=8000, security_level=10, k: int = 20):
         self.host = os.getenv('P2P_HOST', 'localhost')
         self.port = int(os.getenv('P2P_PORT', '8000'))
         self.blockchain = blockchain
@@ -287,18 +287,19 @@ class P2PNode:
         self.external_ip = None
         self.external_port = None
         self.nat_traversal_obj = NATTraversal(
-            stun_server=os.getenv('STUN_SERVER', 'stun.l.google.com:19302'),
+            stun_server=self.stun_server,
             turn_server=os.getenv('TURN_SERVER'),
             turn_username=os.getenv('TURN_USERNAME'),
             turn_password=os.getenv('TURN_PASSWORD')
         )
-
 
         self.external_ip = None
         self.external_port = None
         self.computation_system = DistributedComputationSystem(self)
         self.encryption_key = self.generate_encryption_key()
         self.access_control = {}  # Dictionary to store access rights
+        self.zkp_system = SecureHybridZKStark(security_level)
+
 
 
     def generate_node_id(self) -> str:
@@ -593,11 +594,23 @@ class P2PNode:
     async def handle_transaction(self, transaction_data: dict, sender: str):
         try:
             transaction = Transaction.from_dict(transaction_data)
+            
+            # Generate and verify ZKP
+            secret = transaction.amount  # Or any other secret data
+            public_input = int(transaction.hash(), 16)
+            proof = self.zkp_system.prove(secret, public_input)
+            
+            if not self.zkp_system.verify(public_input, proof):
+                logger.warning(f"Invalid ZKP for transaction from {sender}")
+                return
+
             if await self.blockchain.add_transaction(transaction):
                 await self.broadcast(Message(MessageType.TRANSACTION.value, transaction_data), exclude=sender)
         except Exception as e:
             logger.error(f"Failed to handle transaction: {str(e)}")
             logger.error(traceback.format_exc())
+
+
 
     async def handle_block(self, block_data: dict, sender: str):
         try:
@@ -1021,6 +1034,78 @@ class P2PNode:
             logger.error(f"Failed to send find value: {str(e)}")
             logger.error(traceback.format_exc())
             return None
+
+    async def store_proof(self, transaction_hash: str, proof: Tuple[Tuple, Tuple]):
+        proof_hash = self.hash_proof(proof)
+        await self.store(f"proof:{transaction_hash}", proof_hash)
+
+    async def verify_stored_proof(self, transaction_hash: str, public_input: int, proof: Tuple[Tuple, Tuple]) -> bool:
+        stored_proof_hash = await self.get(f"proof:{transaction_hash}")
+        if stored_proof_hash != self.hash_proof(proof):
+            return False
+        return self.zkp_system.verify(public_input, proof)
+
+    def hash_proof(self, proof: Tuple[Tuple, Tuple]) -> str:
+        return hashlib.sha256(json.dumps(proof).encode()).hexdigest()
+    async def generate_proof(self, secret: int, public_input: int) -> Tuple[Tuple, Tuple]:
+        return await asyncio.to_thread(self.zkp_system.prove, secret, public_input)
+
+    async def verify_proof(self, public_input: int, proof: Tuple[Tuple, Tuple]) -> bool:
+        return await asyncio.to_thread(self.zkp_system.verify, public_input, proof)
+
+
+    async def generate_proof(self, secret: int, public_input: int) -> Tuple[Tuple, Tuple]:
+        return await asyncio.to_thread(self.zkp_system.prove, secret, public_input)
+
+    async def verify_proof(self, public_input: int, proof: Tuple[Tuple, Tuple]) -> bool:
+        return await asyncio.to_thread(self.zkp_system.verify, public_input, proof)
+    async def authenticate_peer(self, websocket):
+        challenge = os.urandom(32)
+        await websocket.send(json.dumps({"type": "challenge", "data": challenge.hex()}))
+        
+        response = await websocket.recv()
+        response_data = json.loads(response)
+        
+        if response_data["type"] != "challenge_response":
+            return False
+        
+        public_key = response_data["public_key"]
+        proof = response_data["proof"]
+        
+        # Verify the ZKP
+        return await self.verify_proof(int.from_bytes(challenge, 'big'), proof)
+
+    async def handle_challenge(self, challenge: str, websocket):
+        secret = int.from_bytes(self.private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption()
+        ), 'big')
+        
+        public_input = int.from_bytes(bytes.fromhex(challenge), 'big')
+        proof = await self.generate_proof(secret, public_input)
+        
+        response = {
+            "type": "challenge_response",
+            "public_key": self.public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ).decode(),
+            "proof": proof
+        }
+        await websocket.send(json.dumps(response))
+
+    async def store_with_proof(self, key: str, value: str):
+        proof = await self.generate_proof(int(hashlib.sha256(value.encode()).hexdigest(), 16), len(value))
+        await self.store(key, json.dumps({"value": value, "proof": proof}))
+
+    async def get_with_proof(self, key: str) -> Optional[str]:
+        data = await self.get(key)
+        if data:
+            data = json.loads(data)
+            if await self.verify_proof(len(data["value"]), data["proof"]):
+                return data["value"]
+        return None
 
 
 # Usage example

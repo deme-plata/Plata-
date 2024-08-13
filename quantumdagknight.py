@@ -30,10 +30,7 @@ import json
 from qiskit.circuit.random import random_circuit
 import asyncio
 import aiohttp
-import dagknight_pb2
-import dagknight_pb2_grpc
-from dagknight_pb2 import *
-from dagknight_pb2_grpc import DAGKnightStub
+
 import base64
 import hashlib
 from grpc_reflection.v1alpha import reflection
@@ -72,12 +69,8 @@ from contextlib import asynccontextmanager
 import os
 import logging
 import threading
-import grpc
 import uvicorn
-import dagknight_pb2_grpc
-from dagknight_pb2 import *
-from dagknight_pb2_grpc import DAGKnightStub
-from dagknight_pb2_grpc import DAGKnightStub, add_DAGKnightServicer_to_server
+
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization
@@ -258,16 +251,22 @@ class NodeDirectory:
         self.lock = threading.Lock()
         self.register_times = []
         self.discover_times = []
+        self.p2p_node = P2PNode(...)  # Initialize your P2PNode instance here
+
     def store_transaction(self, transaction_hash, transaction):
         self.transactions[transaction_hash] = transaction
         print(f"Transaction {transaction_hash} stored in directory.")
 
-    def register_node(self, node_id, node_stub):
-        """Register a new node with its corresponding stub."""
-        self.nodes[node_id] = node_stub
+    async def register_node(self, node_id, ip_address, port):
+        """Register a new node by adding it to the P2P network."""
+        magnet_link = self.p2p_node.generate_magnet_link()  # Generate a magnet link
+        kademlia_node = KademliaNode(id=node_id, ip=ip_address, port=port)
+        await self.p2p_node.connect_to_peer(kademlia_node)
+        self.nodes[node_id] = {"ip": ip_address, "port": port, "magnet_link": magnet_link}
+        print(f"Node {node_id} registered successfully.")
 
     def get_all_node_stubs(self):
-        """Return a list of all node stubs."""
+        """Return a list of all node information."""
         return list(self.nodes.values())
 
     def store_transaction(self, transaction_hash, transaction):
@@ -288,8 +287,8 @@ class NodeDirectory:
         with self.lock:
             return self.nodes.get(node_id)
 
-    def discover_nodes(self):
-        """Discover and return all nodes."""
+    async def discover_nodes(self):
+        """Discover and return all nodes using P2P."""
         start_time = time.time()
         with self.lock:
             nodes = [{"node_id": node_id, **info} for node_id, info in self.nodes.items()]
@@ -312,38 +311,6 @@ class NodeDirectory:
         hash = hashlib.sha1(info.encode()).hexdigest()
         magnet_link = f"magnet:?xt=urn:sha1:{hash}&dn={node_id}&pk={base64.urlsafe_b64encode(public_key.encode()).decode()}&ip={ip_address}&port={port}"
         return magnet_link
-
-    def register_node_with_grpc(self, node_id, public_key, ip_address, port, directory_ip, directory_port):
-        """Register a node with gRPC."""
-        try:
-            with grpc.insecure_channel(f'{directory_ip}:{directory_port}') as channel:
-                stub = dagknight_pb2_grpc.DAGKnightStub(channel)
-                request = dagknight_pb2.RegisterNodeRequest(node_id=node_id, public_key=public_key, ip_address=ip_address, port=port)
-                response = stub.RegisterNode(request)
-                self.logger.info(f"Registered node with magnet link: {response.magnet_link}")
-                return response.magnet_link
-        except grpc.RpcError as e:
-            self.logger.error(f"gRPC error when registering node: {e.code()}: {e.details()}")
-            raise
-        except Exception as e:
-            self.logger.error(f"Unexpected error when registering node: {str(e)}")
-            raise
-
-    def discover_nodes_with_grpc(self, directory_ip, directory_port):
-        """Discover nodes with gRPC."""
-        try:
-            with grpc.insecure_channel(f'{directory_ip}:{directory_port}') as channel:
-                stub = dagknight_pb2_grpc.DAGKnightStub(channel)
-                request = dagknight_pb2.DiscoverNodesRequest()
-                response = stub.DiscoverNodes(request)
-                self.logger.info(f"Discovered nodes: {response.magnet_links}")
-                return response.magnet_links
-        except grpc.RpcError as e:
-            self.logger.error(f"gRPC error when discovering nodes: {e.code()}: {e.details()}")
-            raise
-        except Exception as e:
-            self.logger.error(f"Unexpected error when discovering nodes: {str(e)}")
-            raise
 
 # Initialize an instance of NodeDirectory
 node_directory = NodeDirectory()

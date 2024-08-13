@@ -32,7 +32,7 @@ class BlockchainInterface:
         self.wallet = Wallet(public_key="your_public_key_here", address="your_address_here")  # Provide the required fields
         self.zk_system = SecureHybridZKStark(security_level=2)
         self.mining_active = False
-        self.p2p_node = P2PNode("localhost", 8000, self.blockchain)  # Initialize P2P node
+        self.p2p_node = P2PNode("localhost", 8000, self.blockchain, security_level=10)
         self.exchange = EnhancedExchangeWithZKStarks(self.blockchain, self.vm, PriceOracle(), self.node_directory, 2)
 
 
