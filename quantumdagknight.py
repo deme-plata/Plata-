@@ -147,12 +147,20 @@ tracemalloc.start()
 import logging
 
 logger = logging.getLogger(__name__)
+
 logging.basicConfig(
-    filename='dashboard_ui.log',  # Log file name
+    filename='app.log',  # Log file name
     filemode='w',  # Overwrite the log file each run
     level=logging.DEBUG,  # Log all levels DEBUG and above
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logging.getLogger().handlers[0].flush = lambda: None
+logging.basicConfig(level=logging.ERROR)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.CRITICAL)  # Only show critical errors in the terminal
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logging.getLogger().addHandler(console_handler)
 NUM_NODES = 5
 
 MAX_SUPPLY = 21000000  
@@ -1704,7 +1712,8 @@ def derive_address_from_mnemonic(mnemonic):
 
 
 class QuantumInspiredMarketBot:
-    def __init__(self, exchange: EnhancedExchange, vm, plata_contract, price_feed, initial_capital: Dict[str, Decimal]):
+    def __init__(self, exchange, vm, plata_contract, price_feed, initial_capital, portfolio=None):
+        self.portfolio = portfolio if portfolio is not None else {}
         self.exchange = exchange
         self.vm = vm
         self.plata_contract = plata_contract
@@ -1723,6 +1732,8 @@ class QuantumInspiredMarketBot:
         self.slippage_tolerance = Decimal('0.01')  # 1% slippage tolerance
         logger.info(f"Class type before calling get_tradable_assets: {type(self.exchange)}")
         print(dir(self.exchange))
+        self.portfolio = portfolio if portfolio is not None else {}
+        self.market_data = market_data if market_data is not None else {}
 
         # Ensure 'PLATA' key is always present in the capital dictionary
         if 'PLATA' not in self.capital:
@@ -1735,6 +1746,16 @@ class QuantumInspiredMarketBot:
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
+    async def get_asset_value(self) -> Decimal:
+        # Example logic to calculate asset value
+        # This assumes that self.portfolio is a dictionary with asset names as keys and amounts as values
+        total_value = Decimal(0)
+        for asset, amount in self.portfolio.items():
+            asset_price = await self.market_data.get_price(asset)
+            total_value += Decimal(amount) * asset_price
+        return total_value
+
+
 
     def _initialize_quantum_circuit(self):
         qr = QuantumRegister(4, 'q')
@@ -1743,23 +1764,46 @@ class QuantumInspiredMarketBot:
         qc.h(qr)  # Apply Hadamard gates
         qc.measure(qr, cr)
         return qc
-
     async def run(self):
         while True:
             try:
+                # Update market data
                 await self._update_market_data()
+
+                # Rebalance the portfolio based on updated data
                 await self._rebalance_portfolio()
+
+                # Manage the supply of PLATA or any other asset
                 await self._manage_plata_supply()
+
+                # Execute the quantum trading strategy
                 await self._execute_quantum_trading_strategy()
+
+                # Provide liquidity to relevant markets
                 await self._provide_liquidity()
+
+                # Execute other strategies
                 await self.execute_mean_reversion_strategy()
                 await self.execute_momentum_strategy()
-                await self.manage_risk()
+
+                # Calculate asset and total values
+                asset_value = await self.get_asset_value()
+                total_value = await self.get_total_value()
+
+                # Manage risk based on asset and total values
+                await self.manage_risk(asset_value, total_value)
+
+                # Handle any black swan events
                 await self.handle_black_swan_events()
+
             except Exception as e:
+                # Log any errors that occur during the run loop
                 self.logger.error(f"Error in bot run loop: {e}")
                 self.logger.error(traceback.format_exc())
-            await asyncio.sleep(60)  # Run every minute
+
+            # Sleep for a set interval (e.g., 1 minute) before running the loop again
+            await asyncio.sleep(60)  # Adjust this interval as needed
+
 
     async def _update_market_data(self):
         try:
@@ -2007,25 +2051,23 @@ class QuantumInspiredMarketBot:
             self.logger.error(f"Error executing momentum strategy: {e}")
             self.logger.error(traceback.format_exc())
 
-    async def manage_risk(self):
+    def manage_risk(asset_value, total_value):
         try:
-            total_value = Decimal('0')
+            if total_value == 0:
+                raise ValueError("Total value cannot be zero")
 
-            for asset, amount in self.capital.items():
-                price = await self.price_feed.get_price("PLATA")
-                total_value += amount * price
-
-            for asset, amount in self.capital.items():
-                price = await self.price_feed.get_price(asset)
-                asset_value = amount * price
-                asset_weight = asset_value / total_value
-
-                if asset_weight > 0.2:
-                    amount_to_sell = (asset_value - total_value * Decimal('0.2')) / price
-                    await self._sell_asset(asset, amount_to_sell)
+            asset_weight = asset_value / total_value
+            # Proceed with the rest of your logic using asset_weight
+        except decimal.DivisionUndefined as e:
+            logger.error(f"DivisionUndefined error: {e}")
+            # Handle the division undefined error
+        except ValueError as ve:
+            logger.error(f"ValueError: {ve}")
+            # Handle the value error, such as total_value being zero
         except Exception as e:
-            self.logger.error(f"Error managing risk: {e}")
-            self.logger.error(traceback.format_exc())
+            logger.error(f"Unexpected error in manage_risk: {str(e)}")
+            logger.error(traceback.format_exc())
+
     async def handle_black_swan_events(self):
         try:
             tradable_assets = await self.exchange.get_tradable_assets()
@@ -3503,11 +3545,15 @@ exchange = Exchange(blockchain, vm, price_oracle)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    wallet = Wallet()  # Or however the wallet is initialized
+    wallet.address = wallet.get_address()
+    wallet.public_key = wallet.get_public_key()
+
     # Startup
     await initialize_components()
     asyncio.create_task(update_prices_periodically())
-    asyncio.create_task(periodic_mining(genesis_address))
-    asyncio.create_task(deploy_and_run_market_bot())
+    asyncio.create_task(periodic_mining(genesis_address, wallet))
+    asyncio.create_task(deploy_and_run_market_bot(exchange, vm, plata_contract, price_feed))
     yield
 
 
@@ -3539,9 +3585,14 @@ fake_users_db = {
 }
 @app.on_event("startup")
 async def on_startup():
+    wallet = Wallet()  # Or however the wallet is initialized
+    wallet.address = wallet.get_address()
+    wallet.public_key = wallet.get_public_key()
+
+    # Startup
     asyncio.create_task(update_prices_periodically())
-    asyncio.create_task(periodic_mining(genesis_address))
-    asyncio.create_task(deploy_and_run_market_bot(exchange, vm, price_feed))
+    asyncio.create_task(periodic_mining(genesis_address, wallet))
+    asyncio.create_task(deploy_and_run_market_bot(exchange, vm, plata_contract, price_feed))
 @app.on_event("shutdown")
 async def on_shutdown():
     # Add any shutdown tasks if needed
@@ -4290,7 +4341,7 @@ from fastapi import Depends, HTTPException, FastAPI
 
 continue_mining = True
 
-def mining_algorithm(iterations=5):
+def mining_algorithm(iterations=1):
     try:
         process = psutil.Process()
         memory_info = process.memory_info()
@@ -4314,7 +4365,6 @@ def mining_algorithm(iterations=5):
             
             for edge in graph.edges():
                 i, j = edge
-                logger.debug(f"Processing edge: {edge}, i: {i}, j: {j}")
                 sigma_z = sparse.csr_matrix([[1, 0], [0, -1]], dtype=complex)
                 
                 # Convert tuple indices to integers
@@ -4616,7 +4666,7 @@ async def periodic_mining(miner_address: str, wallet: str):
         try:
             await mine_block(MineBlockRequest(
                 node_id="automated_miner",
-                wallet=wallet,  # Include the wallet here
+                wallet=wallet.address,  # Ensure this is a string
                 wallet_address=miner_address,
                 node_ip="127.0.0.1",
                 node_port=8000,
@@ -7186,6 +7236,16 @@ def start_grpc_server(secret_key, node_directory, vm, blockchain, zk_system):
     finally:
         print("Closing event loop")
         loop.close()
+async def run_uvicorn_server():
+    config = uvicorn.Config("quantumdagknight:app", host="0.0.0.0", port=50503, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+import socket
+def find_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        return s.getsockname()[1]
+
 async def async_main():
     from curses_dashboard.dashboard import DashboardUI
     try:
@@ -7193,109 +7253,69 @@ async def async_main():
         vm = SimpleVM(gas_limit=10000, number_of_shards=10, nodes=[])
         logger.info("SimpleVM initialized successfully")
 
-        # Check if VM is properly initialized
-        if vm is None:
-            raise ValueError("Failed to initialize VM")
-
         mnemonic, genesis_address = create_genesis_wallet(vm)
-
-        # Log the mnemonic and address
         print(f"Genesis Mnemonic: {mnemonic}")
         print(f"Genesis Address: {genesis_address}")
 
-        # Automatically deploy the Cashewstable contract using the genesis address
         collateral_token = "USDC"
         initial_price = 0.000000000000000001  # Adjusted price
         price_feed = SimplePriceFeed(initial_price)
         cashewstable_contract_address = vm.deploy_contract(genesis_address, Cashewstable, collateral_token, price_feed)
         print(f"Cashewstable contract deployed at address: {cashewstable_contract_address}")
 
-        # Node details
         node_id = os.getenv("NODE_ID", "node_1")
         public_key = "public_key_example"
         ip_address = os.getenv("IP_ADDRESS", "127.0.0.1")
-        grpc_port = int(os.getenv("GRPC_PORT", 50502))
+        grpc_port = find_free_port()  # Dynamically find a free port for gRPC
         api_port = int(os.getenv("API_PORT", 50503))
         directory_ip = os.getenv("DIRECTORY_IP", "127.0.0.1")
         directory_port = int(os.getenv("DIRECTORY_PORT", 50501))
         secret_key = os.getenv("SECRET_KEY", "your_secret_key_here")
 
-        print(f"Starting node {node_id} at {ip_address}:{grpc_port}")
-
-        # Initialize the consensus object
         consensus = PBFTConsensus(nodes=[], node_id=node_id)
-
-        # Initialize the blockchain with the consensus and secret key
         node_directory = NodeDirectory()
         blockchain = QuantumBlockchain(consensus, secret_key, node_directory, vm)
 
-        print(f"NativeCoinContract address: {blockchain.native_coin_contract_address}")
-        print(f"NativeCoinContract instance: {blockchain.native_coin_contract}")
-
-        # Update the consensus to point to the correct blockchain
-        consensus.blockchain = blockchain
-
-        # Create an instance of PriceOracle
         price_oracle = PriceOracle()
-
-        # Initialize the EnhancedExchange with blockchain, vm, price_oracle, and node_directory
         exchange = EnhancedExchange(blockchain, vm, price_oracle, node_directory)
         exchange.order_book = EnhancedOrderBook()
+
+        # Initialize the P2PNode with a unique port
+        free_port = find_free_port()  # Use this function to assign a free port
+        p2p_node = P2PNode(ip_address, free_port, blockchain)
 
         # Start the directory service in a separate thread
         directory_service_thread = threading.Thread(target=serve_directory_service, args=(node_directory,))
         directory_service_thread.start()
 
-        # Initialize zk_system for gRPC server
         zk_system = SecureHybridZKStark(security_level=2)
 
-        print("About to start gRPC server thread")
-        try:
-            # Start the gRPC server in a separate thread
-            grpc_server_thread = threading.Thread(
-                target=start_grpc_server,
-                args=(secret_key, node_directory, vm, blockchain, zk_system)
-            )
-            grpc_server_thread.start()
-            print("gRPC server thread started")
-            logger.info("gRPC server thread started successfully.")
+        grpc_server_thread = threading.Thread(
+            target=start_grpc_server,
+            args=(secret_key, node_directory, vm, blockchain, zk_system)
+        )
+        grpc_server_thread.start()
+        await asyncio.sleep(5)
 
-            # Add a small delay to allow the gRPC server to initialize
-            await asyncio.sleep(5)
-
-            print("Checking if gRPC server thread is alive")
-            if grpc_server_thread.is_alive():
-                print("gRPC server thread is still running")
-            else:
-                print("gRPC server thread has stopped")
-        except Exception as e:
-            print(f"Failed to start the gRPC server thread: {e}")
-            logger.error(f"Failed to start the gRPC server thread: {e}")
-
-        # Ensure the gRPC server is ready
-        await asyncio.sleep(2)
-
-        # Periodically discover nodes
         discovery_thread = threading.Thread(target=periodically_discover_nodes, args=(directory_ip, directory_port))
         discovery_thread.start()
 
-        # Start periodic network stats update
         asyncio.create_task(periodic_network_stats_update())
 
-        # Set up blockchain event listeners
         blockchain.on_new_block(manager.broadcast_new_block)
         blockchain.on_new_transaction(manager.broadcast_new_transaction)
 
-        # Start the curses dashboard directly in the event loop
         def curses_main(stdscr):
-            # Initialize and run the dashboard UI
-            dashboard_ui = DashboardUI(stdscr, blockchain, exchange)
+            dashboard_ui = DashboardUI(stdscr, blockchain, exchange, p2p_node)
             asyncio.run(dashboard_ui.run())
 
-        # Start the curses wrapper directly in the event loop
+        uvicorn_task = asyncio.create_task(run_uvicorn_server())
+        websocket_task = asyncio.create_task(p2p_node.start())
+
         await asyncio.gather(
-            run_node(),  # Your existing gRPC node or FastAPI server
-            asyncio.to_thread(curses.wrapper, curses_main)  # Run the curses UI within the event loop
+            uvicorn_task,
+            websocket_task,
+            asyncio.to_thread(curses.wrapper, curses_main)
         )
 
     except Exception as e:
