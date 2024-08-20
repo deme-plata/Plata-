@@ -19,8 +19,12 @@ from Order import Order
 from FiniteField import FiniteField, FieldElement
 from finite_field_factory import FiniteFieldFactory
 import traceback
-
+from zero_x_swap import ZeroXSwapAPI
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv
+import os
 from EnhancedOrderBook import EnhancedOrderBook
+from blockcypher_integration import BlockCypherAPI
 
 
 logger = logging.getLogger(__name__)
@@ -413,7 +417,10 @@ class AdvancedOrderTypes:
             "highest_price": current_price
         })
         return "Trailing stop order placed"
+
 class EnhancedExchange:
+    from user_management import fake_users_db
+
     def __init__(self, blockchain, vm, price_oracle, node_directory):
         self.blockchain = blockchain
         self.vm = vm
@@ -431,6 +438,42 @@ class EnhancedExchange:
         self.node_directory = node_directory
         self.margin_positions = {}
         self.p2p_node = blockchain.p2p_node  # Use the same P2PNode as the blockchain
+        load_dotenv()
+
+        # Load and decrypt the API keys
+        with open("encryption_key.key", "rb") as key_file:
+            encryption_key = key_file.read()
+        f = Fernet(encryption_key)
+        decrypted_zero_x_api_key = f.decrypt(os.getenv("ZEROX_API_KEY").encode()).decode()
+        decrypted_blockcypher_api_key = f.decrypt(os.getenv("BLOCKCYPHER_API_KEY").encode()).decode()
+
+        # Initialize the ZeroXSwapAPI and BlockCypherAPI with the decrypted keys
+        self.zero_x_api = ZeroXSwapAPI(decrypted_zero_x_api_key)
+        self.blockcypher_api = BlockCypherAPI(decrypted_blockcypher_api_key)
+    def get_blockchain_info(self):
+        return self.blockcypher_api.get_blockchain_info()
+
+    def generate_btc_address(self):
+        return self.blockcypher_api.generate_address()
+
+    def create_btc_transaction(self, inputs, outputs):
+        tx = self.blockcypher_api.create_transaction(inputs, outputs)
+        tx_signed = self.sign_transaction(tx)
+        return self.blockcypher_api.send_transaction(tx_signed)
+
+    def sign_transaction(self, tx):
+        # Implement your signing logic here
+        pass
+
+    def setup_transaction_webhook(self, callback_url, address):
+        return self.blockcypher_api.setup_webhook(event_type="unconfirmed-tx", url=callback_url, address=address)
+
+    def get_user_wallet(self, user_id):
+        from user_management import get_user_wallet
+
+        return get_user_wallet(user_id)
+
+
 
     async def sync_state(self):
         try:
@@ -894,12 +937,228 @@ class EnhancedExchange:
         # Estimate the output based on current reserves and prices
         rate = self.price_oracle.get_price(f"{from_token}/{to_token}")
         return amount * rate
+    async def swap_tokens(self, user_id, sell_token, buy_token, sell_amount):
+        """
+        Swap tokens using Plata exchange, 0x API, or BlockCypher.
+        """
+        try:
+            # Validate inputs
+            if not all([user_id, sell_token, buy_token, sell_amount]):
+                raise ValueError("Invalid input parameters provided for token swap.")
 
-    async def swap(self, user, from_token, to_token, amount):
-        # Execute the swap, modify balances, and update the order book if necessary
-        estimated_output = await self.get_swap_estimate(from_token, to_token, amount)
-        # Perform the swap logic here
-        return f"Swapped {amount} {from_token} for {estimated_output} {to_token}"
+            user_wallet = self.get_user_wallet(user_id)
+            if not user_wallet or 'address' not in user_wallet:
+                raise ValueError(f"Wallet not found for user_id: {user_id}")
+            
+            taker_address = user_wallet['address']
+
+            # Fetch a firm quote from 0x API
+            logging.info(f"Fetching quote for {sell_token} to {buy_token}...")
+            quote = self.zero_x_api.get_quote(sell_token, buy_token, sell_amount, taker_address)
+            if not quote:
+                raise ValueError("Failed to fetch quote from 0x API.")
+
+            # If necessary, set token allowance
+            logging.info(f"Setting token allowance for {sell_token}...")
+            allowance_tx = self.zero_x_api.set_token_allowance(sell_token, quote.get('allowanceTarget', ''), sell_amount, user_wallet)
+            if allowance_tx:
+                logging.info(f"Allowance transaction hash: {allowance_tx}")
+
+            # Sign the Permit2 message
+            logging.info("Signing Permit2 message...")
+            signature = self.zero_x_api.sign_permit2_message(quote.get('permit2', {}).get('eip712', {}), user_wallet)
+            if not signature:
+                raise ValueError("Failed to sign Permit2 message.")
+
+            # Submit the transaction
+            logging.info("Submitting transaction to 0x API...")
+            tx_hash = self.zero_x_api.submit_transaction(quote, signature, user_wallet)
+            if not tx_hash:
+                raise ValueError("Failed to submit transaction.")
+
+            logging.info(f"Transaction successful with hash: {tx_hash}")
+            return {
+                'tx_hash': tx_hash,
+                'amount_out': Decimal(quote.get('buyAmount', '0')) / Decimal(10 ** 18),  # Assuming 18 decimals for tokens
+                'status': 'success'
+            }
+
+        except KeyError as e:
+            logging.error(f"KeyError during token swap: {e}")
+            return {'status': 'error', 'message': f"Missing data: {str(e)}"}
+        except ValueError as e:
+            logging.error(f"ValueError: {e}")
+            return {'status': 'error', 'message': str(e)}
+        except Exception as e:
+            logging.error(f"Unexpected error during token swap: {e}")
+            return {'status': 'error', 'message': "An unexpected error occurred"}
+
+
+from decimal import Decimal
+from typing import Dict, List, Tuple, Any
+from blockcypher_integration import BlockCypherAPI
+from zero_x_swap import ZeroXSwapAPI
+from wallet_registration import WalletRegistration
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv
+from SecureHybridZKStark import SecureHybridZKStark, calculate_security_parameters
+import os
+import asyncio
+
+
+class EnhancedExchangeWithCryptoAndZKP(EnhancedExchange):
+    def __init__(self, blockchain, vm, price_oracle, node_directory):
+        super().__init__(blockchain, vm, price_oracle, node_directory)
+        load_dotenv()
+
+        # Load and decrypt the API keys
+        with open("encryption_key.key", "rb") as key_file:
+            encryption_key = key_file.read()
+        f = Fernet(encryption_key)
+        decrypted_zero_x_api_key = f.decrypt(os.getenv("ZEROX_API_KEY").encode()).decode()
+        decrypted_blockcypher_api_key = f.decrypt(os.getenv("BLOCKCYPHER_API_KEY").encode()).decode()
+        decrypted_alchemy_key = f.decrypt(os.getenv("ALCHEMY_KEY").encode()).decode()
+
+        # Initialize the APIs
+        self.zero_x_api = ZeroXSwapAPI(decrypted_zero_x_api_key)
+        self.blockcypher_api = BlockCypherAPI(decrypted_blockcypher_api_key)
+        self.wallet_registration = WalletRegistration(decrypted_blockcypher_api_key, decrypted_alchemy_key)
+
+        # Initialize ZKP components
+        security_params = calculate_security_parameters()
+        self.zkp_system = SecureHybridZKStark(security_params['field_size'])
+
+    async def register_user_wallets(self, user_id: str):
+        """Register all necessary wallets for a user."""
+        return self.wallet_registration.register_all_wallets(user_id)
+
+    async def get_btc_address(self, user_id: str):
+        """Get or generate a Bitcoin address for a user."""
+        user_wallets = self.fake_users_db.get(user_id, {}).get('wallets', {})
+        if 'bitcoin' not in user_wallets:
+            btc_wallet = self.blockcypher_api.generate_address()
+            user_wallets['bitcoin'] = btc_wallet
+            self.fake_users_db[user_id]['wallets'] = user_wallets
+        return user_wallets['bitcoin']['address']
+
+    async def get_btc_balance(self, address: str):
+        """Get the Bitcoin balance for a given address."""
+        address_info = self.blockcypher_api.get_address_info(address)
+        balance_satoshis = address_info.get('balance', 0)
+        return Decimal(balance_satoshis) / Decimal(100000000)  # Convert satoshis to BTC
+
+    async def send_btc(self, from_user_id: str, to_address: str, amount: Decimal):
+        """Send Bitcoin from a user's address to another address."""
+        from_address = await self.get_btc_address(from_user_id)
+        amount_satoshis = int(amount * Decimal(100000000))  # Convert BTC to satoshis
+        inputs = [{"address": from_address}]
+        outputs = [{"address": to_address, "value": amount_satoshis}]
+        
+        unsigned_tx = self.blockcypher_api.create_transaction(inputs, outputs)
+        # Note: In a real-world scenario, you would need to sign this transaction
+        # with the user's private key. For demonstration, we're skipping this step.
+        signed_tx = unsigned_tx  # Placeholder for signed transaction
+        
+        sent_tx = self.blockcypher_api.send_transaction(signed_tx)
+        return sent_tx.get('tx', {}).get('hash')
+
+    async def setup_btc_webhook(self, user_id: str, callback_url: str):
+        """Set up a webhook for Bitcoin transactions for a user's address."""
+        address = await self.get_btc_address(user_id)
+        return self.blockcypher_api.setup_webhook("tx-confirmation", callback_url, address)
+
+    async def swap_tokens(self, user_id: str, sell_token: str, buy_token: str, sell_amount: Decimal):
+        """Swap tokens using 0x API with ZKP."""
+        user_wallet = self.get_user_wallet(user_id)
+        taker_address = user_wallet['ethereum']['address']
+
+        quote = self.zero_x_api.get_quote(sell_token, buy_token, str(sell_amount), taker_address)
+
+        # Generate ZKP for the swap
+        secret = int(sell_amount * 10**18)  # Convert to integer
+        public_input = int.from_bytes(sell_token.encode(), 'big')  # Use sell_token as public input
+        zkp = self.zkp_system.prove(secret, public_input)
+
+        # Set token allowance if necessary
+        allowance_tx = self.zero_x_api.set_token_allowance(
+            sell_token, 
+            quote.get('allowanceTarget', ''), 
+            sell_amount, 
+            user_wallet['ethereum']
+        )
+        if allowance_tx:
+            await self.wait_for_transaction(allowance_tx)
+
+        # Sign the Permit2 message
+        signature = self.zero_x_api.sign_permit2_message(
+            quote.get('permit2', {}).get('eip712', {}), 
+            user_wallet['ethereum']
+        )
+
+        # Submit the swap transaction
+        tx_hash = self.zero_x_api.submit_transaction(quote, signature, user_wallet['ethereum'])
+        if not tx_hash:
+            raise ValueError("Failed to submit swap transaction.")
+
+        # Wait for the transaction to be confirmed
+        tx_receipt = await self.wait_for_transaction(tx_hash)
+
+        # Verify the ZKP
+        is_valid = self.zkp_system.verify(public_input, zkp)
+        if not is_valid:
+            raise ValueError("ZKP verification failed for the swap.")
+
+        return tx_receipt, zkp
+
+    async def wait_for_transaction(self, tx_hash: str, max_attempts: int = 50, delay: int = 5):
+        """Wait for a transaction to be confirmed."""
+        for _ in range(max_attempts):
+            tx_receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+            if tx_receipt and tx_receipt['status'] == 1:
+                return tx_receipt
+            await asyncio.sleep(delay)
+        raise TimeoutError(f"Transaction {tx_hash} was not confirmed after {max_attempts * delay} seconds")
+
+    async def get_token_balance(self, user_id: str, token_address: str, chain: str = 'ethereum'):
+        """Get the balance of a specific token for a user."""
+        user_wallet = self.get_user_wallet(user_id)
+        address = user_wallet[chain]['address']
+        
+        # Use Alchemy or a similar provider to get the token balance
+        balance = self.w3.eth.contract(address=token_address, abi=ERC20_ABI).functions.balanceOf(address).call()
+        decimals = self.w3.eth.contract(address=token_address, abi=ERC20_ABI).functions.decimals().call()
+        
+        return Decimal(balance) / Decimal(10 ** decimals)
+
+    async def private_transfer(self, sender_id: str, receiver_id: str, amount: Decimal, token: str):
+        """Perform a private transfer using ZKP."""
+        sender_balance = await self.get_token_balance(sender_id, token)
+        if sender_balance < amount:
+            raise ValueError("Insufficient balance for transfer.")
+
+        secret = int(amount * 10**18)  # Convert to integer
+        public_input = int.from_bytes(token.encode(), 'big')  # Use token as public input
+        zkp = self.zkp_system.prove(secret, public_input)
+
+        # Perform the transfer (in a real scenario, this would update balances in a confidential manner)
+        # For demonstration, we're just updating the balances directly
+        await self._update_balance(sender_id, token, -amount)
+        await self._update_balance(receiver_id, token, amount)
+
+        # Verify the ZKP
+        is_valid = self.zkp_system.verify(public_input, zkp)
+        if not is_valid:
+            raise ValueError("ZKP verification failed for the transfer.")
+
+        return zkp
+
+    async def _update_balance(self, user_id: str, token: str, amount: Decimal):
+        """Update the balance of a user (for demonstration purposes)."""
+        if user_id not in self.fake_users_db:
+            self.fake_users_db[user_id] = {'balances': {}}
+        if token not in self.fake_users_db[user_id]['balances']:
+            self.fake_users_db[user_id]['balances'][token] = Decimal('0')
+        self.fake_users_db[user_id]['balances'][token] += amount
 
         
 from decimal import Decimal

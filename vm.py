@@ -266,6 +266,7 @@ class SimpleVM:
         self.zk_system = SecureHybridZKStark(security_level=security_level, field=self.finite_field)
         self.zk_proofs = {}  # Store ZK proofs for transactions
         self.security_level = security_level
+        self.token_logos = {}  # New attribute to store token logos
 
         logger.info(f"SimpleVM initialized with gas_limit={gas_limit}, number_of_shards={number_of_shards}, nodes={nodes}")
 
@@ -586,12 +587,66 @@ class SimpleVM:
         size_factor = len(str(input_data)) * 0.01  # Example: cost increases with size of input data
         return base_costs.get(operation, 1) + size_factor
 
-    def create_token(self, creator_address, token_name, total_supply):
-        if token_name not in self.token_balances:
-            self.token_balances[token_name] = {creator_address: total_supply}
-            self.save_state()
-            return True
-        return False
+    def create_token(self, creator_address, token_name, token_symbol, total_supply, logo_data=None, logo_format=None):
+        # Generate a unique token address
+        token_address = f"0x{secrets.token_hex(20)}"
+
+        # Check if the token name or symbol already exists
+        for existing_token in self.token_balances.values():
+            if existing_token['name'] == token_name or existing_token['symbol'] == token_symbol:
+                return False, "Token with this name or symbol already exists"
+
+        # Create the token
+        self.token_balances[token_address] = {
+            'name': token_name,
+            'symbol': token_symbol,
+            'total_supply': total_supply,
+            'creator': creator_address,
+            'balances': {creator_address: total_supply}
+        }
+
+        # Upload logo if provided
+        if logo_data and logo_format:
+            try:
+                self.upload_token_logo(token_address, logo_data, logo_format)
+            except ValueError as e:
+                print(f"Warning: Failed to upload logo: {str(e)}")
+
+        self.save_state()
+        return True, token_address
+
+
+
+    def get_token_info(self, token_address):
+        if token_address in self.token_balances:
+            token_data = self.token_balances[token_address]
+            info = {
+                "address": token_address,
+                "name": token_data['name'],
+                "symbol": token_data['symbol'],
+                "totalSupply": str(token_data['total_supply']),
+                "creator": token_data['creator']
+            }
+            
+            # Add logo info if available
+            logo = self.get_token_logo(token_address)
+            if logo:
+                info["logo"] = {
+                    "format": logo['format'],
+                    "data": logo['data'][:20] + "..."  # Truncate data for display
+                }
+            
+            return info
+        return None
+
+
+    def get_user_tokens(self, user_address):
+        user_tokens = []
+        for token_address, token_data in self.token_balances.items():
+            if token_data['creator'] == user_address:
+                user_tokens.append(self.get_token_info(token_address))
+        return user_tokens
+
 
     def transfer_token(self, from_address, to_address, token_name, amount):
         if (token_name in self.token_balances and
@@ -754,6 +809,65 @@ class SimpleVM:
         zk_proof = self.zk_proofs[proof_key]
         public_input = self.zk_system.stark.hash(from_address, to_address, token_name, amount)
         return self.zk_system.verify(public_input, zk_proof)
+    def upload_token_logo(self, token_address, logo_data, logo_format):
+        """
+        Upload a logo for a token.
+        :param token_address: The address of the token
+        :param logo_data: The logo data in base64 encoded string
+        :param logo_format: The format of the logo (e.g., 'png', 'jpg')
+        """
+        if token_address not in self.token_balances:
+            raise ValueError("Token does not exist")
+
+        # Validate logo data and format
+        try:
+            base64.b64decode(logo_data)
+        except:
+            raise ValueError("Invalid logo data")
+
+        if logo_format not in ['png', 'jpg', 'jpeg', 'gif']:
+            raise ValueError("Unsupported logo format")
+
+        # Store the logo
+        self.token_logos[token_address] = {
+            'data': logo_data,
+            'format': logo_format
+        }
+
+        # Distribute logo to all nodes
+        self.distribute_logo(token_address)
+
+        print(f"Logo uploaded for token {token_address}")
+
+    def get_token_logo(self, token_address):
+        """
+        Retrieve the logo for a token.
+        :param token_address: The address of the token
+        :return: A dictionary containing the logo data and format
+        """
+        if token_address not in self.token_logos:
+            return None
+        return self.token_logos[token_address]
+
+    def distribute_logo(self, token_address):
+        """
+        Distribute the logo to all nodes in the network.
+        :param token_address: The address of the token whose logo needs to be distributed
+        """
+        logo_info = self.token_logos[token_address]
+        for node in self.nodes:
+            # In a real implementation, you would use proper node communication
+            # Here, we're simulating by directly calling a method on the node
+            node.receive_logo(token_address, logo_info)
+
+    def sync_logos(self):
+        """
+        Synchronize logos across all nodes.
+        """
+        for token_address, logo_info in self.token_logos.items():
+            self.distribute_logo(token_address)
+
+
 
 class ZKContract:
     def __init__(self, vm):

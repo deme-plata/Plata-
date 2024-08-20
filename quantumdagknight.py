@@ -33,7 +33,6 @@ import aiohttp
 
 import base64
 import hashlib
-from grpc_reflection.v1alpha import reflection
 import numpy as np
 from mnemonic import Mnemonic
 from Crypto.PublicKey import ECC
@@ -129,6 +128,51 @@ from zk_vm import ZKVM
 from common import QuantumBlock, Transaction, NodeState
 from P2PNode import P2PNode
 import curses
+import socket
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv
+import os
+from user_management import fake_users_db
+from secure_qr_system import SecureQRSystem
+from fastapi import UploadFile, File
+from fastapi.responses import FileResponse
+import json
+from helius_integration import HeliusAPI
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey as PublicKey
+from solana.rpc.async_api import AsyncClient
+from solana.rpc.commitment import Confirmed
+
+from blockcypher_integration import BlockCypherAPI
+from helius_integration import HeliusAPI
+from web3 import Web3
+import aiohttp
+import os
+
+helius_api = HeliusAPI(api_key="855fde7e-b54f-4c6f-b71c-e6876772ec81")
+
+fake_users_db = {}
+# Initialize the SecureQRSystem
+secure_qr_system = SecureQRSystem()
+# Load environment variables
+load_dotenv()
+
+# Load the encryption key
+with open("encryption_key.key", "rb") as key_file:
+    encryption_key = key_file.read()
+
+# Initialize the Fernet class
+f = Fernet(encryption_key)
+
+# Decrypt the API keys
+alchemy_key = f.decrypt(os.getenv("ALCHEMY_KEY").encode()).decode()
+blockcypher_api_key = f.decrypt(os.getenv("BLOCKCYPHER_API_KEY").encode()).decode()
+zerox_api_key = f.decrypt(os.getenv("ZEROX_API_KEY").encode()).decode()
+
+# Now you can use the decrypted keys
+print("Decrypted Alchemy Key:", alchemy_key)
+print("Decrypted BlockCypher API Key:", blockcypher_api_key)
+print("Decrypted 0x API Key:", zerox_api_key)
 
 # Replace SimpleVM initialization with ZKVM
 vm = ZKVM(security_level=2)
@@ -442,7 +486,7 @@ class QuantumBlockchain:
                 'totalBlocks': 0,
                 # Add more metrics as needed
             }
-        self.initial_reward = 50.0
+        self.initial_reward = 1000
         self.chain = []
         self.pending_transactions = []
         self.consensus = consensus
@@ -483,6 +527,45 @@ class QuantumBlockchain:
         self.zk_system = SecureHybridZKStark(security_level=2)  # Adjust security level as needed
         self.p2p_node = None  # Will be initialized later
         self.start_time = time.time()
+        self.blockcypher_api = BlockCypherAPI(os.getenv('BLOCKCYPHER_API_KEY'))
+        self.helius_api = HeliusAPI(os.getenv('HELIUS_API_KEY'))
+        self.web3 = Web3(Web3.HTTPProvider(os.getenv('ALCHEMY_ETH_URL')))
+    async def get_balances(self, address: str) -> Dict[str, Decimal]:
+        balances = {
+            'PLATA': await self.get_plata_balance(address),
+            'BTC': await self.get_btc_balance(address),
+            'ETH': await self.get_eth_balance(address),
+            'LTC': await self.get_ltc_balance(address),
+            'DOGE': await self.get_doge_balance(address),
+            'SOL': await self.get_sol_balance(address),
+        }
+        return balances
+
+    async def get_plata_balance(self, address: str) -> Decimal:
+        # Assuming PLATA is managed by your custom blockchain
+        balance = self.balances.get(address, 0)
+        return Decimal(str(balance))
+
+    async def get_btc_balance(self, address: str) -> Decimal:
+        btc_info = self.blockcypher_api.get_address_info(address)
+        return Decimal(btc_info['balance'] / 1e8)  # Convert satoshis to BTC
+
+    async def get_eth_balance(self, address: str) -> Decimal:
+        balance_wei = self.web3.eth.get_balance(address)
+        return Decimal(self.web3.from_wei(balance_wei, 'ether'))
+
+    async def get_ltc_balance(self, address: str) -> Decimal:
+        ltc_info = self.blockcypher_api.get_address_info(address)
+        return Decimal(ltc_info['balance'] / 1e8)  # Convert satoshis to LTC
+
+    async def get_doge_balance(self, address: str) -> Decimal:
+        doge_info = self.blockcypher_api.get_address_info(address)
+        return Decimal(doge_info['balance'] / 1e8)  # Convert satoshis to DOGE
+
+    async def get_sol_balance(self, address: str) -> Decimal:
+        sol_info = await self.helius_api.get_balance(address)
+        return Decimal(sol_info['balance'] / 1e9)  # Convert lamports to SOL
+
     async def get_transaction_history(self, limit=10):
         try:
             # Assuming the blockchain stores a list of blocks, and each block has transactions
@@ -545,26 +628,39 @@ class QuantumBlockchain:
         return self.chain[last_known_block_index + 1:]
 
     async def mine_block(self, miner_address):
-        # Implementation of block mining
-        # This is a placeholder, implement according to your needs
-        block = QuantumBlock(
-            previous_hash=self.chain[-1].hash if self.chain else "0",
-            data="Mined block",
-            quantum_signature=self.generate_quantum_signature(),
-            reward=self.get_block_reward(),
-            transactions=self.pending_transactions[:10],
-            timestamp=time.time()
-        )
+        if shutting_down:
+            logger.error("Attempted to mine block during shutdown")
+            return None
         
-        # Generate ZK proof for the block
-        block_data = f"{block.previous_hash}{block.data}{block.quantum_signature}{block.reward}"
-        public_input = self.zk_system.hash(block_data)
-        block.zk_proof = self.zk_system.prove(int(block.timestamp), public_input)
+        try:
+            block = QuantumBlock(
+                previous_hash=self.chain[-1].hash if self.chain else "0",
+                data="Mined block",
+                quantum_signature=self.generate_quantum_signature(),
+                reward=self.get_block_reward(),
+                transactions=self.pending_transactions[:10],
+                timestamp=time.time()
+            )
+            
+            # Generate ZK proof for the block
+            block_data = f"{block.previous_hash}{block.data}{block.quantum_signature}{block.reward}"
+            public_input = self.zk_system.hash(block_data)
+            block.zk_proof = self.zk_system.prove(int(block.timestamp), public_input)
 
-        if self.consensus.validate_block(block):
-            self.chain.append(block)
-            return block.reward
+            if self.consensus.validate_block(block):
+                self.chain.append(block)
+                return block.reward
+            return None
+
+        except RuntimeError as e:
+            if str(e) == 'cannot schedule new futures after interpreter shutdown':
+                logger.error("Attempted to schedule task after interpreter shutdown")
+            else:
+                logger.error(f"Unexpected runtime error during mining: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error during mining: {str(e)}")
         return None
+
     def batch_verify_transactions(self, transactions):
         proofs = []
         public_inputs = []
@@ -728,37 +824,17 @@ class QuantumBlockchain:
         peers = self.node_directory.discover_nodes()
 
         async def send_block(peer):
-            async with grpc.aio.insecure_channel(f"{peer['ip_address']}:{peer['port']}") as channel:
-                stub = dagknight_pb2_grpc.DAGKnightStub(channel)
-                grpc_block = dagknight_pb2.Block(
-                    previous_hash=block.previous_hash,
-                    data=block.data,
-                    quantum_signature=block.quantum_signature,
-                    reward=float(block.reward),
-                    transactions=[
-                        dagknight_pb2.Transaction(
-                            sender=t.sender,
-                            receiver=t.receiver,
-                            amount=float(t.amount),
-                            private_key=t.private_key,
-                            public_key=t.public_key,
-                            signature=t.signature
-                        ) for t in block.transactions
-                    ],
-                    hash=block.hash,
-                    timestamp=int(block.timestamp),  # Ensure this is an integer
-                    nonce=int(block.nonce)  # Ensure this is an integer
-                )
-                try:
-                    response = await stub.PropagateBlock(dagknight_pb2.PropagateBlockRequest(block=grpc_block, miner_address=block.miner_address))
-                    if response.success:
-                        logger.info(f"Block successfully propagated to {peer['node_id']}")
-                    else:
-                        logger.error(f"Failed to propagate block to {peer['node_id']}. Message: {response.message}")
-                except grpc.RpcError as e:
-                    logger.error(f"gRPC error: {e}")
+            try:
+                await self.p2p_node.send_message(peer['ip_address'], peer['port'], {
+                    "type": "block_propagation",
+                    "block": block.to_dict()  # Assuming you have a method to_dict() in your block class
+                })
+                logger.info(f"Block successfully propagated to {peer['node_id']}")
+            except Exception as e:
+                logger.error(f"Failed to propagate block to {peer['node_id']}: {e}")
 
         await asyncio.gather(*[send_block(peer) for peer in peers])
+
 
     async def get_balance(self, user_id: str, currency: str) -> Decimal:
         balance = self.balances.get(address, 0)
@@ -1533,11 +1609,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         return user
     except PyJWTError:
         raise credentials_exception
-def get_user(db, username: str):
-    if username in db:
-        user_dict = db[username]
-        return user_dict
-    return None
+
 
 
 state = {
@@ -3530,7 +3602,7 @@ app.router.lifespan_context = lifespan
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change this to specific domains as needed
+    allow_origins=["*","http://localhost:50503"],  # Change this to specific domains as needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -3546,10 +3618,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # In-memory storage for demonstration purposes
-fake_users_db = {
-    "user1": {"username": "user1", "full_name": "User One", "email": "user1@example.com", "hashed_password": "fakehashedsecret1", "disabled": False},
-    "user2": {"username": "user2", "full_name": "User Two", "email": "user2@example.com", "hashed_password": "fakehashedsecret2", "disabled": True},
-}
+
 @app.on_event("startup")
 async def on_startup():
     wallet = Wallet()  # Or however the wallet is initialized
@@ -3602,6 +3671,7 @@ class UserInDB(User):
     wallet: dict
     salt: str
     alias: str
+    disabled: bool = False  # Add the disabled attribute with a default value
 
 class Token(BaseModel):
     access_token: str
@@ -3623,10 +3693,18 @@ class DecryptResponse(BaseModel):
 
 class TotalSupplyResponse(BaseModel):
     total_supply: Decimal
+def get_user(db, username: str):
+    if username in db:
+        user_dict = db[username]
+        if isinstance(user_dict, UserInDB):
+            return user_dict  # Directly return if it's already a UserInDB instance
+        return UserInDB(**user_dict)  # Otherwise, unpack the dictionary
+    return None
+
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
+        status_code=401,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
@@ -3635,13 +3713,19 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         username: str = payload.get("sub")
         if username is None:
             raise credentials_exception
-        token_data = {"username": username}
-    except jwt.PyJWTError:
+        token_data = TokenData(username=username)
+    except JWTError:
         raise credentials_exception
-    user = get_user(fake_users_db, username=token_data['username'])
+    user = get_user(fake_users_db, username=token_data.username)
     if user is None:
         raise credentials_exception
     return user
+
+async def get_current_active_user(current_user: UserInDB = Depends(get_current_user)):
+    if current_user.disabled:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
 
 
 
@@ -3701,19 +3785,257 @@ def generate_unique_alias():
         alias = ''.join(random.choices(string.ascii_lowercase + string.digits, k=alias_length))
         if alias not in fake_users_db:
             return alias
+            
+from wallet_registration import WalletRegistration
+@app.get("/solana/balance/{address}")
+async def get_solana_balance(address: str):
+    try:
+        balance = await helius_api.get_balance(address)
+        return {"address": address, "balance": balance}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/solana/transactions/{address}")
+async def get_solana_transactions(address: str, limit: int = 10):
+    try:
+        transactions = await helius_api.get_transactions(address, limit)
+        return {"address": address, "transactions": transactions}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/solana/transfer")
+async def solana_transfer(from_address: str, to_address: str, amount: float):
+    try:
+        # Generate ZKP for the transaction
+        secret = int.from_bytes(bytes.fromhex(from_address), 'big')
+        public_input = int(amount * 1e9)  # Convert to lamports
+        
+        zk_proof = zk_system.prove(secret, public_input)
+        
+        # Verify the ZKP
+        if not zk_system.verify(public_input, zk_proof):
+            raise HTTPException(status_code=400, detail="Invalid ZK proof")
+        
+        # Proceed with the Solana transaction
+        sender = Keypair.from_secret_key(bytes.fromhex(from_address))
+        recipient = PublicKey(to_address)
+        
+        transaction = await AsyncClient.request_airdrop(recipient, int(amount * 1e9))
+        await AsyncClient.confirm_transaction(transaction['result'], commitment=Confirmed)
+        
+        return {
+            "status": "success",
+            "transaction": transaction['result'],
+            "zk_proof": {
+                "stark_proof": zk_proof[0],
+                "snark_proof": zk_proof[1]
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/verify_zk_proof")
+async def verify_zk_proof(public_input: int, proof: dict):
+    try:
+        stark_proof = proof['stark_proof']
+        snark_proof = proof['snark_proof']
+        
+        is_valid = zk_system.verify(public_input, (stark_proof, snark_proof))
+        
+        return {"is_valid": is_valid}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/generate_qr_code")
+async def generate_qr_code(wallet_address: str, coin_type: str, current_user: str = Depends(get_current_user)):
+    try:
+        # Define the subfolder where QR codes will be saved
+        qr_code_folder = "qr_codes"
+
+        # Ensure the folder exists
+        if not os.path.exists(qr_code_folder):
+            os.makedirs(qr_code_folder)
+
+        # Generate the QR code and save it in the subfolder
+        qr_file = secure_qr_system.generate_qr_code(wallet_address, coin_type)
+        qr_file_path = os.path.join(qr_code_folder, os.path.basename(qr_file))
+
+        # Assuming `secure_qr_system.generate_qr_code` already returns the path where the QR code is saved
+        return FileResponse(qr_file_path, media_type="image/png", filename=os.path.basename(qr_file_path))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating QR code: {str(e)}")
+
+@app.post("/verify_qr_code")
+async def verify_qr_code(file: UploadFile = File(...), current_user: str = Depends(get_current_user)):
+    try:
+        qr_data = json.loads(await file.read())
+        is_valid = secure_qr_system.verify_qr_code(qr_data)
+        return {"is_valid": is_valid}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error verifying QR code: {str(e)}")
+from user_management import fake_users_db
+from solana.rpc.async_api import AsyncClient
+
+class RegisterRequest(BaseModel):
+
+    pincode: str
+    user_id: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    wallet: dict
+    mnemonic: str
+    qr_codes: Dict[str, str]
+
+
+from user_management import fake_users_db as global_fake_users_db
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.keypair import Keypair
+import os
 
 @app.post("/register", response_model=Token)
-def register(user: User):
-    if user.pincode in fake_users_db:
-        raise HTTPException(status_code=400, detail="Pincode already registered")
-    salt = generate_salt()
-    hashed_pincode = get_password_hash(user.pincode + salt)
-    wallet = {"address": "0x123456", "private_key": "abcd1234"}
-    alias = generate_unique_alias()  # Generate a unique alias for the user
-    user_in_db = UserInDB(pincode=user.pincode, hashed_pincode=hashed_pincode, salt=salt, wallet=wallet, alias=alias)
-    fake_users_db[user.pincode] = user_in_db
-    access_token = create_access_token(data={"sub": user.pincode})
-    return {"access_token": access_token, "token_type": "bearer", "wallet": wallet}
+async def register(request: RegisterRequest):
+    global global_fake_users_db
+    try:
+        # Check if the pincode is already registered
+        if request.pincode in global_fake_users_db:
+            raise HTTPException(status_code=400, detail="Pincode already registered")
+        
+        # Generate salt and hash the pincode
+        salt = generate_salt()
+        hashed_pincode = get_password_hash(request.pincode + salt)
+        
+        # Create a new Plata wallet
+        wallet = Wallet()
+        mnemonic = wallet.generate_mnemonic()
+        plata_wallet = {
+            "address": wallet.address,
+            "private_key": wallet.private_key_pem(),
+            "public_key": wallet.public_key,
+            "mnemonic": mnemonic
+        }
+        
+        # Ensure the wallet address follows the correct format
+        if not re.match(r'^plata[a-f0-9]{16}$', wallet.address):
+            logger.error(f"Invalid wallet address format: {wallet.address}")
+            raise ValueError(f"Invalid wallet address format: {wallet.address}")
+        
+        alias = wallet.generate_unique_alias()
+
+        # Register additional wallets
+        wallet_registration = WalletRegistration(blockcypher_api_key, alchemy_key)
+        additional_wallets = wallet_registration.register_all_wallets(request.user_id)
+        
+        # Create a Solana wallet using the correct method
+        solders_keypair = Keypair()  # Use Keypair() instead of Keypair.new()
+        solana_wallet = {
+            'address': str(solders_keypair.pubkey()),
+            'private_key': solders_keypair.secret().hex(),
+        }
+
+        # Combine all wallets into one structure
+        all_wallets = {
+            "plata": plata_wallet,
+            "bitcoin": additional_wallets.get('bitcoin', {}),
+            "litecoin": additional_wallets.get('litecoin', {}),
+            "ethereum": additional_wallets.get('ethereum', {}),
+            "dogecoin": additional_wallets.get('dogecoin', {}),  # Replace 'dash' with 'dogecoin' or correct as needed
+            "solana": solana_wallet,
+        }
+
+        # Generate QR codes for all wallets
+        qr_codes = {}
+        for coin_type, wallet_info in all_wallets.items():
+            if wallet_info and 'address' in wallet_info:
+                qr_file = secure_qr_system.generate_qr_code(wallet_info['address'], coin_type)
+                qr_codes[coin_type] = qr_file
+
+        # Save user in the database
+        user_in_db = UserInDB(
+            pincode=request.pincode,
+            hashed_pincode=hashed_pincode,
+            salt=salt,
+            wallet=all_wallets,  # Save all wallets
+            alias=alias,
+            qr_codes=qr_codes  # Save QR code filenames
+        )
+        global_fake_users_db[request.pincode] = user_in_db
+        
+        # Create an access token
+        access_token = create_access_token(data={"sub": request.pincode})
+        
+        logger.info(f"New wallet registered with Plata address: {wallet.address}")
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "wallet": all_wallets,  # Return all wallets
+            "mnemonic": mnemonic,
+            "qr_codes": qr_codes  # Return QR code filenames
+        }
+    
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in registration: {str(e)}")
+        logger.error(traceback.format_exc())  # Log the full traceback
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+import qrcode
+import base64
+from io import BytesIO
+from fastapi import HTTPException, Depends
+from fastapi.logger import logger
+# Add this new endpoint to get QR codes for a user's wallets
+@app.get("/get_wallet_qr_codes", response_model=Dict[str, Dict[str, str]])
+async def get_wallet_qr_codes(current_user: UserInDB = Depends(get_current_active_user)):
+    try:
+        user_id = current_user.username
+        user = fake_users_db.get(user_id)
+        
+        if not user:
+            logger.warning(f"User not found: {user_id}")
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if 'wallets' not in user or not user['wallets']:
+            logger.warning(f"No wallets found for user: {user_id}")
+            raise HTTPException(status_code=404, detail="No wallets found for user")
+        
+        qr_codes = {}
+        for wallet_type, wallet in user['wallets'].items():
+            if 'address' not in wallet:
+                logger.warning(f"No address found for wallet type {wallet_type} for user {user_id}")
+                continue
+            
+            try:
+                qr = qrcode.QRCode(version=1, box_size=10, border=5)
+                qr.add_data(wallet['address'])
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                
+                # Convert image to base64
+                buffered = BytesIO()
+                img.save(buffered, format="PNG")
+                img_str = base64.b64encode(buffered.getvalue()).decode()
+                
+                qr_codes[wallet_type] = img_str
+                logger.info(f"QR code generated for wallet type {wallet_type} for user {user_id}")
+            except Exception as e:
+                logger.error(f"Error generating QR code for wallet type {wallet_type} for user {user_id}: {str(e)}")
+        
+        if not qr_codes:
+            logger.warning(f"No QR codes could be generated for user {user_id}")
+            raise HTTPException(status_code=500, detail="Failed to generate any QR codes")
+        
+        return {"qr_codes": qr_codes}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in get_wallet_qr_codes for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Unexpected error occurred while generating QR codes")
+
 
 @app.post("/token", response_model=Token)
 def login(user: User):
@@ -3747,14 +4069,16 @@ def authenticate(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-
-def periodically_discover_nodes(directory_ip, directory_port):
+async def periodically_discover_nodes(p2p_node: P2PNode):
     while True:
         try:
-            node_directory.discover_nodes_with_grpc(directory_ip, directory_port)
+            # Example of using the find_node method from P2PNode to discover nodes
+            random_node_id = p2p_node.generate_random_id()
+            await p2p_node.find_node(random_node_id)
         except Exception as e:
             logger.error(f"Error during periodic node discovery: {str(e)}")
-        time.sleep(60)  # Discover nodes every 60 seconds
+        await asyncio.sleep(60)  # Discover nodes every 60 seconds
+
 
 
 
@@ -3806,14 +4130,14 @@ class Wallet(BaseModel):
 class Contract(BaseModel):
     address: str
     creator: str
-
 class SearchResult(BaseModel):
     wallets: List[Wallet]
     contracts: List[Contract]
-    transaction: dagknight_pb2.Transaction
+    transaction: Transaction  # Use the appropriate Transaction class here
 
     class Config:
         arbitrary_types_allowed = True
+
 
 from pydantic import BaseModel, Field
 from mnemonic import Mnemonic
@@ -3895,22 +4219,26 @@ class Wallet(BaseModel):
         rsa_public_key = serialization.load_pem_public_key(public_key.encode(), backend=default_backend())
         encrypted_message = rsa_public_key.encrypt(
             message.encode('utf-8'),
-            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
-        )
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256()), label=None)
         return base64.b64encode(encrypted_message).decode('utf-8')
 
     def decrypt_message(self, encrypted_message):
         rsa_private_key = serialization.load_pem_private_key(self.private_key_pem().encode(), password=None, backend=default_backend())
         decrypted_message = rsa_private_key.decrypt(
             base64.b64decode(encrypted_message),
-            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
-        )
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256()), label=None)
         return decrypted_message.decode('utf-8')
-
     def get_address(self) -> str:
         public_key_bytes = self.get_public_key().encode()
-        address = "plata" + hashlib.sha256(public_key_bytes).hexdigest()
+        address = "plata" + hashlib.sha256(public_key_bytes).hexdigest()[:16]
+        
+        # Verify if the address matches the expected format
+        if not re.match(r'^plata[a-f0-9]{16}$', address):
+            raise ValueError(f"Generated address {address} does not match the expected format.")
+        
         return address
+
+
 
     def generate_unique_alias(self):
         alias_length = 8  # Length of the alias
@@ -3919,7 +4247,6 @@ class Wallet(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
-
 
 
 class PQWallet(Wallet):
@@ -3951,41 +4278,52 @@ class PQWallet(Wallet):
 
 def hamming_distance(s1, s2):
     return sum(c1 != c2 for c1, c2 in zip(s1, s2))
+from pydantic import BaseModel
 
+class TokenInfo(BaseModel):
+    address: str
+    name: str
+    symbol: str
+    balance: float
+    wallets: dict
+
+from pydantic import BaseModel
+
+class ImportTokenRequest(BaseModel):
+    address: str
+    # Add other fields as necessary
 
 class ImportWalletRequest(BaseModel):
     mnemonic: str
-@app.post("/import_wallet")
-def import_wallet(request: ImportWalletRequest, pincode: str = Depends(get_current_user)):
+@app.post("/import_token", response_model=TokenInfo)
+async def import_token(request: ImportTokenRequest, current_user: User = Depends(get_current_user)):
     try:
-        mnemonic = Mnemonic("english")
-        seed = mnemonic.to_seed(request.mnemonic)
+        # Import the Plata wallet first
+        token = await blockchain.import_token(request.address, current_user.username)
 
-        private_key = ec.derive_private_key(
-            int.from_bytes(seed[:32], byteorder="big"),
-            ec.SECP256R1(),
-            default_backend()
-        )
-        private_key_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        ).decode('utf-8')
-        public_key = private_key.public_key()
-        public_key_pem = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode('utf-8')
-        address = "plata" + hashlib.sha256(public_key_pem.encode()).hexdigest()
-        alias = generate_unique_alias()
+        # After importing the Plata wallet, retrieve associated wallets
+        wallet_registration = WalletRegistration(blockcypher_api_key, alchemy_key)
+        additional_wallets = wallet_registration.register_all_wallets()
 
-        wallet = Wallet(address=address, private_key=private_key_pem, public_key=public_key_pem, alias=alias)
-        blockchain.add_wallet(wallet)
-        return {"address": address, "private_key": private_key_pem, "public_key": public_key_pem, "alias": alias}
+        # Combine the Plata wallet with the other wallets
+        all_wallets = {
+            "plata_wallet": token,
+            "ethereum_wallet": additional_wallets['ethereum'],
+            "bitcoin_wallet": additional_wallets['bitcoin'],
+            "litecoin_wallet": additional_wallets['litecoin'],
+            "dogecoin_wallet": additional_wallets['dogecoin']
+        }
+
+        # Return all the wallet information
+        return {
+            "address": token.address,
+            "name": token.name,
+            "symbol": token.symbol,
+            "balance": float(token.balance_of(current_user.username)),
+            "wallets": all_wallets  # Include all wallets in the response
+        }
     except Exception as e:
-        logger.error(f"Error importing wallet: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
-
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 
@@ -4012,93 +4350,71 @@ async def search(query: str):
         transactions=transaction_results,
         contracts=contract_results
     )
-@app.post("/create_wallet")
-async def create_wallet(pincode: str = Depends(get_current_user)):
-    try:
-        # Generate mnemonic phrase
-        mnemo = Mnemonic("english")
-        mnemonic_phrase = mnemo.generate(strength=256)
-
-        # Derive seed from mnemonic phrase
-        seed = mnemo.to_seed(mnemonic_phrase)
-
-        # Generate private key from seed
-        private_key = ec.derive_private_key(
-            int.from_bytes(seed[:32], byteorder='big'),
-            ec.SECP256R1(), default_backend()
-        )
-        private_key_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        ).decode('utf-8')
-        public_key = private_key.public_key()
-        public_key_pem = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode('utf-8')
-        address = "plata" + hashlib.sha256(public_key_pem.encode()).hexdigest()
-        alias = generate_unique_alias()
-
-        # Create Wallet object with all necessary attributes
-        wallet = Wallet(address=address, private_key=private_key_pem, public_key=public_key_pem, alias=alias, mnemonic=mnemonic_phrase)
-        blockchain.add_wallet(wallet)
-        return {"address": address, "private_key": private_key_pem, "public_key": public_key_pem, "alias": alias, "mnemonic": mnemonic_phrase}
-    except Exception as e:
-        logger.error(f"Error creating wallet: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
-
-
 class AddressRequest(BaseModel):
     address: str
+
 class WalletRequest(BaseModel):
     wallet_address: str
+
+class Transaction(BaseModel):
+    tx_hash: str
+    sender: str
+    receiver: str
+    amount: float
+    timestamp: str
+
 class BalanceResponse(BaseModel):
-    balance: float  # Change to float for serialization
+    balance: Dict[str, float]  # Change to Dict[str, float] for multiple currencies
     transactions: List[Transaction] = Field([], description="List of transactions")
-    
+    zk_proof: str = Field(..., description="Zero-Knowledge Proof")
+
 @app.post("/get_balance", response_model=BalanceResponse)
 async def get_balance(request: WalletRequest):
-    wallet_address = request.wallet_address
     try:
-        # Ensure the wallet address is valid
-        if not wallet_address or not re.match(r'^plata[a-f0-9]{64}$', wallet_address):
-            logger.error(f"Invalid wallet address format: {wallet_address}")
-            raise HTTPException(status_code=422, detail="Invalid wallet address format")
+        # Validate wallet address
+        if not request.wallet_address or not re.match(r'^plata[a-f0-9]{16}$', request.wallet_address):
+            logger.error(f"Invalid wallet address format: {request.wallet_address}")
+            raise HTTPException(status_code=422, detail=f"Invalid wallet address format: {request.wallet_address}")
 
-        # Retrieve the balance for the given wallet address
-        balance = await blockchain.get_balance(wallet_address)
-        # Ensure balance is a Decimal with 18 decimal places
-        balance = Decimal(balance).quantize(Decimal('0.000000000000000001'))
+        # Retrieve the balance for the given wallet address for all currencies
+        balances = await blockchain.get_balances(request.wallet_address)
         
-        # Convert balance to float for JSON serialization
-        balance_float = float(balance)
+        # Convert and process the balances
+        processed_balances = {}
+        for currency, balance in balances.items():
+            balance_decimal = Decimal(balance).quantize(Decimal('0.000000000000000001'))
+            processed_balances[currency] = float(balance_decimal)
 
-        # Retrieve the transaction history for the wallet
-        transactions = [
-            Transaction(
+        # Process transactions
+        transactions = []
+        raw_transactions = await blockchain.get_transactions(request.wallet_address)
+        for tx in raw_transactions:
+            transactions.append(Transaction(
                 tx_hash=tx.get('hash', 'unknown'),
                 sender=tx.get('sender', 'unknown'),
                 receiver=tx.get('receiver', 'unknown'),
-                amount=float(Decimal(tx.get('amount', 0)).quantize(Decimal('0.000000000000000001'))),  # Convert to float
+                amount=float(Decimal(tx.get('amount', 0)).quantize(Decimal('0.000000000000000001'))),
                 timestamp=tx.get('timestamp', 'unknown')
-            )
-            for tx in await blockchain.get_transactions(wallet_address)
-        ]
-        
-        # Generate a ZKP for the balance
-        secret = int(balance * 10**18)  # Convert Decimal to integer
-        public_input = int(hashlib.sha256(wallet_address.encode()).hexdigest(), 16)
+            ))
+
+        # Generate ZKP (you might need to adjust this based on how you want to handle multiple balances)
+        total_balance = sum(processed_balances.values())
+        secret = int(total_balance * 10**18)  # Convert total balance to integer
+        public_input = int(hashlib.sha256(request.wallet_address.encode()).hexdigest(), 16)
         zk_proof = blockchain.zk_system.prove(secret, public_input)
 
-        logger.info(f"Balance and ZKP retrieved for address {wallet_address}: {balance_float}")
-        return BalanceResponse(balance=balance_float, transactions=transactions, zk_proof=zk_proof)
+        logger.info(f"Balances and ZKP retrieved for address {request.wallet_address}: {processed_balances}")
+        return BalanceResponse(balance=processed_balances, transactions=transactions, zk_proof=zk_proof)
+
+    except ValueError as e:
+        logger.error(f"Value error in get_balance: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid value: {e}")
     except KeyError as e:
         logger.error(f"Missing key in transaction: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: missing key {e}")
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Unexpected error in get_balance: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.post("/send_transaction")
@@ -4293,10 +4609,10 @@ class QuantumHolographicNetwork:
     def get_boundary_qubits(self):
         return [i for i in range(self.size**2) if i < self.size or i >= self.size*(self.size-1) or i % self.size == 0 or i % self.size == self.size-1]
 
-
 import time
 import logging
-from functools import partial
+import traceback
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import psutil
 import numpy as np
@@ -4305,8 +4621,13 @@ import scipy.sparse as sparse
 import scipy.sparse.linalg
 from scipy.optimize import minimize
 from fastapi import Depends, HTTPException, FastAPI
+from decimal import Decimal
+import random
+from SecureHybridZKStark import SecureHybridZKStark
 
+logger = logging.getLogger(__name__)
 continue_mining = True
+executor = ThreadPoolExecutor(max_workers=1)
 
 def mining_algorithm(iterations=1):
     try:
@@ -4322,11 +4643,9 @@ def mining_algorithm(iterations=1):
         logging.info(f"Graph nodes: {list(graph.nodes())}")
         logging.info(f"Graph edges: {list(graph.edges())}")
 
-
         def quantum_annealing_simulation(params):
             hamiltonian = sparse.csr_matrix((2**num_qubits, 2**num_qubits), dtype=complex)
             
-            # Get the dimensions of the grid graph
             grid_dims = list(graph.nodes())[-1]
             rows, cols = grid_dims[0] + 1, grid_dims[1] + 1
             
@@ -4334,7 +4653,6 @@ def mining_algorithm(iterations=1):
                 i, j = edge
                 sigma_z = sparse.csr_matrix([[1, 0], [0, -1]], dtype=complex)
                 
-                # Convert tuple indices to integers
                 i_int = i[0] * cols + i[1]
                 j_int = j[0] * cols + j[1]
                 
@@ -4355,8 +4673,6 @@ def mining_algorithm(iterations=1):
 
             return -np.abs(final_state[0])**2  # Negative because we're minimizing
 
-
-
         cumulative_counts = {}
         for iteration in range(iterations):
             logging.info(f"Starting iteration {iteration + 1}/{iterations}")
@@ -4371,8 +4687,6 @@ def mining_algorithm(iterations=1):
             simulation_duration = end_time_simulation - start_time_simulation
             logging.info(f"Simulation completed in {simulation_duration:.2f} seconds")
             logging.info(f"Optimization result: {result}")
-
-
 
             logging.info("Simulating gravity effects")
             mass_distribution = np.random.rand(2, 5)  # 2x5 grid
@@ -4402,49 +4716,23 @@ def mining_algorithm(iterations=1):
         memory_info = process.memory_info()
         logging.info(f"Memory usage after simulation: {memory_info.rss / (1024 * 1024):.2f} MB")
 
-        # Realistic Calculation of QHINs and Hashrate
-        qhins = np.trace(entanglement_matrix)  # Quantum Hash Information Number based on the trace of the entanglement matrix
-        hashrate = 1 / (simulation_duration * iterations)  # Hashrate as the inverse of the total simulation duration
+        qhins = np.trace(entanglement_matrix)
+        hashrate = 1 / (simulation_duration * iterations)
 
         logging.info(f"QHINs: {qhins:.6f}")
         logging.info(f"Hashrate: {hashrate:.6f} hashes/second")
 
-        return cumulative_counts, result.fun, entanglement_matrix, qhins, hashrate
+        return {
+            "counts": cumulative_counts,
+            "energy": result.fun,
+            "entanglement_matrix": entanglement_matrix,
+            "qhins": qhins,
+            "hashrate": hashrate
+        }
     except Exception as e:
         logging.error(f"Error in mining_algorithm: {str(e)}")
-        logging.error(traceback.format_exc())  # Log the traceback
+        logging.error(traceback.format_exc())
         return {"success": False, "message": f"Error in mining_algorithm: {str(e)}"}
-async def process_exchange_orders():
-    for pair in exchange.order_book.buy_orders.keys():
-        matches = exchange.order_book.match_orders(pair)
-        for buy_order, sell_order, amount, price in matches:
-            exchange_tx = ExchangeTransaction(
-                buyer_id=buy_order.user_id,
-                seller_id=sell_order.user_id,
-                from_currency=sell_order.from_currency,
-                to_currency=buy_order.from_currency,
-                amount=amount,
-                price=price
-            )
-            await exchange.process_exchange_transaction(exchange_tx)
-async def create_block(self, miner_address: str):
-    # ... (existing block creation logic)
-    for tx in block.transactions:
-        if not tx.verify_transaction(self.zk_system):
-            raise ValueError(f"Invalid transaction in block: {tx}")
-
-async def create_new_block(miner_address: str):
-    try:
-        new_block = await self.create_block(miner_address)
-        if new_block:
-            logger.info(f"New block mined: {new_block.hash}")
-            return new_block
-        else:
-            logger.error("Failed to mine a new block")
-            return None
-    except ValueError as e:
-        logger.error(f"Block creation failed: {str(e)}")
-        return None
 @app.post("/mine_block")
 async def mine_block(request: MineBlockRequest, pincode: str = Depends(authenticate)):
     global continue_mining
@@ -4472,24 +4760,35 @@ async def mine_block(request: MineBlockRequest, pincode: str = Depends(authentic
             await process_exchange_orders()
 
             # Perform quantum annealing simulation
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(mining_algorithm, iterations=2)
-                try:
-                    result = future.result(timeout=300)
-                    logger.info("Mining algorithm completed within timeout")
-                except TimeoutError:
-                    logger.error("Mining algorithm timed out after 5 minutes")
-                    continue
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(executor, mining_algorithm, 2)
+                logger.info("Mining algorithm completed")
+            except TimeoutError:
+                logger.error("Mining algorithm timed out after 5 minutes")
+                continue
+            except Exception as e:
+                logger.error(f"Error in mining algorithm: {str(e)}")
+                continue
 
             if isinstance(result, dict) and not result.get("success", True):
                 logger.error(f"Mining algorithm failed: {result.get('message')}")
                 continue
 
-            counts, energy, entanglement_matrix, qhins, hashrate = result["counts"], result["energy"], result["entanglement_matrix"], result["qhins"], result["hashrate"]
+            counts = result.get("counts", {})
+            energy = result.get("energy", 0)
+            entanglement_matrix = result.get("entanglement_matrix", np.array([]))
+            qhins = result.get("qhins", 0)
+            hashrate = result.get("hashrate", 0)
+
             end_time = time.time()
 
             logger.info(f"Quantum Annealing Simulation completed in {end_time - start_time:.2f} seconds")
             logger.info("Checking mining conditions")
+
+            if not counts:
+                logger.warning("No quantum states found. Skipping this iteration.")
+                iteration_count += 1
+                continue
 
             max_state = max(counts, key=counts.get)
             max_prob = counts[max_state]
@@ -4598,6 +4897,38 @@ async def mine_block(request: MineBlockRequest, pincode: str = Depends(authentic
         logger.error(f"Error during mining: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error during mining: {str(e)}")
+
+async def process_exchange_orders():
+    for pair in exchange.order_book.buy_orders.keys():
+        matches = exchange.order_book.match_orders(pair)
+        for buy_order, sell_order, amount, price in matches:
+            exchange_tx = ExchangeTransaction(
+                buyer_id=buy_order.user_id,
+                seller_id=sell_order.user_id,
+                from_currency=sell_order.from_currency,
+                to_currency=buy_order.from_currency,
+                amount=amount,
+                price=price
+            )
+            await exchange.process_exchange_transaction(exchange_tx)
+async def create_block(self, miner_address: str):
+    # ... (existing block creation logic)
+    for tx in block.transactions:
+        if not tx.verify_transaction(self.zk_system):
+            raise ValueError(f"Invalid transaction in block: {tx}")
+
+async def create_new_block(miner_address: str):
+    try:
+        new_block = await self.create_block(miner_address)
+        if new_block:
+            logger.info(f"New block mined: {new_block.hash}")
+            return new_block
+        else:
+            logger.error("Failed to mine a new block")
+            return None
+    except ValueError as e:
+        logger.error(f"Block creation failed: {str(e)}")
+        return None
 async def get_mining_stats():
     try:
         # Assume these are global variables or can be fetched from the blockchain or another source
@@ -5502,10 +5833,10 @@ class SecureDAGKnightServicer(dagknight_pb2_grpc.DAGKnightServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             return dagknight_pb2.MineBlockResponse(success=False)
 
-    def GetBalance(self, request, context):
+    async def GetBalance(self, request, context):
         try:
             address = request.address
-            balance = self.blockchain.get_balance(address)
+            balance = await self.blockchain.get_balance(address)
             return dagknight_pb2.GetBalanceResponse(balance=balance)
         except Exception as e:
             logger.error(f"Error getting balance: {str(e)}")
@@ -5733,48 +6064,6 @@ async def serve(secret_key, node_directory, vm, blockchain, zk_system):
 
 
 
-def register_node_with_grpc(node_id, public_key, ip_address, port, directory_ip, directory_port):
-    with grpc.insecure_channel(f'{directory_ip}:{directory_port}') as channel:
-        stub = dagknight_pb2_grpc.DAGKnightStub(channel)
-        request = dagknight_pb2.RegisterNodeRequest(node_id=node_id, public_key=public_key, ip_address=ip_address, port=port)
-        response = stub.RegisterNode(request)
-        logger.info(f"Registered node with magnet link: {response.magnet_link}")
-
-
-def discover_nodes_with_grpc(directory_ip, directory_port):
-    try:
-        with grpc.insecure_channel(f'{directory_ip}:{directory_port}') as channel:
-            stub = dagknight_pb2_grpc.DAGKnightStub(channel)
-            request = dagknight_pb2.DiscoverNodesRequest()
-            response = stub.DiscoverNodes(request)
-            logger.info(f"Discovered nodes: {response.magnet_links}")
-            return response.magnet_links
-    except grpc.RpcError as e:
-        logger.error(f"gRPC error when discovering nodes: {e.code()}: {e.details()}")
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error when discovering nodes: {str(e)}")
-        raise
-
-
-def periodically_discover_nodes(directory_ip, directory_port, retry_interval=60, max_retries=5):
-    retries = 0
-    while True:
-        try:
-            logger.info(f"Attempting to discover nodes (Attempt {retries + 1})...")
-            discover_nodes_with_grpc(directory_ip, directory_port)
-            retries = 0  # Reset retries after a successful attempt
-        except Exception as e:
-            retries += 1
-            if retries > max_retries:
-                logger.error(f"Max retries reached. Failed to discover nodes: {str(e)}")
-                break
-            logger.warning(f"Error discovering nodes: {str(e)}. Retrying in {retry_interval} seconds...")
-            time.sleep(retry_interval)
-        else:
-            logger.info(f"Node discovery successful. Next discovery in {retry_interval} seconds...")
-            time.sleep(retry_interval)
-
 import unittest
 
 def run_secure_client():
@@ -5884,13 +6173,26 @@ async def periodic_network_stats_update():
         await asyncio.sleep(60)  # Update every minute
 async def get_network_stats():
     try:
-        total_nodes = len(node_directory.discover_nodes())
-        total_transactions = blockchain.globalMetrics['totalTransactions']  # Accessing totalTransactions from the globalMetrics dictionary
+        # Await the coroutine to discover nodes
+        nodes = await node_directory.discover_nodes()
+        total_nodes = len(nodes)
+        
+        # Accessing totalTransactions from the globalMetrics dictionary
+        total_transactions = blockchain.globalMetrics['totalTransactions']
+        
+        # Length of the blockchain
         total_blocks = len(blockchain.chain)
+        
+        # Calculate the average block time
         average_block_time = calculate_average_block_time(blockchain.chain)
+        
+        # Get the current difficulty of the blockchain
         current_difficulty = blockchain.difficulty
+        
+        # Get the total supply from the blockchain
         total_supply = blockchain.get_total_supply()
         
+        # Return the network statistics as a dictionary
         return {
             "total_nodes": total_nodes,
             "total_transactions": total_transactions,
@@ -5945,13 +6247,66 @@ async def get_recent_transactions(limit: int = 10, pincode: str = Depends(authen
     except Exception as e:
         logger.error(f"Error fetching recent transactions: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching recent transactions")
+class TokenRefreshRequest(BaseModel):
+    refresh_token: str
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def create_refresh_token(user_id: str):
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    return jwt.encode({"sub": user_id, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
+
+def verify_token(token: str, token_type: str):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail=f"Invalid {token_type}")
+        return user_id
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail=f"{token_type.capitalize()} expired")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail=f"Invalid {token_type}")
+
 @app.post("/refresh_token")
-async def refresh_token(refresh_token: str):
-    user = verify_refresh_token(refresh_token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
-    new_access_token = create_access_token({"sub": user})
-    return {"access_token": new_access_token}
+async def refresh_token(request: TokenRefreshRequest):
+    try:
+        user_id = verify_token(request.refresh_token, "refresh token")
+        new_access_token = create_access_token({"sub": user_id})
+        return {"access_token": new_access_token, "token_type": "bearer"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Example protected route
+@app.get("/protected")
+async def protected_route(token: str = Depends(oauth2_scheme)):
+    user_id = verify_token(token, "access token")
+    return {"message": "Access granted", "user_id": user_id}
+
+# Example login route (you should implement proper authentication here)
+@app.post("/login")
+async def login(username: str, password: str):
+    # Implement your authentication logic here
+    # For this example, we're just creating tokens for any username
+    user_id = username
+    access_token = create_access_token({"sub": user_id})
+    refresh_token = create_refresh_token(user_id)
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+                    
 
 
 @app.get("/block_details/{block_hash}")
@@ -6044,34 +6399,40 @@ async def get_current_user(token: str):
     except Exception as e:
         logger.error(f"Unexpected error decoding token: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+import json
+from decimal import Decimal
+from fastapi import WebSocket, WebSocketDisconnect, Query, HTTPException
+from starlette.websockets import WebSocketState
 
 WS_1000_NORMAL_CLOSURE = 1000
 WS_1008_POLICY_VIOLATION = 1008
-WS_1011_INTERNAL_ERROR = 1011
+WS_3000_INTERNAL_ERROR = 3000  # Custom code for internal errors
+
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super(DecimalEncoder, self).default(obj)
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
     logger.info("WebSocket connection attempt received")
     logger.info(f"Query parameters: {websocket.query_params}")
-
     if not token:
         logger.error("No token provided in WebSocket connection")
-        await websocket.close(code=1008)
+        await websocket.close(code=WS_1008_POLICY_VIOLATION)
         return
-
     try:
         logger.info(f"Token provided: {token[:10]}...{token[-10:] if len(token) > 20 else ''}")
         user = await get_current_user(token)  # Assuming get_current_user function exists
         logger.info(f"User authenticated: {user}")
-
         await manager.connect(websocket, user)
         logger.info(f"WebSocket connection accepted for user: {user}")
-
         try:
             while True:
                 data = await websocket.receive_text()
                 logger.debug(f"Received message from {user}: {data}")
                 message = json.loads(data)
-
                 # Handle the received message and update state accordingly
                 if message['type'] == 'botControl':
                     action = message['action']
@@ -6099,21 +6460,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
                     price = Decimal(message['price'])
                     # Handle placing order logic
                     logger.info(f"Placing order: {order_type} {amount} {pair} at {price}")
-
                 # Example: broadcast updated state
-                await manager.broadcast(json.dumps(state))
+                await manager.broadcast(json.dumps(state, cls=DecimalEncoder))
         except WebSocketDisconnect:
             manager.disconnect(user)
             logger.info(f"WebSocket disconnected for user: {user}")
     except HTTPException as e:
         logger.error(f"Authentication failed: {str(e)}")
-        await websocket.close(code=1008)
+        await websocket.close(code=WS_1008_POLICY_VIOLATION)
     except Exception as e:
         logger.error(f"Unexpected error in WebSocket connection: {str(e)}")
         if websocket.client_state != WebSocketState.DISCONNECTED:
-            await websocket.close(code=1011)
-
-
+            await websocket.close(code=WS_3000_INTERNAL_ERROR)
 async def get_current_user(token: str):
     try:
         logger.info(f"Attempting to decode token: {token[:10]}...{token[-10:]}")
@@ -7186,37 +7544,289 @@ async def run_curses_dashboard(blockchain, exchange):
 
     # Use curses.wrapper to handle initialization and cleanup
     curses.wrapper(curses_main)
+from daphne.server import Server as DaphneServer
+from daphne.endpoints import build_endpoint_description_strings
+class OrderRequest(BaseModel):
+    user_id: str
+    order_type: str
+    pair: str
+    amount: float
+    price: float
 
+class OrderResponse(BaseModel):
+    order_id: str
 
+class SwapRequest(BaseModel):
+    user_id: str
+    from_token: str
+    to_token: str
+    amount: float
 
-def start_grpc_server(secret_key, node_directory, vm, blockchain, zk_system):
-    print("Entering start_grpc_server function")
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+class LiquidityRequest(BaseModel):
+    user_id: str
+    token_a: str
+    token_b: str
+    amount_a: float
+    amount_b: float
 
+class TokenInfo(BaseModel):
+    address: str
+    name: str
+    symbol: str
+    balance: float
+
+# Endpoint to place a limit order
+@router.post("/place_order", response_model=OrderResponse)
+async def place_order(order: OrderRequest, current_user: str = Depends(get_current_user)):
     try:
-        print("About to run serve function")
-        loop.run_until_complete(serve(secret_key, node_directory, vm, blockchain, zk_system))
+        order_id = await exchange.place_limit_order(
+            current_user,
+            order.order_type,
+            order.pair,
+            Decimal(str(order.amount)),
+            Decimal(str(order.price))
+        )
+        return OrderResponse(order_id=order_id)
     except Exception as e:
-        print(f"Exception in start_grpc_server: {e}")
-        print(f"Exception traceback: {traceback.format_exc()}")
-    finally:
-        print("Closing event loop")
-        loop.close()
-async def run_uvicorn_server():
-    config = uvicorn.Config("quantumdagknight:app", host="0.0.0.0", port=50503, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
-import socket
+        raise HTTPException(status_code=400, detail=str(e))
+
+# Endpoint to get the order book for a trading pair
+@router.get("/order_book/{pair}")
+async def get_order_book(pair: str):
+    try:
+        order_book = await exchange.get_order_book(pair)
+        return order_book
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# Endpoint to swap tokens
+@router.post("/swap")
+async def swap_tokens(swap_request: SwapRequest, current_user: str = Depends(get_current_user)):
+    try:
+        result = await exchange.swap(
+            current_user,
+            swap_request.from_token,
+            swap_request.to_token,
+            Decimal(str(swap_request.amount))
+        )
+        return {"success": True, "amount_received": float(result)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# Endpoint to add liquidity to a pool
+@router.post("/add_liquidity")
+async def add_liquidity(request: LiquidityRequest, current_user: str = Depends(get_current_user)):
+    try:
+        result = await exchange.add_liquidity(
+            current_user,
+            f"{request.token_a}_{request.token_b}",
+            Decimal(str(request.amount_a)),
+            Decimal(str(request.amount_b))
+        )
+        return {"success": True, "liquidity_tokens": float(result)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# Endpoint to remove liquidity from a pool
+@router.post("/remove_liquidity")
+async def remove_liquidity(request: LiquidityRequest, current_user: str = Depends(get_current_user)):
+    try:
+        amount_a, amount_b = await exchange.remove_liquidity(
+            current_user,
+            f"{request.token_a}_{request.token_b}",
+            Decimal(str(request.amount_a))
+        )
+        return {"success": True, "amount_a": float(amount_a), "amount_b": float(amount_b)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# Endpoint to get user's token balances
+@router.get("/user_tokens", response_model=List[TokenInfo])
+async def get_user_tokens(current_user: str = Depends(get_current_user)):
+    try:
+        tokens = await exchange.get_user_tokens(current_user)
+        return [
+            TokenInfo(
+                address=token.address,
+                name=token.name,
+                symbol=token.symbol,
+                balance=float(token.balance_of(current_user))
+            )
+            for token in tokens
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# Endpoint to get current market price
+@router.get("/market_price/{pair}")
+async def get_market_price(pair: str):
+    try:
+        price = await exchange.get_market_price(pair)
+        return {"pair": pair, "price": float(price)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+from pydantic import BaseModel, HttpUrl
+from jwt import PyJWTError as JWTError
+
+class CreateTokenRequest(BaseModel):
+    creator_address: str
+    token_name: str
+    token_symbol: str
+    total_supply: int
+    logo_url: Optional[HttpUrl] = None
+    logo_data: Optional[str] = None  # Base64 encoded image data
+
+
+class TransferTokenRequest(BaseModel):
+    from_address: str
+    to_address: str
+    token_name: str
+    amount: int
+
+class CreateLiquidityPoolRequest(BaseModel):
+    token1: str
+    token2: str
+    amount1: int
+    amount2: int
+    owner: str
+
+class TokenData(BaseModel):
+    username: str
+class UpdateTokenLogoRequest(BaseModel):
+    token_address: str
+    logo_url: Optional[HttpUrl] = None
+    logo_data: Optional[str] = None  # Base64 encoded image data
+@app.post("/api/create_token")
+async def create_token(
+    token_data: CreateTokenRequest,
+    current_user: str = Depends(get_current_user)
+):
+    success, result = vm.create_token(
+        creator_address=current_user,
+        token_name=token_data.token_name,
+        token_symbol=token_data.token_symbol,
+        total_supply=token_data.total_supply,
+        logo_url=token_data.logo_url,
+        logo_data=token_data.logo_data
+    )
+    if success:
+        return {
+            "status": "success",
+            "token_name": token_data.token_name,
+            "token_symbol": token_data.token_symbol,
+            "token_address": result
+        }
+    else:
+        raise HTTPException(status_code=400, detail=result)
+
+@app.post("/api/update_token_logo")
+async def update_token_logo(
+    logo_data: UpdateTokenLogoRequest,
+    current_user: str = Depends(get_current_user)
+):
+    success = vm.update_token_logo(
+        token_address=logo_data.token_address,
+        logo_url=logo_data.logo_url,
+        logo_data=logo_data.logo_data
+    )
+    if success:
+        return {"status": "success", "message": "Token logo updated successfully"}
+    else:
+        raise HTTPException(status_code=400, detail="Failed to update token logo")
+
+
+@app.post("/api/upload_token_logo")
+async def upload_token_logo(
+    token_address: str,
+    file: UploadFile = File(...),
+    current_user: str = Depends(get_current_user)
+):
+    try:
+        contents = await file.read()
+        logo_data = base64.b64encode(contents).decode()
+        success = vm.update_token_logo(token_address, logo_data=logo_data)
+        if success:
+            return {"status": "success", "message": "Token logo uploaded successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to upload token logo")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+
+@app.get("/api/created_tokens", response_model=List[dict])
+async def get_created_tokens(current_user: str = Depends(get_current_user)):
+    try:
+    
+        user_tokens = vm.get_user_tokens(current_user)
+        return user_tokens
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while fetching created tokens: {str(e)}"
+        )
+
+@app.post("/api/mint_token")
+async def mint_token(request: TransferTokenRequest):
+    result = vm.transfer_token(request.from_address, request.to_address, request.token_name, request.amount)
+    if result:
+        return {"status": "success", "minted_amount": request.amount}
+    raise HTTPException(status_code=400, detail="Minting failed")
+
+@app.post("/api/burn_token")
+async def burn_token(request: TransferTokenRequest):
+    # Assuming burn is just a transfer to a burn address (e.g., 0x0)
+    burn_address = "0x0000000000000000000000000000000000000000"
+    result = vm.transfer_token(request.from_address, burn_address, request.token_name, request.amount)
+    if result:
+        return {"status": "success", "burned_amount": request.amount}
+    raise HTTPException(status_code=400, detail="Burning failed")
+
+@app.post("/api/create_liquidity_pool")
+async def create_liquidity_pool(request: CreateLiquidityPoolRequest):
+    # Logic to create a liquidity pool in the VM
+    pool_address = vm.create_liquidity_pool(request.owner, request.token1, request.token2, request.amount1, request.amount2)
+    if pool_address:
+        return {"status": "success", "pool_address": pool_address}
+    raise HTTPException(status_code=400, detail="Liquidity pool creation failed")
+
+
+@app.get("/api/liquidity_pools")
+async def get_liquidity_pools():
+    # Placeholder for retrieving liquidity pools from the VM
+    return {"pools": list(vm.contracts.keys())}
+        
+
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         return s.getsockname()[1]
 
+async def run_daphne_server():
+    from quantumdagknight import app  # Import your FastAPI or other ASGI app here
+
+    # Setup the Daphne server
+    interface = "0.0.0.0"
+    port = 50503
+    endpoints = build_endpoint_description_strings(interface, port)
+
+    server = DaphneServer(
+        application=app,
+        endpoints=endpoints
+    )
+
+    # Run the server in the current asyncio loop
+    await asyncio.to_thread(server.run)
+    
+
 async def async_main():
     from curses_dashboard.dashboard import DashboardUI
+
     try:
-        # Initialize the VM and create the genesis wallet
+        # Start Daphne-serveren
+        daphne_task = asyncio.create_task(run_daphne_server())
+
+        # Initialiser VM og opret genesis wallet
         vm = SimpleVM(gas_limit=10000, number_of_shards=10, nodes=[])
         logger.info("SimpleVM initialized successfully")
 
@@ -7225,7 +7835,7 @@ async def async_main():
         print(f"Genesis Address: {genesis_address}")
 
         collateral_token = "USDC"
-        initial_price = 0.000000000000000001  # Adjusted price
+        initial_price = 0.000000000000000001
         price_feed = SimplePriceFeed(initial_price)
         cashewstable_contract_address = vm.deploy_contract(genesis_address, Cashewstable, collateral_token, price_feed)
         print(f"Cashewstable contract deployed at address: {cashewstable_contract_address}")
@@ -7233,7 +7843,7 @@ async def async_main():
         node_id = os.getenv("NODE_ID", "node_1")
         public_key = "public_key_example"
         ip_address = os.getenv("IP_ADDRESS", "127.0.0.1")
-        grpc_port = find_free_port()  # Dynamically find a free port for gRPC
+        grpc_port = find_free_port()
         api_port = int(os.getenv("API_PORT", 50503))
         directory_ip = os.getenv("DIRECTORY_IP", "127.0.0.1")
         directory_port = int(os.getenv("DIRECTORY_PORT", 50501))
@@ -7247,24 +7857,18 @@ async def async_main():
         exchange = EnhancedExchange(blockchain, vm, price_oracle, node_directory)
         exchange.order_book = EnhancedOrderBook()
 
-        # Initialize the P2PNode with a unique port
-        free_port = find_free_port()  # Use this function to assign a free port
+        # Initialiser P2PNode
+        free_port = find_free_port()
         p2p_node = P2PNode(ip_address, free_port, blockchain)
 
-        # Start the directory service in a separate thread
+        # Start directory service i en separat tråd
         directory_service_thread = threading.Thread(target=serve_directory_service, args=(node_directory,))
         directory_service_thread.start()
 
         zk_system = SecureHybridZKStark(security_level=2)
 
-        grpc_server_thread = threading.Thread(
-            target=start_grpc_server,
-            args=(secret_key, node_directory, vm, blockchain, zk_system)
-        )
-        grpc_server_thread.start()
-        await asyncio.sleep(5)
-
-        discovery_thread = threading.Thread(target=periodically_discover_nodes, args=(directory_ip, directory_port))
+        # Retning af argumenter for periodically_discover_nodes
+        discovery_thread = threading.Thread(target=periodically_discover_nodes, args=(directory_ip,))
         discovery_thread.start()
 
         asyncio.create_task(periodic_network_stats_update())
@@ -7273,14 +7877,19 @@ async def async_main():
         blockchain.on_new_transaction(manager.broadcast_new_transaction)
 
         def curses_main(stdscr):
-            dashboard_ui = DashboardUI(stdscr, blockchain, exchange, p2p_node)
-            asyncio.run(dashboard_ui.run())
+            try:
+                dashboard_ui = DashboardUI(stdscr, blockchain, exchange, p2p_node)
+                asyncio.run(dashboard_ui.run())  # Sørg for at dette kører i hovedtråden
+            except Exception as e:
+                logger.error(f"Error in curses_main: {str(e)}")
+                raise
 
-        uvicorn_task = asyncio.create_task(run_uvicorn_server())
+        # Start P2PNode websocket server
         websocket_task = asyncio.create_task(p2p_node.start())
 
+        # Vent på, at alle opgaver afsluttes
         await asyncio.gather(
-            uvicorn_task,
+            daphne_task,
             websocket_task,
             asyncio.to_thread(curses.wrapper, curses_main)
         )

@@ -384,7 +384,11 @@ class SecureHybridZKStark:
         )
 
         return snark_details
-
+    def hash(self, *args) -> FieldElement:
+        """Hash the input arguments and return a FieldElement."""
+        concatenated_input = ''.join(map(str, args))
+        hash_value = int(sha256(concatenated_input.encode()).hexdigest(), 16)
+        return self.field.element(hash_value % self.field.modulus)
 def calculate_field_size(security_level: int) -> int:
     if not isinstance(security_level, int):
         raise TypeError("security_level must be an integer")

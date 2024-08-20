@@ -1,8 +1,9 @@
 import curses
 import asyncio
 import logging
+import traceback
 from .ExchangeDashboardUI import ExchangeDashboardUI  # Import the exchange UI
-import random 
+import random
 from .shared_logic import get_quantum_blockchain, get_p2p_node, get_enhanced_exchange
 from .blockchain_interface import BlockchainInterface
 from quantumdagknight import get_mining_stats, get_transaction_history
@@ -17,6 +18,8 @@ import aiohttp
 import psutil
 import socket
 from .TokenManagementUI import *
+import uvicorn
+
 # Configure logging to output to a file
 logging.basicConfig(
     filename='app.log',  # Log file name
@@ -25,7 +28,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logging.getLogger().handlers[0].flush = lambda: None
-logging.basicConfig(level=logging.ERROR)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.CRITICAL)  # Only show critical errors in the terminal
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -34,93 +36,71 @@ logging.getLogger().addHandler(console_handler)
 logger = logging.getLogger(__name__)
 
 blockchain_interface = BlockchainInterface()
-async def run_uvicorn_server():
-    config = uvicorn.Config("quantumdagknight:app", host="0.0.0.0", port=50503, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
 
 class DashboardUI:
     def __init__(self, stdscr, blockchain, exchange, p2p_node):
         self.stdscr = stdscr
         self.blockchain = blockchain
         self.exchange = exchange
+        self.p2p_node = p2p_node
+        
         self.menu_items = [
             ("Send Transaction", self.send_transaction_ui),
             ("View Transaction History", self.view_transaction_history),
             ("Toggle Mining", self.toggle_mining),
             ("Launch Exchange UI", self.launch_exchange_ui),
-            ("Quantum Price Predictor", self.quantum_price_predictor),  # New killer feature
-            ("Dashboard", self.show_dashboard),  # New menu item to return to dashboard
-            ("Token Management", self.launch_token_management_ui),  # New menu item
-
-            ("Create Wallet", self.create_wallet),  # Add this line
-            ("Start Mining", self.start_mining),  # Add this line
-            ("WebSocket IPs Status", self.websocket_ips_status_ui),  # New menu item for WebSocket IPs status
-            ("Restart Servers", self.restart_servers),  # Add this line
-
+            ("Quantum Price Predictor", self.quantum_price_predictor),
+            ("Dashboard", self.show_dashboard),
+            ("Token Management", self.launch_token_management_ui),
+            ("Create Wallet", self.create_wallet),
+            ("Start Mining", self.start_mining),
+            ("WebSocket IPs Status", self.websocket_ips_status_ui),
+            ("Restart Servers", self.restart_servers),
             ("Exit", self.exit_ui)
         ]
         self.current_selection = 0
         self.current_view = "menu"
-        self.wallet = None  # Store the created wallet here
+        self.wallet = None
         self.uvicorn_task = None
         self.websocket_task = None
-        self.p2p_node = p2p_node  # Assuming p2p_node is passed when creating DashboardUI
+        self.config_path = os.path.expanduser("~/.quantumdagknight/config.json")
 
-        curses.curs_set(0)
-        curses.start_color()
-        curses.use_default_colors()
-        for i in range(0, curses.COLORS):
-            curses.init_pair(i + 1, i, -1)
-        self.setup_colors()
-        self.setup_windows()
-    async def uvicorn_status_ui(self):
-        status = "Running" if await self.check_uvicorn_status() else "Stopped"
-        self.show_popup("Uvicorn Status", f"Uvicorn server is currently {status}.")
-
-    async def check_uvicorn_status(self) -> bool:
-        # Check if Uvicorn is running by looking for the process name in the system process list
-        for proc in psutil.process_iter(['pid', 'name']):
-            if "uvicorn" in proc.info['name'].lower():
-                return True
-        return False
-
-    async def websocket_ips_status_ui(self):
-        ips = await self.get_websocket_ips()
-        message = "\n".join([f"WebSocket IP: {ip}" for ip in ips])
-        self.show_popup("WebSocket IPs Status", message)
-
-
-    async def get_websocket_ips(self) -> list:
-        # Logic to retrieve WebSocket IPs
-        websocket_ips = []
-        
-        # Example to find active WebSocket connections on port 8080 (adjust the port as necessary)
-        for conn in psutil.net_connections(kind='inet'):
-            if conn.status == 'ESTABLISHED' and conn.laddr.port == 50504:  # Replace 8080 with your WebSocket port
-                websocket_ips.append(conn.laddr.ip)
-        
-        # If no WebSocket IPs found, return a default message
-        if not websocket_ips:
-            websocket_ips.append("No active WebSocket connections found.")
-        
-        return websocket_ips
-
+        try:
+            curses.curs_set(0)
+            curses.start_color()
+            curses.use_default_colors()
+            for i in range(0, curses.COLORS):
+                curses.init_pair(i + 1, i, -1)
+            self.setup_colors()
+            self.setup_windows()
+        except Exception as e:
+            logger.error(f"Error in DashboardUI initialization: {str(e)}")
+            logger.error(traceback.format_exc())
 
     def setup_colors(self):
         self.TITLE_COLOR = curses.color_pair(14)
         self.NORMAL_COLOR = curses.color_pair(7)
         self.HIGHLIGHT_COLOR = curses.color_pair(2) | curses.A_BOLD
         self.WARNING_COLOR = curses.color_pair(9)
-        self.HIGHLIGHT_COLOR = curses.color_pair(0) | curses.A_REVERSE  # Black background with reverse attribute
+        self.HIGHLIGHT_COLOR = curses.color_pair(0) | curses.A_REVERSE
 
     def setup_windows(self):
-        self.height, self.width = self.stdscr.getmaxyx()
-        self.node_win = curses.newwin(6, self.width // 2, 1, 0)
-        self.wallet_win = curses.newwin(6, self.width // 2, 1, self.width // 2)
-        self.mining_win = curses.newwin(6, self.width // 2, 7, 0)
-        self.menu_win = curses.newwin(6, self.width // 2, 7, self.width // 2)
-        self.transactions_win = curses.newwin(self.height - 13, self.width, 13, 0)
+        try:
+            self.height, self.width = self.stdscr.getmaxyx()
+            logger.info(f"Terminal size: {self.height}x{self.width}")
+            
+            if self.height < 24 or self.width < 80:
+                raise ValueError(f"Terminal size too small: {self.height}x{self.width}. Minimum required: 24x80")
+            
+            self.node_win = curses.newwin(6, self.width // 2, 1, 0)
+            self.wallet_win = curses.newwin(6, self.width // 2, 1, self.width // 2)
+            self.mining_win = curses.newwin(6, self.width // 2, 7, 0)
+            self.menu_win = curses.newwin(6, self.width // 2, 7, self.width // 2)
+            self.transactions_win = curses.newwin(self.height - 13, self.width, 13, 0)
+        except Exception as e:
+            logger.error(f"Error in setup_windows: {str(e)}")
+            logger.error(traceback.format_exc())
+
     def draw_menu(self):
         self.stdscr.clear()
         h, w = self.stdscr.getmaxyx()
@@ -128,6 +108,10 @@ class DashboardUI:
         for idx, (menu_text, _) in enumerate(self.menu_items):
             x = w // 2 - len(menu_text) // 2
             y = h // 2 - len(self.menu_items) // 2 + idx
+            
+            if len(menu_text) > w - 2:
+                menu_text = menu_text[:w - 5] + "..."
+            
             if idx == self.current_selection:
                 self.stdscr.attron(self.HIGHLIGHT_COLOR)
                 self.stdscr.addstr(y, x, menu_text)
@@ -137,31 +121,12 @@ class DashboardUI:
 
         self.stdscr.refresh()
 
-
-
-
     def draw_borders(self):
         for win in [self.node_win, self.wallet_win, self.mining_win, self.transactions_win]:
             win.box()
 
     def draw_title(self, win, title, y, x):
         win.addstr(y, x, f"╔═ {title} ═╗", self.TITLE_COLOR | curses.A_BOLD)
-
-    def draw_menu(self):
-        self.stdscr.clear()
-        h, w = self.stdscr.getmaxyx()
-
-        for idx, (menu_text, _) in enumerate(self.menu_items):
-            x = w // 2 - len(menu_text) // 2
-            y = h // 2 - len(self.menu_items) // 2 + idx
-            if idx == self.current_selection:
-                self.stdscr.attron(curses.color_pair(1))
-                self.stdscr.addstr(y, x, menu_text)
-                self.stdscr.attroff(curses.color_pair(1))
-            else:
-                self.stdscr.addstr(y, x, menu_text)
-
-        self.stdscr.refresh()
 
     async def update_node_info(self):
         node_stats = await blockchain_interface.get_node_stats()
@@ -172,11 +137,18 @@ class DashboardUI:
         self.node_win.addstr(2, 2, f"Connected Peers: {node_stats['connected_peers']}", self.NORMAL_COLOR)
         self.node_win.addstr(3, 2, f"Block Height: {node_stats['block_height']}", self.HIGHLIGHT_COLOR)
         self.node_win.addstr(4, 2, f"Last Block Time: {node_stats['last_block_time']}", self.NORMAL_COLOR)
+        
+        websocket_status = "Active" if self.websocket_task and not self.websocket_task.done() else "Inactive"
+        self.node_win.addstr(5, 2, f"WebSocket Status: {websocket_status}", self.NORMAL_COLOR)
+        
+        uvicorn_status = "Active" if await self.check_uvicorn_status() else "Inactive"
+        self.node_win.addstr(6, 2, f"Uvicorn Status: {uvicorn_status}", self.NORMAL_COLOR)
+        
         self.node_win.refresh()
         await asyncio.sleep(5)
 
     async def update_wallet_info(self):
-        balance = await blockchain_interface.get_wallet_balance("USD")  # Example currency
+        balance = await blockchain_interface.get_wallet_balance("USD")
 
         self.wallet_win.clear()
         self.draw_borders()
@@ -190,7 +162,6 @@ class DashboardUI:
         self.wallet_win.addstr(4, 2, "Press 'H' to view transaction history", self.NORMAL_COLOR)
         self.wallet_win.refresh()
         await asyncio.sleep(5)
-
 
     async def update_mining_info(self):
         mining_stats = await get_mining_stats()
@@ -213,69 +184,46 @@ class DashboardUI:
 
     async def update_transactions(self):
         try:
-            transactions = await self.blockchain.get_transaction_history()
-
             self.transactions_win.clear()
             self.draw_borders()
             self.draw_title(self.transactions_win, "Recent Transactions", 0, 2)
-
-            for i, tx in enumerate(transactions[:self.height - 16], start=1):
-                transaction_line = f"{tx['date']} - {tx['amount']} QDAGK to {tx['recipient'][:20]}..."
-                self.transactions_win.addstr(i, 2, transaction_line, self.NORMAL_COLOR)
-
+            
+            max_width = self.transactions_win.getmaxyx()[1] - 4
+            max_height = self.transactions_win.getmaxyx()[0] - 2  # Subtract 2 for borders
+            
+            test_line = "This is a test transaction."
+            
+            for i in range(1, max_height):
+                if len(test_line) > max_width:
+                    test_line = test_line[:max_width - 3] + "..."
+                
+                try:
+                    self.transactions_win.addstr(i, 2, test_line, self.NORMAL_COLOR)
+                except curses.error:
+                    logger.warning(f"Could not write line {i} in transactions window")
+                    break
+            
             self.transactions_win.refresh()
-
         except Exception as e:
             logger.error(f"Error updating transactions: {str(e)}")
-            self.transactions_win.addstr(1, 2, "Failed to load transactions.", self.WARNING_COLOR)
-            self.transactions_win.refresh()
-
+            logger.error(traceback.format_exc())
+            try:
+                self.transactions_win.addstr(1, 2, "Failed to load transactions.", self.WARNING_COLOR)
+                self.transactions_win.refresh()
+            except curses.error:
+                logger.error("Could not write error message in transactions window")
+        
         await asyncio.sleep(10)
 
-    def show_popup(self, title, message):
-        h, w = 10, 40
-        y, x = (self.height - h) // 2, (self.width - w) // 2
-        popup = curses.newwin(h, w, y, x)
-        popup.box()
-        popup.addstr(0, 2, f" {title} ", self.TITLE_COLOR | curses.A_BOLD)
-        popup.addstr(2, 2, message, self.NORMAL_COLOR)
-        popup.addstr(h-2, 2, "Press any key to close", self.NORMAL_COLOR)
-        popup.refresh()
-        popup.getch()
-            
-            
-    async def start_mining(self):
-        if not hasattr(self, 'wallet') or not self.wallet:
-            self.show_popup("Error", "No wallet created. Please create a wallet first.")
-            return
 
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post("http://localhost:8000/mine_block", json={
-                    "node_id": "your_node_id",
-                    "wallet_address": self.wallet["wallet_address"],  # Use the created wallet address
-                    "node_ip": "127.0.0.1",
-                    "node_port": 8000,
-                    "wallet": self.wallet  # Pass the entire wallet
-                })
-
-                if response.status_code == 200:
-                    result = response.json()
-                    self.show_popup("Mining Started", f"Mining started successfully. {result.get('message', '')}")
-                else:
-                    self.show_popup("Error", f"Failed to start mining. Status code: {response.status_code}")
-
-        except Exception as e:
-            self.show_popup("Error", f"Exception occurred while starting mining: {str(e)}")
     async def handle_input(self):
-        self.stdscr.nodelay(True)
         while True:
             try:
-                key = self.stdscr.getch()
+                key = await asyncio.to_thread(self.stdscr.getch)
                 if key != -1:
                     if self.current_view == "menu":
                         if key == ord('q'):
-                            return
+                            break  # Exit the loop to close the UI
                         elif key == curses.KEY_UP:
                             self.current_selection = (self.current_selection - 1) % len(self.menu_items)
                         elif key == curses.KEY_DOWN:
@@ -292,169 +240,20 @@ class DashboardUI:
                             await self.refresh_dashboard()
                 await asyncio.sleep(0.05)
             except Exception as e:
-                logging.error(f"Error in handle_input: {str(e)}")
+                logger.error(f"Error in handle_input: {str(e)}")
                 await asyncio.sleep(0.1)
-
-
-
-    async def refresh_dashboard(self):
-        while self.current_view == "dashboard":
-            await self.update_node_info()
-            await self.update_wallet_info()
-            await self.update_mining_info()
-            await self.update_transactions()
-            self.stdscr.addstr(self.height - 1, 0, "Press 'b' to go back to menu, 'r' to refresh", self.NORMAL_COLOR)
-            self.stdscr.refresh()
-            await asyncio.sleep(1)
-    async def create_wallet(self):
-        try:
-            # Define the pincode for the wallet registration (ensure this is unique or handle it accordingly)
-            pincode = "123456"  # Replace with dynamic input if needed
-
-            # Prepare the user data for registration
-            user_data = {
-                "pincode": pincode
-            }
-
-            # Send a POST request to the /register endpoint
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"http://localhost:50503/register", json=user_data) as response:
-                    if response.status == 200:
-                        response_data = await response.json()
-
-                        # Extract the wallet details from the response
-                        wallet = response_data.get("wallet", {})
-                        wallet_address = wallet.get("address", "N/A")
-                        
-                        # Store the wallet details securely
-                        self.wallet = wallet
-
-                        # Display the wallet address to the user
-                        self.show_popup("Wallet Created", f"Address: {wallet_address}")
-                    else:
-                        # Handle the error if the registration fails
-                        error_message = await response.text()
-                        self.show_popup("Error", f"Failed to create wallet: {error_message}")
-
-        except Exception as e:
-            self.show_popup("Error", f"Exception occurred: {str(e)}")
-
-
-    async def create_wallet_ui(self):
-        try:
-            # Simulate user registration and wallet creation
-            user_pincode = "user_pincode_example"  # This would normally come from user input
-            user = {"pincode": user_pincode}
-            
-            response = await self.register_user(user)
-            self.wallet = response["wallet"]
-            self.show_popup("Wallet Created", f"Wallet Address: {self.wallet['address']}\nAlias: {response['alias']}")
-        except Exception as e:
-            self.show_popup("Error", f"Failed to create wallet: {str(e)}")
-
-    async def register_user(self, user):
-        # Simulate the API call to register a new user and create a wallet
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{API_URL}/register", json=user) as response:
-                return await response.json()
-
-    async def start_mining_ui(self):
-        if not self.wallet:
-            self.show_popup("Error", "Please create a wallet first!")
-            return
-
-        try:
-            # Start the mining process with the created wallet
-            await self.mine_block(self.wallet)
-            self.show_popup("Mining Started", f"Mining started with wallet {self.wallet['address']}")
-        except Exception as e:
-            self.show_popup("Error", f"Failed to start mining: {str(e)}")
-
-    async def mine_block(self, wallet):
-        # Simulate the API call to start mining
-        async with aiohttp.ClientSession() as session:
-            data = {
-                "node_id": "node_id_example",
-                "wallet_address": wallet["address"],
-                "node_ip": "127.0.0.1",
-                "node_port": 50502,
-                "wallet": wallet
-            }
-            async with session.post(f"{API_URL}/mine_block", json=data) as response:
-                return await response.json()
-
-
-    async def launch_exchange_ui(self):
-        # Initialize and run the EnhancedExchange UI
-        exchange_ui = ExchangeDashboardUI(self.stdscr, self.blockchain, self.exchange)
-        await exchange_ui.run()
-    async def show_dashboard(self):
-        self.current_view = "dashboard"
-        while self.current_view == "dashboard":
-            await self.refresh_dashboard()
-            self.stdscr.addstr(self.height - 1, 0, "Press 'b' to go back to menu, 'r' to refresh", self.NORMAL_COLOR)
-            self.stdscr.refresh()
-            await asyncio.sleep(1)
-
-
-    async def quantum_price_predictor(self):
-        h, w = 20, 60
-        y, x = (self.height - h) // 2, (self.width - w) // 2
-        popup = curses.newwin(h, w, y, x)
-        popup.box()
-        popup.addstr(0, 2, " Quantum Price Predictor ", self.TITLE_COLOR | curses.A_BOLD)
-
-        assets = ["BTC", "ETH", "QDAGK", "DOT", "ADA"]
-        predictions = {}
-
-        for i, asset in enumerate(assets):
-            # Simulate quantum computation for price prediction
-            await asyncio.sleep(0.5)  # Simulate quantum processing time
-            prediction = random.uniform(0.8, 1.2)  # Random price multiplier
-            current_price = await self.exchange.get_price(asset)
-            predicted_price = current_price * prediction
-            predictions[asset] = predicted_price
-
-            popup.addstr(i+2, 2, f"{asset}: Current ${current_price:.2f} → Predicted ${predicted_price:.2f}", self.NORMAL_COLOR)
-            
-            # Add a quantum-inspired confidence meter
-            confidence = int(prediction * 10) % 10
-            popup.addstr(i+2, 40, "Confidence: [" + "█" * confidence + " " * (10-confidence) + "]", self.HIGHLIGHT_COLOR)
-
-        popup.addstr(h-3, 2, "Based on quantum superposition analysis", self.WARNING_COLOR)
-        popup.addstr(h-2, 2, "Press any key to close", self.NORMAL_COLOR)
-        popup.refresh()
-        popup.getch()
-
-    async def launch_exchange_ui(self):
-        exchange_ui = ExchangeDashboardUI(self.stdscr, self.blockchain, self.exchange)
-        await exchange_ui.run()
-        self.current_view = "menu"  # Set the view back to the main menu
-        self.draw_menu()  # Redraw the main menu
-
-    async def async_getch(self):
-        return await asyncio.get_event_loop().run_in_executor(None, self.stdscr.getch)
-    async def launch_token_management_ui(self):
-        from TokenManagementUI import TokenManagementUI
-
-        # Import the TokenManagementUI class
-        from TokenManagementUI import TokenManagementUI
-        
-        # Initialize and run the TokenManagementUI
-        token_management_ui = TokenManagementUI(self.stdscr, self.blockchain)
-        await token_management_ui.run()
 
     async def send_transaction_ui(self):
         h, w = 14, 50
         y, x = (self.height - h) // 2, (self.width - w) // 2
         popup = curses.newwin(h, w, y, x)
-        popup.keypad(True)  # Enable keypad input for the popup window
+        popup.keypad(True)
         popup.box()
         popup.addstr(0, 2, " Send Transaction ", self.TITLE_COLOR | curses.A_BOLD)
 
         recipient = ""
         amount_str = ""
-        current_field = 0  # 0 for recipient, 1 for amount
+        current_field = 0
         buttons = ["OK", "Cancel"]
         current_button = 0
 
@@ -483,7 +282,7 @@ class DashboardUI:
 
             key = popup.getch()
 
-            if key == ord('\n'):  # Enter key
+            if key == ord('\n'):
                 if current_field < 2:
                     current_field += 1
                 elif buttons[current_button] == "OK":
@@ -501,14 +300,14 @@ class DashboardUI:
                             popup.addstr(h - 5, 2, "Error: Invalid amount", self.WARNING_COLOR)
                             popup.refresh()
                             popup.getch()
-                else:  # Cancel button
+                else:
                     break
             elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:
                 if current_field == 0 and recipient:
                     recipient = recipient[:-1]
                 elif current_field == 1 and amount_str:
                     amount_str = amount_str[:-1]
-                elif current_field == 2:  # In button selection, backspace closes the popup
+                elif current_field == 2:
                     break
             elif key == curses.KEY_LEFT and current_field == 2:
                 current_button = (current_button - 1) % len(buttons)
@@ -518,7 +317,7 @@ class DashboardUI:
                 current_field = max(0, current_field - 1)
             elif key == curses.KEY_DOWN:
                 current_field = min(2, current_field + 1)
-            elif 32 <= key <= 126:  # Printable characters
+            elif 32 <= key <= 126:
                 if current_field == 0:
                     recipient += chr(key)
                 elif current_field == 1:
@@ -526,11 +325,6 @@ class DashboardUI:
 
         popup.clear()
         popup.refresh()
-
-
-
-
-
 
     async def view_transaction_history(self):
         history = await self.blockchain.get_transaction_history()
@@ -543,9 +337,116 @@ class DashboardUI:
         popup.refresh()
         popup.getch()
 
+    async def quantum_price_predictor(self):
+        h, w = 20, 60
+        y, x = (self.height - h) // 2, (self.width - w) // 2
+        popup = curses.newwin(h, w, y, x)
+        popup.box()
+        popup.addstr(0, 2, " Quantum Price Predictor ", self.TITLE_COLOR | curses.A_BOLD)
+
+        assets = ["BTC", "ETH", "QDAGK", "DOT", "ADA"]
+        predictions = {}
+
+        for i, asset in enumerate(assets):
+            await asyncio.sleep(0.5)
+            prediction = random.uniform(0.8, 1.2)
+            current_price = await self.exchange.get_price(asset)
+            predicted_price = current_price * prediction
+            predictions[asset] = predicted_price
+
+            popup.addstr(i+2, 2, f"{asset}: Current ${current_price:.2f} → Predicted ${predicted_price:.2f}", self.NORMAL_COLOR)
+            
+            confidence = int(prediction * 10) % 10
+            popup.addstr(i+2, 40, "Confidence: [" + "█" * confidence + " " * (10-confidence) + "]", self.HIGHLIGHT_COLOR)
+
+        popup.addstr(h-3, 2, "Based on quantum superposition analysis", self.WARNING_COLOR)
+        popup.addstr(h-2, 2, "Press any key to close", self.NORMAL_COLOR)
+        popup.refresh()
+        popup.getch()
+
+    async def show_dashboard(self):
+        self.current_view = "dashboard"
+        while self.current_view == "dashboard":
+            await self.refresh_dashboard()
+            self.stdscr.addstr(self.height - 1, 0, "Press 'b' to go back to menu, 'r' to refresh", self.NORMAL_COLOR)
+            self.stdscr.refresh()
+
+            self.stdscr.nodelay(True)
+            key = self.stdscr.getch()
+            if key == ord('b'):
+                self.current_view = "menu"
+                self.draw_menu()
+                break
+            elif key == ord('r'):
+                continue
+            
+            await asyncio.sleep(0.1)
+
+    async def start_mining(self):
+        if not hasattr(self, 'wallet') or not self.wallet:
+            self.show_popup("Error", "No wallet created. Please create a wallet first.")
+            return
+
+        try:
+            async with aiohttp.ClientSession() as client:
+                response = await client.post("http://localhost:8000/mine_block", json={
+                    "node_id": "your_node_id",
+                    "wallet_address": self.wallet["wallet_address"],
+                    "node_ip": "127.0.0.1",
+                    "node_port": 8000,
+                    "wallet": self.wallet
+                })
+
+                if response.status == 200:
+                    result = response.json()
+                    self.show_popup("Mining Started", f"Mining started successfully. {result.get('message', '')}")
+                else:
+                    self.show_popup("Error", f"Failed to start mining. Status code: {response.status_code}")
+
+        except Exception as e:
+            self.show_popup("Error", f"Exception occurred while starting mining: {str(e)}")
+
+    async def create_wallet(self):
+        try:
+            # Prompt user for pincode
+            pincode = await self.get_input(self.stdscr, 2, 2, "Enter Pincode: ")
+
+            # Prepare the user data for registration
+            user_data = {"pincode": pincode}
+
+            # Send a POST request to the /register endpoint
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"http://localhost:50501/register", json=user_data) as response:
+                    if response.status == 200:
+                        response_data = await response.json()
+
+                        # Extract the wallet details from the response
+                        wallet = response_data.get("wallet", {})
+                        wallet_address = wallet.get("address", "N/A")
+                        
+                        # Store the wallet details securely
+                        self.wallet = wallet
+
+                        # Display the wallet address to the user
+                        self.show_popup("Wallet Created", f"Address: {wallet_address}")
+                    else:
+                        # Handle the error if the registration fails
+                        error_message = await response.text()
+                        self.show_popup("Error", f"Failed to create wallet: {error_message}")
+
+        except Exception as e:
+            self.show_popup("Error", f"Exception occurred: {str(e)}")
+
+    def exit_ui(self):
+        curses.endwin()
+        raise SystemExit
+
+    async def async_getch(self):
+        return await asyncio.get_event_loop().run_in_executor(None, self.stdscr.getch)
+
     async def toggle_mining(self):
         try:
-            mining_stats = await get_mining_stats()  # Await the coroutine to get the actual result
+            mining_stats = await get_mining_stats()
             if mining_stats['status'] == 'INACTIVE':
                 await blockchain_interface.start_mining()
                 self.show_popup("Mining", "Mining started")
@@ -553,12 +454,45 @@ class DashboardUI:
                 await blockchain_interface.stop_mining()
                 self.show_popup("Mining", "Mining stopped")
         except Exception as e:
-            logging.error(f"Error toggling mining: {str(e)}")
+            logger.error(f"Error toggling mining: {str(e)}")
             self.show_popup("Error", str(e))
+
+    async def launch_exchange_ui(self):
+        exchange_ui = ExchangeDashboardUI(self.stdscr, self.blockchain, self.exchange)
+        await exchange_ui.run()
+        self.current_view = "menu"
+        self.draw_menu()
+
+    async def launch_token_management_ui(self):
+        token_management_ui = TokenManagementUI(self.stdscr, self.blockchain)
+        await token_management_ui.run()
+
+    async def websocket_ips_status_ui(self):
+        ips = await self.get_websocket_ips()
+        message = "\n".join([f"WebSocket IP: {ip}" for ip in ips])
+        self.show_popup("WebSocket IPs Status", message)
+
+    async def check_uvicorn_status(self) -> bool:
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                if "uvicorn" in proc.info['name'].lower():
+                    return True
+            return False
+        except Exception as e:
+            logger.error(f"Error checking Uvicorn status: {str(e)}")
+            return False
+
+    async def get_websocket_ips(self) -> list:
+        websocket_ips = []
+        for conn in psutil.net_connections(kind='inet'):
+            if conn.status == 'ESTABLISHED' and conn.laddr.port == 50504:
+                websocket_ips.append(conn.laddr.ip)
+        if not websocket_ips:
+            websocket_ips.append("No active WebSocket connections found.")
+        return websocket_ips
 
     async def restart_servers(self):
         try:
-            # Cancel existing server tasks if they are running
             if self.websocket_task:
                 self.websocket_task.cancel()
                 await self.websocket_task
@@ -567,7 +501,6 @@ class DashboardUI:
                 self.uvicorn_task.cancel()
                 await self.uvicorn_task
 
-            # Restart the servers
             self.uvicorn_task = asyncio.create_task(run_uvicorn_server())
             self.websocket_task = asyncio.create_task(self.p2p_node.start())
 
@@ -575,10 +508,20 @@ class DashboardUI:
         except Exception as e:
             self.show_popup("Error", f"Failed to restart servers: {str(e)}")
 
+    def show_popup(self, title, message):
+        h, w = 10, 40
+        y, x = (self.height - h) // 2, (self.width - w) // 2
+        popup = curses.newwin(h, w, y, x)
+        popup.box()
 
-    def exit_ui(self):
-        curses.endwin()
-        raise SystemExit
+        if len(message) > w - 4:
+            message = message[:w - 4]
+
+        popup.addstr(0, 2, f" {title} ", self.TITLE_COLOR | curses.A_BOLD)
+        popup.addstr(2, 2, message, self.NORMAL_COLOR)
+        popup.addstr(h-2, 2, "Press any key to close", self.NORMAL_COLOR)
+        popup.refresh()
+        popup.getch()
 
     async def refresh_dashboard(self):
         while self.current_view == "dashboard":
@@ -589,33 +532,58 @@ class DashboardUI:
             self.stdscr.addstr(self.height - 1, 0, "Press 'b' to go back to menu, 'r' to refresh", self.NORMAL_COLOR)
             self.stdscr.refresh()
             await asyncio.sleep(1)
+    def is_first_run(self):
+        return not os.path.exists(self.config_path)
 
     async def run(self):
-        # Start the Uvicorn server and WebSocket server initially
-        self.uvicorn_task = asyncio.create_task(run_uvicorn_server())
-        self.websocket_task = asyncio.create_task(self.p2p_node.start())
+        config = None
+        if self.is_first_run():
+            config = await self.first_time_setup()
+            self.blockchain, self.exchange, self.p2p_node = self.initialize_components(config)
 
         try:
+            logger.info("Starting DashboardUI run method")
             self.draw_menu()
-            await asyncio.gather(
+            tasks = [
                 self.update_node_info(),
                 self.update_wallet_info(),
                 self.update_mining_info(),
                 self.update_transactions(),
                 self.handle_input()
-            )
+            ]
+            
+            for task in asyncio.as_completed(tasks):
+                try:
+                    await task
+                except Exception as e:
+                    logger.error(f"Error in task {task.__name__}: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    
+        except curses.error as e:
+            logger.error(f"Curses error in run method: {str(e)}")
+            logger.error(traceback.format_exc())
+            self.show_popup("Curses Error", f"A display error occurred: {str(e)}")
         except Exception as e:
-            logging.error(f"Error in run method: {str(e)}")
+            logger.error(f"Error in run method: {str(e)}")
+            logger.error(traceback.format_exc())
+            self.show_popup("Error", f"An error occurred: {str(e)}")
         finally:
             curses.endwin()
-
+    def check_terminal_size(stdscr):
+        height, width = stdscr.getmaxyx()
+        if height < 24 or width < 80:
+            raise ValueError(f"Terminal too small. Current size: {height}x{width}. Minimum required: 24x80")
 
 
 def main(stdscr):
-    blockchain = None  # Initialize blockchain as needed
-    exchange = None  # Initialize exchange as needed
-    ui = DashboardUI(stdscr, blockchain, exchange)
-    ui.run()
+    check_terminal_size(stdscr)
+
+    blockchain = get_quantum_blockchain()  # Get the class, not an instance
+    exchange = get_enhanced_exchange()  # Get the class, not an instance
+    p2p_node = get_p2p_node()  # Get the class, not an instance
+
+    ui = DashboardUI(stdscr, blockchain, exchange, p2p_node)
+    asyncio.run(ui.run())
 
 if __name__ == "__main__":
     curses.wrapper(main)

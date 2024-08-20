@@ -1,5 +1,5 @@
 import sympy as sp
-
+import random
 class FieldElement:
     def __init__(self, value, field):
         if isinstance(value, FieldElement):
@@ -158,3 +158,7 @@ class FiniteField:
 
     def __repr__(self):
         return f"FiniteField(modulus={self.modulus})"
+    def random_element(self):
+        """Generate a random element in the field."""
+        random_value = random.randint(1, self.modulus - 1)  # Generate a random value within the field
+        return self.element(random_value)
