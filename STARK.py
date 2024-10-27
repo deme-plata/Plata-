@@ -7,6 +7,8 @@ from finite_field_factory import FiniteFieldFactory
 from merkletree_privacy import MerkleTree
 from fricommitments_privacy import FRI
 import traceback
+import logging
+import traceback
 
 class PolynomialCommitment:
     def __init__(self, coefficients: List[int], field: FiniteField):
@@ -24,16 +26,14 @@ class PolynomialCommitment:
             result = self.field.add(result, self.field.mul(coeff, self.field.exp(x_element, i)))
         return result.value
         
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Adjust as needed
 
 class STARK:
     def __init__(self, security_level, field=None):
         self.security_level = security_level
         self.field = field if field else FiniteFieldFactory.get_instance(security_level=security_level)
         self.fri = FRI(self.field)
-
-
-
-
 
     def prove(self, secret: int, public_input: int) -> Tuple[List[int], List[int], List[Tuple[int, List[int]]]]:
         secret_element = self.field.element(secret)
@@ -54,8 +54,9 @@ class STARK:
         
         polynomial = PolynomialCommitment(coefficients, self.field)
         
-        print(f"[STARK PROVE] Secret: {secret}, Public Input: {public_input}")
-        print(f"[STARK PROVE] Coefficients: {[c.value for c in coefficients]}")
+        # Replace print with logger
+        logger.debug(f"[STARK PROVE] Secret: {secret}, Public Input: {public_input}")
+        logger.debug(f"[STARK PROVE] Coefficients: {[c.value for c in coefficients]}")
         
         commitment = self.fri.commit(polynomial)
         num_queries = 5
@@ -69,8 +70,6 @@ class STARK:
         
         return (commitment, [response.value], fri_proofs)
 
-
-            
     def verify_proof(self, public_input, proof):
         try:
             public_input_element = self.field.element(public_input)
@@ -92,22 +91,21 @@ class STARK:
             # Verify the response
             computed_secret = self.field.sub(self.field.element(response), challenge_element)
             
-            print(f"[STARK VERIFY] Challenge: {challenge}")
-            print(f"[STARK VERIFY] Response: {response}")
-            print(f"[STARK VERIFY] Computed secret: {computed_secret.value}")
-            print(f"[STARK VERIFY] Public input: {public_input}")
+            # Replace print with logger
+            logger.debug(f"[STARK VERIFY] Challenge: {challenge}")
+            logger.debug(f"[STARK VERIFY] Response: {response}")
+            logger.debug(f"[STARK VERIFY] Computed secret: {computed_secret.value}")
+            logger.debug(f"[STARK VERIFY] Public input: {public_input}")
             
             return all_fri_proofs_valid
         except Exception as e:
-            print(f"[STARK VERIFY] Error during verification: {e}")
-            traceback.print_exc()
+            logger.error(f"[STARK VERIFY] Error during verification: {e}")
+            logger.debug(traceback.format_exc())
             raise
 
     def hash(self, *args):
         hash_value = int(sha256(''.join(map(str, args)).encode()).hexdigest(), 16)
         return self.field.element(hash_value % self.field.modulus)
-
-
 
 
 

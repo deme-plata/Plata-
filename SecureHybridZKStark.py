@@ -7,6 +7,12 @@ from FiniteField import FiniteField, FieldElement
 from finite_field_factory import FiniteFieldFactory
 
 
+import logging
+
+# Set up a logger for this module
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # You can change this level to control logging output
+
 class PolynomialCommitment:
     def __init__(self, coefficients: List[int], field: FiniteField):
         self.coefficients = []
@@ -21,11 +27,10 @@ class PolynomialCommitment:
         x_element = self.field.element(x)
         for i, coeff in enumerate(self.coefficients):
             result = self.field.add(result, self.field.mul(coeff, self.field.exp(x_element, i)))
-        print(f"[POLY EVAL] x: {x}, result: {result.value}")
+        
+        # Use logger instead of print
+        logger.debug(f"[POLY EVAL] x: {x}, result: {result.value}")
         return result.value
-
-
-
 class AdvancedCircularSTARK:
     def __init__(self, finite_field):
         self.field = finite_field  # finite_field should be a FiniteField instance
@@ -33,18 +38,21 @@ class AdvancedCircularSTARK:
 
     def hash(self, *args: int) -> int:
         hash_value = int(sha256(''.join(map(str, args)).encode()).hexdigest(), 16) % self.field.modulus
-        print(f"Hashing args {args}: Hash={hash_value}")
+        # Replace print with logger
+        logger.debug(f"Hashing args {args}: Hash={hash_value}")
         return hash_value
         
     def generate_proof(self, secret: int, public_input: int) -> Tuple[List[int], List[int], List[Tuple[int, List[int]]]]:
         # Generate polynomial coefficients including the secret and random coefficients
         coefficients = [self.field.element(secret)] + [self.field.element(random.randint(0, self.field.modulus - 1)) for _ in range(3)]
         polynomial = PolynomialCommitment(np.array(coefficients), self.field)
-        print(f"Generated polynomial coefficients: {coefficients}")
+        # Replace print with logger
+        logger.debug(f"Generated polynomial coefficients: {coefficients}")
 
         # Commit the polynomial using FRI
         commitment = self.fri.commit(polynomial)
-        print(f"Commitment: {commitment}")
+        # Replace print with logger
+        logger.debug(f"Commitment: {commitment}")
 
         # Determine the number of queries and generate the domain
         num_queries = 10
@@ -61,8 +69,10 @@ class AdvancedCircularSTARK:
         challenge = self.hash(commitment_element.value, public_input, *[cp.value for cp in challenge_points])
         response = self.field.add(self.field.element(secret), self.field.element(challenge)).value
 
-        print(f"Generated proof: Commitment={commitment}, Response={response}, FRI Proofs={fri_proofs}")
+        # Replace print with logger
+        logger.debug(f"Generated proof: Commitment={commitment}, Response={response}, FRI Proofs={fri_proofs}")
         return (commitment, [response], fri_proofs)
+
     def verify_proof(self, public_input: int, proof: Tuple[List[int], List[int], List[Tuple[int, List[int]]]]) -> bool:
         commitment, [response], fri_proofs = proof
         
@@ -82,7 +92,7 @@ class AdvancedCircularSTARK:
         computed_public_input = self.field.sub(self.field.element(response), self.field.element(challenge))
 
         return all_fri_proofs_valid and computed_public_input.value == public_input
-        import traceback
+
 import numpy as np
 
 import traceback
@@ -98,21 +108,25 @@ class ZKSnark:
         try:
             self.field = FiniteField(field_size, security_level)
             self.setup_params = self.setup()
-            print("[INIT] ZKSnark initialized successfully")
+            # Replace print with logger
+            logger.info("[INIT] ZKSnark initialized successfully")
         except Exception as e:
-            print(f"[INIT ERROR] Failed to initialize ZKSnark: {str(e)}")
-            traceback.print_exc()
+            # Replace print with logger
+            logger.error(f"[INIT ERROR] Failed to initialize ZKSnark: {str(e)}")
+            logger.debug(traceback.format_exc())
 
     def setup(self):
         try:
             self.toxic_waste = self.field.element(12345)
             g1 = self.field.element(2)
             g2 = self.field.element(5)
-            print("[SETUP] Setup completed with g1 and g2 initialized")
+            # Replace print with logger
+            logger.info("[SETUP] Setup completed with g1 and g2 initialized")
             return g1, g2
         except Exception as e:
-            print(f"[SETUP ERROR] Failed during setup: {str(e)}")
-            traceback.print_exc()
+            # Replace print with logger
+            logger.error(f"[SETUP ERROR] Failed during setup: {str(e)}")
+            logger.debug(traceback.format_exc())
 
     def prove(self, secret: int, public_input: int) -> Tuple[FieldElement, FieldElement, FieldElement]:
         try:
@@ -122,7 +136,7 @@ class ZKSnark:
             public_input_element = self.field.element(public_input)
 
             # Intermediate step debug outputs
-            print(f"[PROVE DEBUG] r: {r}, secret_element: {secret_element}, public_input_element: {public_input_element}")
+            logger.debug(f"[PROVE DEBUG] r: {r}, secret_element: {secret_element}, public_input_element: {public_input_element}")
 
             A = self.mod_exp(g1, secret_element)
             B = self.mod_exp(g2, r)
@@ -132,13 +146,14 @@ class ZKSnark:
             )
 
             # Debugging information
-            print(f"[SNARK PROVE] secret: {secret}, public_input: {public_input}")
-            print(f"[SNARK PROVE] A: {A}, B: {B}, C: {C}, r: {r}, g1: {g1}, g2: {g2}")
+            logger.debug(f"[SNARK PROVE] secret: {secret}, public_input: {public_input}")
+            logger.debug(f"[SNARK PROVE] A: {A}, B: {B}, C: {C}, r: {r}, g1: {g1}, g2: {g2}")
 
             return A, B, C
         except Exception as e:
-            print(f"[PROVE ERROR] Failed during proof generation: {str(e)}")
-            traceback.print_exc()
+            # Replace print with logger
+            logger.error(f"[PROVE ERROR] Failed during proof generation: {str(e)}")
+            logger.debug(traceback.format_exc())
 
     def verify(self, public_input: int, proof: Tuple[FieldElement, FieldElement, FieldElement]) -> bool:
         try:
@@ -159,27 +174,26 @@ class ZKSnark:
             sympy_exp_g2_C = pow(int(g2), int(C), modulus)
             sympy_B_exp_g2_toxic = (int(B) * pow(int(g2), int(self.toxic_waste), modulus)) % modulus
 
-            print(f"[SYMPY DEBUG] sympy_exp_g1_C: {sympy_exp_g1_C}, sympy_A_exp_g1_pub: {sympy_A_exp_g1_pub}")
-            print(f"[SYMPY DEBUG] sympy_exp_g2_C: {sympy_exp_g2_C}, sympy_B_exp_g2_toxic: {sympy_B_exp_g2_toxic}")
+            logger.debug(f"[SYMPY DEBUG] sympy_exp_g1_C: {sympy_exp_g1_C}, sympy_A_exp_g1_pub: {sympy_A_exp_g1_pub}")
+            logger.debug(f"[SYMPY DEBUG] sympy_exp_g2_C: {sympy_exp_g2_C}, sympy_B_exp_g2_toxic: {sympy_B_exp_g2_toxic}")
 
-            print(f"[FIELD DEBUG] exp_g1_C: {exp_g1_C}, A_exp_g1_pub: {A_exp_g1_pub}")
-            print(f"[FIELD DEBUG] exp_g2_C: {exp_g2_C}, B_exp_g2_toxic: {B_exp_g2_toxic}")
+            logger.debug(f"[FIELD DEBUG] exp_g1_C: {exp_g1_C}, A_exp_g1_pub: {A_exp_g1_pub}")
+            logger.debug(f"[FIELD DEBUG] exp_g2_C: {exp_g2_C}, B_exp_g2_toxic: {B_exp_g2_toxic}")
 
             # Compare the results
             check1 = int(exp_g1_C) == sympy_exp_g1_C and int(A_exp_g1_pub) == sympy_A_exp_g1_pub
             check2 = int(exp_g2_C) == sympy_exp_g2_C and int(B_exp_g2_toxic) == sympy_B_exp_g2_toxic
 
             if not check1:
-                print(f"[VERIFY FAILURE] Check 1 failed: exp_g1_C ({exp_g1_C}) != sympy_exp_g1_C ({sympy_exp_g1_C}) or A_exp_g1_pub ({A_exp_g1_pub}) != sympy_A_exp_g1_pub ({sympy_A_exp_g1_pub})")
+                logger.warning(f"[VERIFY FAILURE] Check 1 failed: exp_g1_C ({exp_g1_C}) != sympy_exp_g1_C ({sympy_exp_g1_C}) or A_exp_g1_pub ({A_exp_g1_pub}) != sympy_A_exp_g1_pub ({sympy_A_exp_g1_pub})")
             if not check2:
-                print(f"[VERIFY FAILURE] Check 2 failed: exp_g2_C ({exp_g2_C}) != sympy_exp_g2_C ({sympy_exp_g2_C}) or B_exp_g2_toxic ({B_exp_g2_toxic}) != sympy_B_exp_g2_toxic ({sympy_B_exp_g2_toxic})")
+                logger.warning(f"[VERIFY FAILURE] Check 2 failed: exp_g2_C ({exp_g2_C}) != sympy_exp_g2_C ({sympy_exp_g2_C}) or B_exp_g2_toxic ({B_exp_g2_toxic}) != sympy_B_exp_g2_toxic ({sympy_B_exp_g2_toxic})")
 
             return check1 and check2
         except Exception as e:
-            print(f"[VERIFY ERROR] Failed during verification: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"[VERIFY ERROR] Failed during verification: {str(e)}")
+            logger.debug(traceback.format_exc())
             return False
-
 
     def mod_exp(self, base, exponent):
         try:
@@ -187,8 +201,8 @@ class ZKSnark:
             assert result is not None, "[MOD EXP] Result is None"
             return result
         except Exception as e:
-            print(f"[MOD EXP ERROR] Failed during modular exponentiation: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"[MOD EXP ERROR] Failed during modular exponentiation: {str(e)}")
+            logger.debug(traceback.format_exc())
 
     def mod_mul(self, a, b):
         try:
@@ -196,8 +210,8 @@ class ZKSnark:
             assert result is not None, "[MOD MUL] Result is None"
             return result
         except Exception as e:
-            print(f"[MOD MUL ERROR] Failed during modular multiplication: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"[MOD MUL ERROR] Failed during modular multiplication: {str(e)}")
+            logger.debug(traceback.format_exc())
 
     def mod_add(self, a, b):
         try:
@@ -205,8 +219,8 @@ class ZKSnark:
             assert result is not None, "[MOD ADD] Result is None"
             return result
         except Exception as e:
-            print(f"[MOD ADD ERROR] Failed during modular addition: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"[MOD ADD ERROR] Failed during modular addition: {str(e)}")
+            logger.debug(traceback.format_exc())
 
         
 class HybridZKStark:
@@ -274,9 +288,10 @@ class PolynomialCommitment:
         for coeff in reversed(self.coefficients):
             result = self.field.mul(result, x)
             result = self.field.add(result, coeff)
-        print(f"Evaluating polynomial at x={x}: Result={result}")
-        return result
         
+        # Replace print with logger
+        logger.debug(f"Evaluating polynomial at x={x}: Result={result}")
+        return result
 class SecureHybridZKStark:
     def __init__(self, security_level, field=None):
         if not isinstance(security_level, int):
@@ -291,67 +306,55 @@ class SecureHybridZKStark:
         self.snark = ZKSnark(self.field.modulus, security_level)
 
     def prove(self, secret: int, public_input: int) -> Tuple[Tuple, Tuple]:
-        print(f"[PROVE] Starting proof generation with secret: {secret}, public_input: {public_input}")
+        # Replace print with logger
+        logger.info(f"[PROVE] Starting proof generation with secret: {secret}, public_input: {public_input}")
         secret_elem = self.field.element(secret)
         public_input_elem = self.field.element(public_input)
         
-        print("[PROVE] Generating STARK proof...")
+        logger.info("[PROVE] Generating STARK proof...")
         stark_proof = self.stark.prove(secret_elem.value, public_input_elem.value)
-        print(f"[PROVE] STARK proof generated: {stark_proof}")
+        logger.debug(f"[PROVE] STARK proof generated: {stark_proof}")
         
-        print("[PROVE] Generating SNARK proof...")
+        logger.info("[PROVE] Generating SNARK proof...")
         snark_proof = self.snark.prove(secret_elem.value, public_input_elem.value)
-        print(f"[PROVE] SNARK proof generated: {snark_proof}")
+        logger.debug(f"[PROVE] SNARK proof generated: {snark_proof}")
         
         return stark_proof, snark_proof
+
     def verify(self, public_input: int, proof: Tuple[Tuple, Tuple]) -> bool:
         stark_proof, snark_proof = proof
         stark_valid = self.stark.verify_proof(public_input, stark_proof)
         snark_valid = self.snark.verify(public_input, snark_proof)
-        print(f"[VERIFY] STARK verification result: {stark_valid}")
-        print(f"[VERIFY] SNARK verification result: {snark_valid}")
+        # Replace print with logger
+        logger.info(f"[VERIFY] STARK verification result: {stark_valid}")
+        logger.info(f"[VERIFY] SNARK verification result: {snark_valid}")
         return stark_valid and snark_valid
-
-
-
-
-
-
-
 
     def log_failure_details(self, stark_valid: bool, snark_valid: bool, stark_proof: Tuple, snark_proof: Tuple):
         """
         Logs detailed error information when verification fails.
         """
-        print(f"[ERROR] Verification failed: STARK valid: {stark_valid}, SNARK valid: {snark_valid}")
-        print(f"[ERROR] STARK Proof: {stark_proof}")
-        print(f"[ERROR] SNARK Proof: {snark_proof}")
+        logger.error(f"[ERROR] Verification failed: STARK valid: {stark_valid}, SNARK valid: {snark_valid}")
+        logger.debug(f"[ERROR] STARK Proof: {stark_proof}")
+        logger.debug(f"[ERROR] SNARK Proof: {snark_proof}")
 
         # Additional detailed logging for internal state, useful for debugging.
-        print(f"[DEBUG] STARK proof details: {self.extract_stark_details(stark_proof)}")
-        print(f"[DEBUG] SNARK proof details: {self.extract_snark_details(snark_proof)}")
+        logger.debug(f"[DEBUG] STARK proof details: {self.extract_stark_details(stark_proof)}")
+        logger.debug(f"[DEBUG] SNARK proof details: {self.extract_snark_details(snark_proof)}")
 
     def extract_stark_details(self, stark_proof: Tuple) -> str:
         """
         Extracts and returns detailed information about the STARK proof for logging purposes.
-        The implementation assumes that the STARK proof consists of various components such as
-        polynomial evaluations, FRI commitments, Merkle tree proofs, etc.
         """
-        # Unpack the STARK proof assuming it consists of specific components
         polynomial_evaluations, fri_commitment, merkle_proofs = stark_proof
 
-        # Format the polynomial evaluations for logging
         polynomial_details = f"Polynomial Evaluations: {polynomial_evaluations}"
-
-        # Format the FRI commitment (root of the Merkle tree)
         fri_details = f"FRI Commitment (Merkle Root): {fri_commitment}"
 
-        # Format the Merkle proofs, which might be a list of proofs for different positions
         merkle_details = "Merkle Proofs:\n"
         for i, proof in enumerate(merkle_proofs):
             merkle_details += f"  Proof {i+1}: {proof}\n"
 
-        # Combine all details into a single formatted string
         stark_details = (
             f"STARK Proof Details:\n"
             f"{polynomial_details}\n"
@@ -364,18 +367,13 @@ class SecureHybridZKStark:
     def extract_snark_details(self, snark_proof: Tuple) -> str:
         """
         Extracts and returns detailed information about the SNARK proof for logging purposes.
-        The implementation assumes that the SNARK proof consists of components such as group elements
-        and other cryptographic proof elements.
         """
-        # Unpack the SNARK proof assuming it consists of specific components
         group_element_a, group_element_b, group_element_c = snark_proof
 
-        # Format the group elements for logging
         a_details = f"Group Element A: {group_element_a}"
         b_details = f"Group Element B: {group_element_b}"
         c_details = f"Group Element C: {group_element_c}"
 
-        # Combine all details into a single formatted string
         snark_details = (
             f"SNARK Proof Details:\n"
             f"{a_details}\n"
@@ -384,6 +382,7 @@ class SecureHybridZKStark:
         )
 
         return snark_details
+
     def hash(self, *args) -> FieldElement:
         """Hash the input arguments and return a FieldElement."""
         concatenated_input = ''.join(map(str, args))
@@ -424,7 +423,9 @@ def calculate_field_size(security_level: int) -> int:
 
     # Map the security level to the smallest prime greater than or equal to 2^security_level
     field_size = next_prime(2**security_level)
+    
+    # Replace print with logger
+    logger.info(f"The field size for security level {security_level} is {field_size}.")
     return field_size
-security_level = 10
-field_size = calculate_field_size(security_level)
-print(f"The field size for security level {security_level} is {field_size}.")
+
+# Example usage

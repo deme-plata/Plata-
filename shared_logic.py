@@ -14,10 +14,17 @@ from dataclasses import dataclass, field
 import hashlib
 import threading
 import logging 
+from pydantic import BaseModel, Field, validator
+from typing import Optional, Any, Tuple
+from decimal import Decimal
+import uuid
+import hashlib
+import base64
+import logging
 logger = logging.getLogger(__name__)
 
 class Transaction(BaseModel):
-    id: str = None  # Unique transaction identifier
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     sender: str
     receiver: str
     amount: Decimal
@@ -28,139 +35,185 @@ class Transaction(BaseModel):
     signature: Optional[str] = None
     zk_proof: Optional[Tuple[Tuple, Tuple]] = None
     wallet: Optional[Any] = None
+    tx_hash: str = Field(default="")  # Initialize with empty string
+    timestamp: float = Field(default_factory=time.time)  # Set default to current time
+
+    def generate_hash(self) -> str:
+        """Generate transaction hash"""
+        message = (f"{self.id}{self.sender}{self.receiver}{self.amount}"
+                  f"{self.price}{self.buyer_id}{self.seller_id}{self.timestamp}")
+        return hashlib.sha256(message.encode()).hexdigest()
 
     def __init__(self, **data):
         super().__init__(**data)
-        # Generate a unique ID if not provided
-        if not self.id:
-            self.id = str(uuid.uuid4())
+        if not self.tx_hash:
+            self.tx_hash = self.generate_hash()
 
-    def sign_transaction(self, zk_system: SecureHybridZKStark):
-        if not self.wallet:
-            raise ValueError("Wallet is required to sign the transaction")
-        message = f"{self.sender}{self.receiver}{self.amount}{self.price}{self.buyer_id}{self.seller_id}"
-        self.signature = self.wallet.sign_message(message)
-        self.public_key = self.wallet.get_public_key()
-        
-        secret = int(self.amount * 10**18)  # Convert Decimal to integer
-        public_input = int(hashlib.sha256(message.encode()).hexdigest(), 16)
-        self.zk_proof = zk_system.prove(secret, public_input)
 
-    def verify_transaction(self, zk_system: SecureHybridZKStark) -> bool:
-        if not self.signature or not self.public_key or not self.zk_proof:
+    @validator('amount')
+    def validate_amount(cls, v):
+        if v <= 0:
+            raise ValueError("Amount must be positive")
+        return v
+
+    @validator('price')
+    def validate_price(cls, v):
+        if v < 0:
+            raise ValueError("Price cannot be negative")
+        return v
+
+    def sign_transaction(self, zk_system: 'SecureHybridZKStark'):
+        """Sign the transaction and generate ZK proof"""
+        try:
+            if not self.wallet:
+                raise ValueError("Wallet is required to sign the transaction")
+                
+            # Create message from transaction data
+            message = self._create_message()
+            
+            # Sign with wallet
+            self.signature = self.wallet.sign_message(message)
+            self.public_key = self.wallet.get_public_key()
+            
+            # Generate ZK proof
+            secret = int(self.amount * 10**18)  # Convert Decimal to integer
+            public_input = int(hashlib.sha256(message.encode()).hexdigest(), 16)
+            self.zk_proof = zk_system.prove(secret, public_input)
+            
+            # Generate transaction hash
+            self.tx_hash = hashlib.sha256(
+                f"{self.id}{message}{self.signature}".encode()
+            ).hexdigest()
+            
+            logger.debug(f"Transaction {self.id} signed successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error signing transaction: {str(e)}")
             return False
-        
-        message = f"{self.sender}{self.receiver}{self.amount}{self.price}{self.buyer_id}{self.seller_id}"
-        if not self.wallet.verify_signature(message, self.signature, self.public_key):
+
+    def verify_transaction(self, zk_system: 'SecureHybridZKStark') -> bool:
+        """Verify transaction signature and ZK proof"""
+        try:
+            if not all([self.signature, self.public_key, self.zk_proof]):
+                logger.error("Missing required verification components")
+                return False
+            
+            # Create message and verify signature
+            message = self._create_message()
+            if not self.wallet.verify_signature(message, self.signature, self.public_key):
+                logger.error("Signature verification failed")
+                return False
+            
+            # Verify ZK proof
+            public_input = int(hashlib.sha256(message.encode()).hexdigest(), 16)
+            if not zk_system.verify(public_input, self.zk_proof):
+                logger.error("ZK proof verification failed")
+                return False
+            
+            logger.debug(f"Transaction {self.id} verified successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error verifying transaction: {str(e)}")
             return False
-        
-        public_input = int(hashlib.sha256(message.encode()).hexdigest(), 16)
-        return zk_system.verify(public_input, self.zk_proof)
 
-    class Config:
-        arbitrary_types_allowed = True
+    def _create_message(self) -> str:
+        """Create message string for signing/verification"""
+        return f"{self.sender}{self.receiver}{self.amount}{self.price}{self.buyer_id}{self.seller_id}"
 
-    def to_grpc(self):
+    def to_dict(self) -> dict:
+        """Convert transaction to dictionary"""
+        return {
+            "id": self.id,
+            "sender": self.sender,
+            "receiver": self.receiver,
+            "amount": str(self.amount),
+            "price": str(self.price),
+            "buyer_id": self.buyer_id,
+            "seller_id": self.seller_id,
+            "public_key": self.public_key,
+            "signature": self.signature,
+            "tx_hash": self.tx_hash,
+            "timestamp": self.timestamp
+        }
+
+    def model_dump(self) -> dict:
+        """Pydantic v2 compatible model dump"""
+        return self.to_dict()
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Transaction':
+        """Create transaction from dictionary"""
+        # Handle Decimal conversion
+        if 'amount' in data:
+            data['amount'] = Decimal(str(data['amount']))
+        if 'price' in data:
+            data['price'] = Decimal(str(data['price']))
+        return cls(**data)
+
+    def to_grpc(self) -> Any:
+        """Convert to gRPC message"""
         return dagknight_pb2.Transaction(
             id=self.id,
             sender=self.sender,
             receiver=self.receiver,
-            amount=int(self.amount),  # Convert Decimal to int
+            amount=int(self.amount * 10**18),  # Convert to integer
+            price=int(self.price * 10**18),    # Convert to integer
             public_key=self.public_key,
             signature=self.signature,
-            price=int(self.price),  # Convert Decimal to int
             buyer_id=self.buyer_id,
-            seller_id=self.seller_id
+            seller_id=self.seller_id,
+            tx_hash=self.tx_hash,
+            timestamp=int(self.timestamp) if self.timestamp else None
         )
 
-    def to_dict(self):
-        return {
-            "sender": self.sender,
-            "receiver": self.receiver,
-            "amount": str(self.amount),  # Convert Decimal to string
-            "price": str(self.price),  # Convert Decimal to string
-            "buyer_id": self.buyer_id,
-            "seller_id": self.seller_id,
-            "wallet": self.wallet,
-            "tx_hash": self.tx_hash,
-            "timestamp": self.timestamp,
-            "signature": self.signature,
-            "zk_proof": self.zk_proof
-        }
-
-
     @classmethod
-    def from_dict(cls, data):
-        return cls(**data)
-
-    @classmethod
-    def from_proto(cls, proto):
+    def from_proto(cls, proto) -> 'Transaction':
+        """Create transaction from gRPC message"""
         return cls(
             id=proto.id,
             sender=proto.sender,
             receiver=proto.receiver,
-            amount=Decimal(proto.amount),
+            amount=Decimal(proto.amount) / Decimal(10**18),
+            price=Decimal(proto.price) / Decimal(10**18),
             public_key=proto.public_key,
             signature=proto.signature,
-            price=Decimal(proto.price),
             buyer_id=proto.buyer_id,
-            seller_id=proto.seller_id
+            seller_id=proto.seller_id,
+            tx_hash=proto.tx_hash,
+            timestamp=proto.timestamp
         )
 
-    def is_valid(self, zk_system: SecureHybridZKStark = None) -> bool:
-        """
-        Validate the transaction with multiple checks, including ZKP if provided.
-        """
-        # 1. Ensure the amount is positive
-        if self.amount <= 0:
-            return False
+    class Config:
+        arbitrary_types_allowed = True
 
-        # 2. Ensure sender and receiver are valid addresses
-        if not self.sender or not self.receiver:
-            return False
-
-        # 3. Verify that the transaction signature is valid
-        if not self.signature or not self.public_key:
-            return False
-
-        # Assuming `verify_signature` is a method that checks the signature's validity
-        if not self.verify_signature():
-            return False
-
-        # 4. If using Zero-Knowledge Proofs, verify the transaction's ZKP
-        if zk_system and not self.verify_zkp(zk_system):
-            return False
-
-        # If all checks pass, the transaction is valid
-        return True
-
-    def verify_signature(self) -> bool:
-        """
-        Example signature verification logic.
-        Ensure that the signature is valid based on the public key and transaction data.
-        """
-        message = f"{self.sender}{self.receiver}{self.amount}{self.price}{self.buyer_id}{self.seller_id}"
-        return self.wallet.verify_message(message, self.signature)
-
-    def verify_zkp(self, zk_system: SecureHybridZKStark) -> bool:
-        """
-        Example ZKP verification logic.
-        Use the provided zk_system to verify the Zero-Knowledge Proof.
-        """
-        message = f"{self.sender}{self.receiver}{self.amount}{self.price}{self.buyer_id}{self.seller_id}"
-        public_input = int(hashlib.sha256(message.encode()).hexdigest(), 16)
-        return zk_system.verify(public_input, self.zk_proof)
 class QuantumBlock:
-    def __init__(self, previous_hash, data, quantum_signature, reward, transactions, timestamp=None):
+    def __init__(
+        self,
+        previous_hash,
+        data,
+        quantum_signature,
+        reward,
+        transactions,
+        miner_address,
+        nonce,
+        parent_hashes,
+        timestamp=None
+    ):
         self.previous_hash = previous_hash
         self.data = data
         self.quantum_signature = quantum_signature
         self.reward = reward
         self.transactions = transactions
+        self.miner_address = miner_address
+        self.nonce = nonce
+        self.parent_hashes = parent_hashes
+        self.dag_parents = parent_hashes[1:] if len(parent_hashes) > 1 else []
         self.timestamp = timestamp or time.time()
-        self.nonce = 0
         self.hash = None  # Initialize the hash as None
         logger.debug(f"Initialized QuantumBlock: {self.to_dict()}")
+
 
     def to_dict(self):
         return {
@@ -249,21 +302,21 @@ class QuantumBlock:
             raise TypeError(f"Cannot convert transaction of type {type(tx)} to dict")
 
 
-
-
     @classmethod
-    def from_dict(cls, block_data):
+    def from_dict(cls, data):
         block = cls(
-            previous_hash=block_data["previous_hash"],
-            data=block_data["data"],
-            quantum_signature=block_data["quantum_signature"],
-            reward=Decimal(block_data["reward"]),  # Convert string back to Decimal
-            transactions=block_data["transactions"],
-            timestamp=block_data["timestamp"]
+            previous_hash=data["previous_hash"],
+            data=data["data"],
+            quantum_signature=data["quantum_signature"],
+            reward=Decimal(data["reward"]),
+            transactions=[Transaction.from_dict(tx) for tx in data["transactions"]]
         )
-        block.nonce = block_data["nonce"]
-        block.hash = block_data["hash"]
+        block.timestamp = data["timestamp"]
+        block.nonce = data["nonce"]
+        block.hash = data["hash"]
         return block
+
+
 
     def set_hash(self, hash_value):
         self.hash = hash_value

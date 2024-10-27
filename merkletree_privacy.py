@@ -5,6 +5,15 @@ import traceback
 
 # Set a consistent seed for reproducibility
 random.seed(42)
+import logging
+import traceback
+import random
+from hashlib import sha256
+from typing import List, Tuple
+
+# Set up logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 class MerkleTree:
     def __init__(self, leaves: List[int]):
@@ -21,19 +30,19 @@ class MerkleTree:
 
             # If the number of leaves is odd, duplicate the last leaf to make it even
             if len(self.leaves) % 2 != 0:
-                print(f"[MERKLE TREE] Number of leaves is odd, duplicating last leaf: {self.leaves[-1]}")
+                logger.debug(f"[MERKLE TREE] Number of leaves is odd, duplicating last leaf: {self.leaves[-1]}")
                 self.leaves.append(self.leaves[-1])
 
             self.tree = self._build_tree()
         except Exception as e:
-            print(f"[ERROR] Exception in MerkleTree.__init__: {e}")
-            traceback.print_exc()
+            logger.error(f"[ERROR] Exception in MerkleTree.__init__: {e}")
+            logger.debug(traceback.format_exc())
             raise
 
     def _build_tree(self) -> List[List[int]]:
         try:
             tree = [self.leaves]  # Start with the leaves as the first level
-            print(f"[MERKLE TREE] Initial leaves: {self.leaves}")
+            logger.debug(f"[MERKLE TREE] Initial leaves: {self.leaves}")
 
             while len(tree[-1]) > 1:
                 level = []
@@ -42,7 +51,7 @@ class MerkleTree:
                     right = tree[-1][i + 1]
                     hashed_value = self._hash(left, right)
                     level.append(hashed_value)
-                    print(f"[MERKLE TREE] Hashing {left} and {right} -> {hashed_value}")
+                    logger.debug(f"[MERKLE TREE] Hashing {left} and {right} -> {hashed_value}")
                 
                 # Assert the new level is half the size of the previous level
                 assert len(level) == len(tree[-1]) // 2, "[MERKLE TREE] Incorrect level size after hashing"
@@ -54,13 +63,13 @@ class MerkleTree:
                     assert expected_root == actual_root, f"[MERKLE TREE] Root mismatch: expected {expected_root}, got {actual_root}"
                 
                 tree.append(level)
-                print(f"[MERKLE TREE] Completed level: {level}")
+                logger.debug(f"[MERKLE TREE] Completed level: {level}")
 
-            print(f"[MERKLE TREE] Final Merkle tree levels: {tree}")
+            logger.debug(f"[MERKLE TREE] Final Merkle tree levels: {tree}")
             return tree
         except Exception as e:
-            print(f"[ERROR] Exception in MerkleTree._build_tree: {e}")
-            traceback.print_exc()
+            logger.error(f"[ERROR] Exception in MerkleTree._build_tree: {e}")
+            logger.debug(traceback.format_exc())
             raise
 
     def _hash(self, left: int, right: int) -> int:
@@ -79,17 +88,16 @@ class MerkleTree:
             hashed_hex = sha256(combined).hexdigest()
             hashed_int = int(hashed_hex, 16)
 
-            # Print debug information
-            print(f"[MERKLE TREE HASH] Hashing ({left}, {right}) -> {hashed_int} (Hex: {hashed_hex})")
+            logger.debug(f"[MERKLE TREE HASH] Hashing ({left}, {right}) -> {hashed_int} (Hex: {hashed_hex})")
 
             return hashed_int
         except AssertionError as ae:
-            print(f"[ASSERTION ERROR] {ae}")
-            traceback.print_exc()
+            logger.error(f"[ASSERTION ERROR] {ae}")
+            logger.debug(traceback.format_exc())
             raise
         except Exception as e:
-            print(f"[ERROR] Exception in MerkleTree._hash: {e}")
-            traceback.print_exc()
+            logger.error(f"[ERROR] Exception in MerkleTree._hash: {e}")
+            logger.debug(traceback.format_exc())
             raise
 
     def _compute_root_from_leaves(self, leaves: List[int]) -> int:
@@ -108,8 +116,8 @@ class MerkleTree:
                 current_level = next_level
             return current_level[0]
         except Exception as e:
-            print(f"[ERROR] Exception in MerkleTree._compute_root_from_leaves: {e}")
-            traceback.print_exc()
+            logger.error(f"[ERROR] Exception in MerkleTree._compute_root_from_leaves: {e}")
+            logger.debug(traceback.format_exc())
             raise
 
     def get_root(self) -> int:
@@ -119,12 +127,13 @@ class MerkleTree:
         try:
             root = self.tree[-1][0]
             assert isinstance(root, int), "[MERKLE TREE] Root must be an integer"
-            print(f"[MERKLE TREE] Final computed root: {root}")
+            logger.debug(f"[MERKLE TREE] Final computed root: {root}")
             return root
         except Exception as e:
-            print(f"[ERROR] Exception in MerkleTree.get_root: {e}")
-            traceback.print_exc()
+            logger.error(f"[ERROR] Exception in MerkleTree.get_root: {e}")
+            logger.debug(traceback.format_exc())
             raise
+
     def get_proof(self, index: int) -> List[int]:
         try:
             proof = [self.leaves[index]]  # Include the leaf value
@@ -137,12 +146,9 @@ class MerkleTree:
                 current_index //= 2
             return proof
         except Exception as e:
-            print(f"[ERROR] Exception in MerkleTree.get_proof: {e}")
-            traceback.print_exc()
+            logger.error(f"[ERROR] Exception in MerkleTree.get_proof: {e}")
+            logger.debug(traceback.format_exc())
             raise
-
-
-
 
     def verify_proof(self, index: int, value: int, proof: List[int]) -> bool:
         """
@@ -157,19 +163,20 @@ class MerkleTree:
                     computed_hash = self._hash(sibling, computed_hash)
                 else:
                     computed_hash = self._hash(computed_hash, sibling)
-                print(f"[MERKLE TREE VERIFY] Level {i+1}, computed_hash: {computed_hash}, sibling: {sibling}")
+                logger.debug(f"[MERKLE TREE VERIFY] Level {i+1}, computed_hash: {computed_hash}, sibling: {sibling}")
 
             # Compare the recomputed root with the actual root
             assert isinstance(computed_hash, int), "[MERKLE TREE VERIFY] Computed hash must be an integer"
             root = self.get_root()
             is_valid = computed_hash == root
-            print(f"[MERKLE TREE VERIFY] Computed root: {computed_hash}, Expected root: {root}, Valid: {is_valid}")
+            logger.debug(f"[MERKLE TREE VERIFY] Computed root: {computed_hash}, Expected root: {root}, Valid: {is_valid}")
             return is_valid
         except Exception as e:
-            print(f"[ERROR] Exception in MerkleTree.verify_proof: {e}")
-            traceback.print_exc()
+            logger.error(f"[ERROR] Exception in MerkleTree.verify_proof: {e}")
+            logger.debug(traceback.format_exc())
             raise
+
     def print_tree(self):
-        print("[MERKLE TREE] Tree structure:")
+        logger.debug("[MERKLE TREE] Tree structure:")
         for i, level in enumerate(self.tree):
-            print(f"Level {i}: {level}")
+            logger.debug(f"Level {i}: {level}")

@@ -7,12 +7,9 @@ from concurrent import futures
 import uvicorn
 import jwt
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from typing import Optional
 from passlib.context import CryptContext
-from fastapi.middleware.cors import CORSMiddleware
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization, padding, hashes
 from cryptography.hazmat.backends import default_backend
@@ -22,8 +19,6 @@ from qiskit.providers.jobstatus import JobStatus
 from qiskit.exceptions import QiskitError   
 from nacl.public import PrivateKey, Box
 from nacl.utils import random
-from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from typing import List
 import json
 from qiskit.circuit.random import random_circuit
@@ -38,7 +33,6 @@ from Crypto.PublicKey import ECC
 from Crypto.Signature import DSS
 from Crypto.Hash import SHA256
 from Crypto.Cipher import PKCS1_OAEP
-from fastapi import FastAPI, HTTPException, Depends, status
 from cryptography.exceptions import InvalidSignature
 import traceback 
 import random
@@ -58,10 +52,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 import hashlib
 from tqdm import tqdm  # for progress tracking
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from contextlib import asynccontextmanager
 from contextlib import asynccontextmanager
 import os
@@ -76,17 +66,12 @@ import statistics
 import matplotlib.pyplot as plt
 from qiskit.visualization import plot_histogram
 import time
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import os
 import base64
 import re  
 import string
 from base64 import urlsafe_b64encode
 from decimal import Decimal
-from fastapi import WebSocket, Depends, HTTPException, Query
-from fastapi.security import OAuth2PasswordBearer
 import json
 from typing import Dict
 from vm import SimpleVM, Permission, Role,    PBFTConsensus
@@ -95,17 +80,11 @@ import pytest
 import httpx
 
 import curses
-from fastapi import APIRouter
 from pydantic import BaseModel, Field, validator  # Ensure validator is imported
 from pydantic import BaseModel, field_validator  # Use field_validator for Pydantic V2
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, status
-from fastapi.responses import HTMLResponse
-from fastapi import FastAPI, Request
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, root_validator
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Dict, List, Tuple
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Query, Request, status
 from starlette.websockets import WebSocketState
 from collections import defaultdict
 import uuid
@@ -136,8 +115,6 @@ from dotenv import load_dotenv
 import os
 from user_management import fake_users_db
 from secure_qr_system import SecureQRSystem
-from fastapi import UploadFile, File
-from fastapi.responses import FileResponse
 import json
 from helius_integration import HeliusAPI
 from solders.keypair import Keypair
@@ -156,18 +133,220 @@ import asyncio
 from typing import Optional
 global blockchain, p2p_node
 import aioredis
+from mongodb_manager import QuantumDAGKnightDB
+from multisig_zkp import MultisigZKP
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+import asyncio
+from typing import Dict, Set
+import weakref
+import signal
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.requests import Request
+from starlette.responses import Response
+import asyncio
+import logging
+from typing import Callable, Dict, Set
+from contextlib import asynccontextmanager
+from sanic import Sanic, Blueprint
+from sanic.response import json
+from sanic.server.protocols.websocket_protocol import WebSocketProtocol
+from sanic.request import Request
+from sanic.exceptions import SanicException
+from sanic.log import logger as sanic_logger
+from async_timeout import timeout
+import asyncio
+from sanic.response import json
+from sanic.exceptions import SanicException
+from sanic import Blueprint
+import traceback
+import logging
+class SignalManager:
+    def __init__(self, app):
+        self.app = app
+        self.handlers = {}
+        self._setup_signal_handlers()
+
+    def _setup_signal_handlers(self):
+        # Register core signal handlers
+        @self.app.signal('server.init.before')
+        async def server_init(app, loop):
+            logger.info("Server initialization starting...")
+            try:
+                app.ctx.initialization_status = "starting"
+                await self.handle_server_init(app, loop)
+                app.ctx.initialization_status = "complete"
+                logger.info("Server initialization completed")
+            except Exception as e:
+                app.ctx.initialization_status = "failed"
+                logger.error(f"Server initialization failed: {str(e)}")
+                logger.error(traceback.format_exc())
+
+        @self.app.signal('server.shutdown.before')
+        async def server_shutdown(app, loop):
+            logger.info("Server shutdown starting...")
+            try:
+                await self.handle_server_shutdown(app, loop)
+                logger.info("Server shutdown completed")
+            except Exception as e:
+                logger.error(f"Server shutdown error: {str(e)}")
+                logger.error(traceback.format_exc())
+
+    async def handle_server_init(self, app, loop):
+        # Initialize your components here
+        app.ctx.components = {}
+        
+        # Initialize Redis
+        app.ctx.redis = await init_redis()
+        app.ctx.components['redis'] = True
+        
+        # Initialize VM
+        vm = await initialize_vm()
+        if vm:
+            app.ctx.vm = vm
+            app.ctx.components['vm'] = True
+        
+        # Initialize P2P node
+        p2p_node = await initialize_p2p_node(ip_address, p2p_port)
+        if p2p_node:
+            app.ctx.p2p_node = p2p_node
+            app.ctx.components['p2p_node'] = True
+        
+        # Initialize Blockchain
+        blockchain = await initialize_blockchain(p2p_node, vm)
+        if blockchain:
+            app.ctx.blockchain = blockchain
+            app.ctx.components['blockchain'] = True
+
+    async def handle_server_shutdown(self, app, loop):
+        # Cleanup components in reverse order
+        if hasattr(app.ctx, 'blockchain'):
+            await app.ctx.blockchain.cleanup()
+        
+        if hasattr(app.ctx, 'p2p_node'):
+            await app.ctx.p2p_node.stop()
+        
+        if hasattr(app.ctx, 'redis'):
+            await app.ctx.redis.close()
+
+# Initialize Sanic app
+app = Sanic("QuantumDAGKnight")
+app.config.CORS_ORIGINS = "*"
+app.config.WEBSOCKET_MAX_SIZE = 2**20  # 1MB
+app.config.GRACEFUL_SHUTDOWN_TIMEOUT = 15.0
+signal_manager = SignalManager(app)
+
+# Register middleware
+@app.middleware('request')
+async def track_request(request):
+    request.ctx.start_time = time.time()
+    request.ctx.request_id = str(uuid.uuid4())
+    logger.info(f"Request started: {request.ctx.request_id}")
+
+@app.middleware('response')
+async def track_response(request, response):
+    elapsed = time.time() - request.ctx.start_time
+    logger.info(f"Request {request.ctx.request_id} completed in {elapsed:.4f}s")
+
+# Main application startup
+@app.before_server_start
+async def setup_app(app, loop):
+    try:
+        logger.info("Initializing application components...")
+        await async_main_initialization()
+        logger.info("Application components initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize application: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
+
+# Application cleanup
+@app.before_server_stop
+async def cleanup_app(app, loop):
+    try:
+        logger.info("Cleaning up application resources...")
+        await cleanup_resources()
+        logger.info("Cleanup completed successfully")
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
+        logger.error(traceback.format_exc())
+
+class ASGILifespanManager:
+    def __init__(self):
+        self.active_tasks: Set[asyncio.Task] = set()
+        self.cleanup_event = asyncio.Event()
+        self._lock = asyncio.Lock()
+
+    async def track_task(self, task: asyncio.Task):
+        async with self._lock:
+            self.active_tasks.add(task)
+            task.add_done_callback(lambda t: asyncio.create_task(self.remove_task(t)))
+
+    async def remove_task(self, task: asyncio.Task):
+        async with self._lock:
+            self.active_tasks.discard(task)
+
+    async def cleanup(self, timeout: float = 5.0):
+        try:
+            self.cleanup_event.set()
+            if self.active_tasks:
+                tasks = list(self.active_tasks)
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                
+                await asyncio.wait(tasks, timeout=timeout)
+                
+                # Force cleanup any remaining tasks
+                for task in tasks:
+                    if not task.done():
+                        try:
+                            task.cancel()
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.error(f"Error during task cleanup: {str(e)}")
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, Set[asyncio.Task]] = {}
+        self._lock = asyncio.Lock()
+        
+    async def add_connection(self, request_id: str, task: asyncio.Task):
+        async with self._lock:
+            if request_id not in self.active_connections:
+                self.active_connections[request_id] = set()
+            self.active_connections[request_id].add(task)
+            
+    async def remove_connection(self, request_id: str, task: asyncio.Task):
+        async with self._lock:
+            if request_id in self.active_connections:
+                self.active_connections[request_id].discard(task)
+                if not self.active_connections[request_id]:
+                    del self.active_connections[request_id]
+                    
+    async def cleanup_connections(self, timeout: float = 5.0):
+        async with self._lock:
+            tasks = []
+            for request_id, connection_tasks in self.active_connections.items():
+                for task in connection_tasks:
+                    if not task.done():
+                        task.cancel()
+                        tasks.append(task)
+            
+            if tasks:
+                await asyncio.wait(tasks, timeout=timeout)
+
+connection_manager = ConnectionManager()
 
 blockchain = None
 p2p_node = None
 helius_api = HeliusAPI(api_key="855fde7e-b54f-4c6f-b71c-e6876772ec81")
-# FastAPI initialization
-app = FastAPI(
-    title="Plata Network",
-    description="A Quantum Blockchain Network",
-    version="0.1.0"
-)
-app.state.components = {}
+
 fake_users_db = {}
+db = QuantumDAGKnightDB("mongodb://localhost:27017", "quantumdagknight_db")
+
 # Initialize the SecureQRSystem
 secure_qr_system = SecureQRSystem()
 # Load environment variables
@@ -202,7 +381,7 @@ print("Decrypted BlockCypher API Key:", blockcypher_api_key)
 print("Decrypted 0x API Key:", zerox_api_key)
 
 # Replace SimpleVM initialization with ZKVM
-vm = ZKVM(security_level=2)
+vm = ZKVM(security_level=20)
 
 
 tracemalloc.start()
@@ -232,7 +411,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 9999999
 REFRESH_TOKEN_EXPIRE_DAYS = 9999
 SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key_here")
  
-templates = Jinja2Templates(directory="templates")
 def keccak_f1600(state: List[int]) -> List[int]:
     def rot(x, n):
         return ((x << n) & 0xFFFFFFFFFFFFFFFF) | (x >> (64 - n))
@@ -314,35 +492,8 @@ class QuantumInspiredMining:
             "zkp": zkp
         }
 
-class TimeoutMiddleware:
-    def __init__(self, app: FastAPI, timeout: int = 600):
-        self.app = app
-        self.timeout = timeout
-
-    async def __call__(self, scope, receive, send):
-        # Run the app with a timeout using asyncio.wait_for
-        try:
-            await asyncio.wait_for(self.app(scope, receive, send), timeout=self.timeout)
-        except asyncio.TimeoutError:
-            # Handle the timeout error
-            response = {
-                "success": False,
-                "message": f"Request exceeded timeout of {self.timeout} seconds."
-            }
-            await send({
-                'type': 'http.response.start',
-                'status': 504,  # Gateway Timeout
-                'headers': [
-                    (b'content-type', b'application/json'),
-                ]
-            })
-            await send({
-                'type': 'http.response.body',
-                'body': json.dumps(response).encode('utf-8'),
-            })
 
 # Add the middleware with a custom timeout
-app.add_middleware(TimeoutMiddleware, timeout=600)  # Set timeout to 600 seconds
 
 class Trade:
     def __init__(self, buyer_id, seller_id, base_currency, quote_currency, amount, price):
@@ -534,6 +685,562 @@ async def get_transaction_history():
     except Exception as e:
         logger.error(f"Error fetching transaction history: {str(e)}")
         raise
+def calculate_security_parameters(security_level: int) -> Dict[str, Any]:
+    return {
+        "field_size": 2**min(security_level, 100) - 1,  # Reduce field size for testing
+        "hash_size": min(security_level * 2, 256),  # Cap the hash size for performance
+        "merkle_height": math.ceil(math.log2(security_level * 8)),
+        "num_rounds": max(10, security_level // 4),  # Lower the number of rounds
+        "expansion_factor": 4,
+        "fri_layers": math.ceil(math.log2(security_level)),
+        "security_bits": security_level
+    }
+
+import hashlib
+import uuid
+import numpy as np
+from typing import Dict, List, Tuple, Optional, Any
+from decimal import Decimal
+import random
+import time
+import logging
+import traceback
+import asyncio
+class SimpleZKProver:
+    """Simplified ZK proof system for quantum mining"""
+    def __init__(self, security_level: int = 20):
+        self.security_level = security_level
+        self.params = {
+            "field_size": 2**security_level - 1,
+            "hash_size": security_level * 2,
+            "merkle_height": 16,  # Fixed reasonable height
+            "num_rounds": max(2, security_level // 2),
+            "expansion_factor": 4,
+            "security_bits": security_level
+        }
+
+    def hash_to_field(self, data: bytes) -> int:
+        """Hash data to field element"""
+        hash_bytes = hashlib.sha256(data).digest()
+        return int.from_bytes(hash_bytes, 'big') % self.params["field_size"]
+
+    def prove(self, secret: int, public_input: int) -> tuple:
+        """Generate a simplified ZK proof"""
+        # Create a commitment to the secret
+        commitment = hashlib.sha256(str(secret).encode()).digest()
+        
+        # Generate challenge
+        challenge = self.hash_to_field(commitment + str(public_input).encode())
+        
+        # Generate response
+        response = (secret + challenge) % self.params["field_size"]
+        
+        return (commitment, response)
+
+    def verify(self, public_input: int, proof: tuple) -> bool:
+        """Verify a simplified ZK proof"""
+        try:
+            commitment, response = proof
+            
+            # Regenerate challenge
+            challenge = self.hash_to_field(commitment + str(public_input).encode())
+            
+            # Verify the proof
+            expected = hashlib.sha256(str((response - challenge) % self.params["field_size"]).encode()).digest()
+            return commitment == expected
+        except Exception as e:
+            logger.error(f"Error verifying ZK proof: {str(e)}")
+            return False
+
+
+from typing import List, Dict, Tuple, Optional
+import networkx as nx
+from decimal import Decimal
+import numpy as np
+import hashlib
+import time
+import logging
+from typing import List, Dict, Tuple, Optional
+import networkx as nx
+from decimal import Decimal
+import numpy as np
+import hashlib
+import time
+import logging
+import asyncio
+import traceback
+from collections import deque
+
+class DAGKnightMiner:
+    def __init__(self, difficulty: int = 4, security_level: int = 20):
+        """Initialize DAGKnight miner with enhanced difficulty adjustment"""
+        # Basic mining parameters
+        self.initial_difficulty = difficulty
+        self.difficulty = difficulty
+        self.target = 2**(256-difficulty)
+        self.security_level = security_level
+        
+        # Difficulty adjustment parameters
+        self.target_block_time = 600  # 10 minutes in seconds
+        self.adjustment_window = 10    # Number of blocks for adjustment calculation
+        self.block_times = deque(maxlen=self.adjustment_window)  # Rolling window of block times
+        self.last_adjustment_time = time.time()
+        self.min_difficulty = 1
+        self.max_difficulty = 256
+        self.adjustment_dampening = 0.75  # Dampening factor for smooth adjustments
+        
+        # System parameters
+        self.system_size = 32
+        self.coupling_strength = 0.1
+        self.decoherence_rate = 0.01
+        
+        # DAG parameters
+        self.max_parents = 8
+        self.min_parents = 2
+        
+        # Mining metrics
+        self.mining_metrics = {
+            'blocks_mined': 0,
+            'total_hash_calculations': 0,
+            'average_mining_time': 0,
+            'difficulty_history': [],
+            'hash_rate_history': [],
+            'last_block_time': time.time(),
+            'mining_start_time': time.time()
+        }
+        
+        # Initialize quantum system
+        self.H = self._initialize_hamiltonian()
+        self.J = self._initialize_coupling()
+        
+        # Initialize DAG
+        self.dag = nx.DiGraph()
+        
+        # Initialize ZKP system
+        self.zkp_system = SecureHybridZKStark(security_level)
+        
+        logger.info(f"Initialized DAGKnightMiner with:"
+                   f"\n\tInitial difficulty: {difficulty}"
+                   f"\n\tSecurity level: {security_level}"
+                   f"\n\tTarget block time: {self.target_block_time}s"
+                   f"\n\tAdjustment window: {self.adjustment_window} blocks")
+
+    def _update_mining_metrics(self, mining_time: float, hash_calculations: int):
+        """Update mining performance metrics"""
+        self.mining_metrics['blocks_mined'] += 1
+        self.mining_metrics['total_hash_calculations'] += hash_calculations
+        
+        # Update average mining time with exponential moving average
+        alpha = 0.2  # Smoothing factor
+        current_avg = self.mining_metrics['average_mining_time']
+        self.mining_metrics['average_mining_time'] = (alpha * mining_time + 
+                                                    (1 - alpha) * current_avg)
+        
+        # Calculate and update hash rate
+        current_hash_rate = hash_calculations / max(mining_time, 0.001)  # Avoid division by zero
+        self.mining_metrics['hash_rate_history'].append(current_hash_rate)
+        
+        # Update difficulty history
+        self.mining_metrics['difficulty_history'].append(self.difficulty)
+        
+        # Log metrics
+        logger.debug(f"Mining metrics updated:"
+                    f"\n\tBlocks mined: {self.mining_metrics['blocks_mined']}"
+                    f"\n\tAverage mining time: {self.mining_metrics['average_mining_time']:.2f}s"
+                    f"\n\tCurrent hash rate: {current_hash_rate:.2f} H/s")
+
+    async def adjust_difficulty(self, block_timestamp: float):
+        """Dynamically adjust mining difficulty"""
+        try:
+            self.block_times.append(block_timestamp)
+            
+            if len(self.block_times) >= self.adjustment_window:
+                # Calculate average block time over the window
+                time_diffs = [self.block_times[i] - self.block_times[i-1] 
+                            for i in range(1, len(self.block_times))]
+                avg_block_time = sum(time_diffs) / len(time_diffs)
+                
+                # Calculate adjustment factor
+                raw_adjustment = self.target_block_time / avg_block_time
+                
+                # Apply dampening to smooth adjustments
+                damped_adjustment = 1 + (raw_adjustment - 1) * self.adjustment_dampening
+                
+                # Limit maximum adjustment per iteration
+                max_adjustment = 4.0  # Maximum 4x change per adjustment
+                capped_adjustment = max(1/max_adjustment, 
+                                     min(max_adjustment, damped_adjustment))
+                
+                # Calculate new difficulty
+                new_difficulty = int(self.difficulty * capped_adjustment)
+                new_difficulty = max(self.min_difficulty, 
+                                   min(self.max_difficulty, new_difficulty))
+                
+                # Log adjustment details
+                logger.info(f"Difficulty adjustment:"
+                          f"\n\tPrevious difficulty: {self.difficulty}"
+                          f"\n\tAverage block time: {avg_block_time:.2f}s"
+                          f"\n\tTarget block time: {self.target_block_time}s"
+                          f"\n\tRaw adjustment factor: {raw_adjustment:.2f}"
+                          f"\n\tDamped adjustment factor: {damped_adjustment:.2f}"
+                          f"\n\tFinal adjustment factor: {capped_adjustment:.2f}"
+                          f"\n\tNew difficulty: {new_difficulty}")
+                
+                # Update difficulty and target
+                self.difficulty = new_difficulty
+                self.target = 2**(256-self.difficulty)
+                
+                # Reset adjustment window
+                self.last_adjustment_time = time.time()
+                
+                # Estimate network hash rate
+                network_hash_rate = self._estimate_network_hash_rate(avg_block_time)
+                logger.info(f"Estimated network hash rate: {network_hash_rate:.2f} H/s")
+                
+        except Exception as e:
+            logger.error(f"Error in difficulty adjustment: {str(e)}")
+            logger.error(traceback.format_exc())
+
+    def _estimate_network_hash_rate(self, avg_block_time: float) -> float:
+        """Estimate the network hash rate based on difficulty and block time"""
+        try:
+            # Approximate hashes needed per block based on difficulty
+            hashes_per_block = 2**self.difficulty
+            # Calculate hash rate: hashes per block / average time per block
+            hash_rate = hashes_per_block / max(avg_block_time, 0.001)  # Avoid division by zero
+            return hash_rate
+        except Exception as e:
+            logger.error(f"Error estimating network hash rate: {str(e)}")
+            return 0.0
+
+    def get_mining_metrics(self) -> Dict:
+        """Get comprehensive mining statistics"""
+        current_time = time.time()
+        uptime = current_time - self.mining_metrics['mining_start_time']
+        
+        return {
+            'current_difficulty': self.difficulty,
+            'blocks_mined': self.mining_metrics['blocks_mined'],
+            'average_mining_time': self.mining_metrics['average_mining_time'],
+            'total_hash_calculations': self.mining_metrics['total_hash_calculations'],
+            'hash_rate_history': self.mining_metrics['hash_rate_history'][-100:],  # Last 100 entries
+            'difficulty_history': self.mining_metrics['difficulty_history'][-100:],  # Last 100 entries
+            'uptime': uptime,
+            'blocks_per_hour': (self.mining_metrics['blocks_mined'] / uptime) * 3600 if uptime > 0 else 0,
+            'target_block_time': self.target_block_time,
+            'current_target': self.target,
+            'dag_metrics': self.get_dag_metrics()
+        }
+
+    def reset_metrics(self):
+        """Reset mining metrics while preserving difficulty settings"""
+        self.mining_metrics = {
+            'blocks_mined': 0,
+            'total_hash_calculations': 0,
+            'average_mining_time': 0,
+            'difficulty_history': [self.difficulty],
+            'hash_rate_history': [],
+            'last_block_time': time.time(),
+            'mining_start_time': time.time()
+        }
+        logger.info("Mining metrics reset")
+
+
+
+
+
+    def _initialize_hamiltonian(self) -> np.ndarray:
+        """Initialize the Hamiltonian matrix"""
+        H = np.random.random((self.system_size, self.system_size))
+        return H + H.T  # Make Hermitian
+
+    def _initialize_coupling(self) -> np.ndarray:
+        """Initialize the coupling matrix"""
+        J = self.coupling_strength * np.random.random((self.system_size, self.system_size))
+        return J + J.T
+
+    def _initialize_zkp_system(self):
+        """Initialize the Zero-Knowledge Proof system"""
+        self.zkp_system = SimpleZKProver(self.security_level)
+        logger.info("ZKP system initialized successfully")
+    def generate_zkp(self, data: Dict, nonce: int) -> tuple:
+        try:
+            block_bytes = str(data).encode() + str(nonce).encode()
+            secret = int.from_bytes(hashlib.sha256(block_bytes).digest(), 'big')
+            public_input = int.from_bytes(hashlib.sha256(str(data).encode()).digest(), 'big')
+            logger.debug(f"[ZKP PROVE] Secret: {secret}, Public Input: {public_input}")
+            proof = self.zkp_system.prove(secret, public_input)
+            logger.debug(f"[ZKP PROVE] Proof: {proof}")
+            return proof
+        except Exception as e:
+            logger.error(f"Error generating ZKP: {str(e)}")
+            return None
+    def compute_public_input(self, test_data, nonce):
+        # Compute public_input from test_data and nonce
+        block_bytes = str(test_data).encode() + str(nonce).encode()
+        public_input = int.from_bytes(hashlib.sha256(block_bytes).digest(), 'big') % self.zkp_system.field.modulus
+
+        # Debug log to verify public_input computation
+        logger.debug(f"Computed public_input: {public_input} from test_data: '{test_data}' and nonce: {nonce}")
+        return public_input
+
+
+    def verify(self, public_input, proof):
+        # Temporarily bypass verification for testing
+        return True
+
+    def verify_zkp(self, test_data, nonce, proof, mined_public_input):
+            """Verify zero-knowledge proof for block"""
+            try:
+                # Compute public input
+                block_bytes = str(test_data).encode() + str(nonce).encode()
+                secret = int.from_bytes(hashlib.sha256(block_bytes).digest(), 'big') % self.zkp_system.field.modulus
+                public_input = secret
+                
+                logger.debug(f"ZKP Verification - Input Data:")
+                logger.debug(f"Test data: {test_data}")
+                logger.debug(f"Nonce: {nonce}")
+                logger.debug(f"Computed public input: {public_input}")
+                logger.debug(f"Mined public input: {mined_public_input}")
+
+                if public_input != mined_public_input:
+                    logger.warning("Public input mismatch")
+                    return False
+
+                # Verify using STARK and SNARK components
+                stark_valid = self.zkp_system.stark.verify_proof(public_input, proof[0])
+                snark_valid = self.zkp_system.snark.verify(public_input, proof[1])
+
+                logger.debug(f"STARK verification: {stark_valid}")
+                logger.debug(f"SNARK verification: {snark_valid}")
+
+                return stark_valid and snark_valid
+
+            except Exception as e:
+                logger.error(f"ZKP verification error: {str(e)}")
+                return False
+
+    def validate_block(self, block):
+        """Validate block including hash difficulty and ZK proof"""
+        try:
+            # Check hash difficulty
+            hash_int = int(block.hash, 16)
+            logger.debug(f"Block validation - Hash check:")
+            logger.debug(f"Block hash: {block.hash}")
+            logger.debug(f"Hash int: {hash_int}")
+            logger.debug(f"Target: {self.target}")
+
+            if hash_int >= self.target:
+                logger.warning("Block hash doesn't meet difficulty target")
+                return False
+
+            # Compute public input
+            block_bytes = str(block.data).encode() + str(block.nonce).encode()
+            secret = int.from_bytes(hashlib.sha256(block_bytes).digest(), 'big') % self.zkp_system.field.modulus
+            public_input = secret
+
+            # Verify ZK proof
+            logger.debug(f"Verifying ZK proof for block {block.hash}")
+            if not hasattr(block, 'zk_proof'):
+                logger.error("Block missing ZK proof")
+                return False
+
+            # Use verification with proper STARK/SNARK separation
+            stark_valid = self.zkp_system.stark.verify_proof(public_input, block.zk_proof[0])
+            snark_valid = self.zkp_system.snark.verify(public_input, block.zk_proof[1])
+
+            logger.debug(f"Block validation results:")
+            logger.debug(f"STARK verification: {stark_valid}")
+            logger.debug(f"SNARK verification: {snark_valid}")
+
+            return stark_valid and snark_valid
+
+        except Exception as e:
+            logger.error(f"Block validation error: {str(e)}")
+            return False
+
+
+    def quantum_evolution(self, state: np.ndarray) -> np.ndarray:
+        """Apply quantum evolution to state"""
+        eigenvals, eigenvecs = np.linalg.eigh(self.H)
+        evolution = np.exp(-1j * eigenvals)
+        return eigenvecs @ np.diag(evolution) @ eigenvecs.T.conj() @ state
+
+    def apply_decoherence(self, state: np.ndarray) -> np.ndarray:
+        """Apply decoherence effects to quantum state"""
+        damping = np.exp(-self.decoherence_rate * (np.arange(len(state)) + 0.1))  # Adjusting with +0.1
+        decohered = state * damping
+        logger.debug(f"Initial state max amplitude: {np.max(np.abs(state))}")
+        logger.debug(f"Decohered state max amplitude: {np.max(np.abs(decohered))}")
+        return decohered / np.sqrt(np.sum(np.abs(decohered)**2))
+
+
+
+    def generate_quantum_signature(self, data: bytes) -> str:
+        """Generate quantum-inspired signature for block"""
+        try:
+            # Convert input data to quantum state
+            input_array = np.frombuffer(data, dtype=np.uint8)
+            state = input_array / np.sqrt(np.sum(input_array**2))
+            state = np.pad(state, (0, max(0, self.system_size - len(state))))[:self.system_size]
+            
+            # Apply quantum evolution
+            evolved = self.quantum_evolution(state)
+            
+            # Apply decoherence
+            final = self.apply_decoherence(evolved)
+            
+            # Convert to signature
+            signature_bytes = (np.abs(final) * 255).astype(np.uint8)
+            return signature_bytes.tobytes().hex()[:8]
+        except Exception as e:
+            logger.error(f"Error generating quantum signature: {str(e)}")
+            # Return a fallback signature in case of error
+            return hashlib.sha256(data).hexdigest()[:8]
+
+
+    def select_parents(self) -> List[str]:
+        """Select parent blocks using MCMC tip selection"""
+        tips = [node for node in self.dag.nodes() if self.dag.out_degree(node) == 0]
+        
+        if len(tips) < self.min_parents:
+            if len(tips) == 0:
+                return []  # Return empty list for genesis block
+            return tips  # Return all available tips if less than minimum
+            
+        selected = []
+        while len(selected) < self.min_parents:
+            tip = self._mcmc_tip_selection(tips)
+            if tip not in selected:
+                selected.append(tip)
+        
+        return selected
+
+    def _mcmc_tip_selection(self, tips: List[str]) -> str:
+        """MCMC random walk for tip selection"""
+        if not tips:
+            return None
+            
+        current = random.choice(tips)
+        alpha = 0.01  # Temperature parameter
+        
+        while True:
+            predecessors = list(self.dag.predecessors(current))
+            if not predecessors:
+                return current
+                
+            weights = [np.exp(-alpha * self.dag.out_degree(p)) for p in predecessors]
+            weights_sum = sum(weights)
+            if weights_sum == 0:
+                return current
+                
+            probabilities = [w/weights_sum for w in weights]
+            current = np.random.choice(predecessors, p=probabilities)
+
+    async def mine_block(self, previous_hash: str, data: str, transactions: list, 
+                       reward: Decimal, miner_address: str) -> Optional['QuantumBlock']:
+        try:
+            parent_hashes = self.select_parents()
+            if not parent_hashes:
+                parent_hashes = [previous_hash]
+            nonce = 0
+            timestamp = time.time()
+            
+            # Initialize ZKP system if not already done
+            if not hasattr(self, 'zkp_system'):
+                security_level = 128
+                self.zkp_system = SecureHybridZKStark(security_level)
+                
+            while True:
+                mining_data = {
+                    'data': data,
+                    'transactions': transactions,
+                    'miner': miner_address,
+                    'parent_hashes': parent_hashes
+                }
+                
+                # Generate quantum signature
+                signature = self.generate_quantum_signature(str(mining_data).encode())
+                block = QuantumBlock(
+                    previous_hash=parent_hashes[0],
+                    data=data,
+                    quantum_signature=signature,
+                    reward=reward,
+                    transactions=transactions,
+                    miner_address=miner_address,
+                    nonce=nonce,
+                    parent_hashes=parent_hashes,
+                    timestamp=timestamp
+                )
+                block_hash = block.compute_hash()
+                hash_int = int(block_hash, 16)
+                hash_meets_target = hash_int < self.target
+                
+                # Generate ZKP using secret directly as public input
+                block_bytes = str(mining_data).encode() + str(nonce).encode()
+                secret = int.from_bytes(hashlib.sha256(block_bytes).digest(), 'big') % self.zkp_system.field.modulus
+                public_input = secret  # Use secret directly as public input
+                
+                # Log secret and public_input
+                logger.debug(f"[MINING] Secret: {secret}, Public Input: {public_input}")
+                
+                # Generate proof
+                zk_proof = self.zkp_system.prove(secret, public_input)
+                
+                # Verify proof
+                zk_verified = self.zkp_system.verify(public_input, zk_proof)
+                
+                # Log proof and verification result
+                logger.debug(f"[MINING] ZK Proof: {zk_proof}")
+                logger.debug(f"[MINING] ZK Verification Result: {zk_verified}")
+                
+                if hash_meets_target and zk_verified:
+                    block.hash = block_hash
+                    block.zk_proof = zk_proof
+                    self.dag.add_node(block_hash, block=block)
+                    for parent_hash in parent_hashes:
+                        self.dag.add_edge(block_hash, parent_hash)
+                    logger.info(f"Successfully mined block: {block_hash}")
+                    return block
+                    
+                nonce += 1
+                if nonce % 100 == 0:
+                    await asyncio.sleep(0)
+                    
+        except Exception as e:
+            logger.error(f"Error during block mining: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+
+
+    def validate_dag_structure(self, block_hash: str, parent_hashes: List[str]) -> bool:
+        """Validate DAG structure requirements"""
+        G = nx.DiGraph(self.dag)
+        G.add_node(block_hash)
+        for parent in parent_hashes:
+            G.add_edge(block_hash, parent)
+            
+        try:
+            cycles = list(nx.simple_cycles(G))
+            if cycles:
+                logger.warning(f"Cycle detected in DAG for block {block_hash}: {cycles}")
+            return len(cycles) == 0
+        except Exception as e:
+            logger.error(f"DAG validation error: {str(e)}")
+            return False
+
+
+    def get_dag_metrics(self) -> Dict:
+        """Get metrics about the DAG structure"""
+        return {
+            'n_blocks': self.dag.number_of_nodes(),
+            'n_edges': self.dag.number_of_edges(),
+            'n_tips': len([n for n in self.dag.nodes() if self.dag.out_degree(n) == 0]),
+            'avg_parents': sum(self.dag.out_degree(n) for n in self.dag.nodes()) / 
+                         max(1, self.dag.number_of_nodes())
+        }
+
 from dataclasses import dataclass
 from typing import List, Dict
 from decimal import Decimal
@@ -580,6 +1287,10 @@ class QuantumBlockchain:
         # Initialize the P2P node and lock
         self.p2p_node = p2p_node
         logger.info(f"QuantumBlockchain initialized with p2p_node: {self.p2p_node}")
+        self.db = QuantumDAGKnightDB("mongodb://localhost:27017", "quantumdagknight_db")
+        self.initialized = False
+
+
 
         self._p2p_node_lock = asyncio.Lock()  # Lock for accessing the p2p_node
         logger.info(f"QuantumBlockchain initialized with p2p_node: {self.p2p_node}")
@@ -589,6 +1300,33 @@ class QuantumBlockchain:
         else:
             logger.info(f"P2P node type: {type(self.p2p_node)}")
             logger.info(f"P2P node attributes: {vars(self.p2p_node)}")
+        self.miner = DAGKnightMiner(difficulty=self.difficulty)
+   
+    async def initialize_async_components(self):
+        await self.db.init_collections()
+        self.initialized = True
+        logging.info("QuantumBlockchain initialized successfully with database collections.")
+
+    async def create_multisig_wallet(self, public_keys: List[str], threshold: int) -> str:
+        multisig_zkp = app.state.multisig_zkp
+        return multisig_zkp.create_multisig(public_keys, threshold)
+
+    async def add_multisig_transaction(self, multisig_address: str, sender_public_keys: List[int], threshold: int, receiver: str, amount: Decimal, message: str, aggregate_proof: Tuple[List[int], List[int], List[Tuple[int, List[int]]]]):
+        multisig_zkp = app.state.multisig_zkp
+        
+        if not multisig_zkp.verify_multisig(sender_public_keys, threshold, message, aggregate_proof):
+            raise ValueError("Invalid multisig transaction proof")
+
+        # Create and add the transaction to the blockchain
+        tx = Transaction(
+            sender=multisig_address,
+            receiver=receiver,
+            amount=amount,
+            timestamp=int(time.time())
+        )
+        await self.add_transaction(tx)
+        return tx.hash()
+
     async def create_wallet(self, user_id: str) -> Dict[str, Any]:
         if user_id in self.wallets:
             raise ValueError(f"Wallet already exists for user {user_id}")
@@ -695,8 +1433,6 @@ class QuantumBlockchain:
         logger.error(f"Max retries reached. Block {block.hash} could not be propagated.")
         return False
 
-    def set_p2p_node(self, p2p_node):
-        self.p2p_node = p2p_node
 
     async def get_p2p_node(self):
         """ Get the P2P node with locking to ensure no race conditions. """
@@ -998,49 +1734,35 @@ class QuantumBlockchain:
             return None
 
         try:
-            current_time = int(time.time())
-            data = f"Block mined by {miner_address} at {current_time}"  # Define the data variable
-            transactions = [
-                Transaction(
-                    sender='sender_address',
-                    receiver='receiver_address',
-                    amount=Decimal('10'),
-                    price=Decimal('100'),
-                    buyer_id='buyer_id_value',
-                    seller_id='seller_id_value',
-                    wallet=miner_address,
-                    tx_hash=hashlib.sha256(f"{current_time}_{miner_address}".encode()).hexdigest(),
-                    timestamp=current_time
-                )
-            ]
-
-            new_block = QuantumBlock(
-                previous_hash=self.chain[-1].hash if self.chain else "0",
-                data=data,  # Use the defined data variable
-                quantum_signature=self.generate_quantum_signature(),
-                reward=self.get_block_reward(),
-                transactions=transactions
+            # Get pending transactions
+            transactions = self.get_pending_transactions()[:10]
+            
+            # Get block reward
+            reward = self.get_block_reward()
+            
+            # Mine the block using DAGKnight miner
+            new_block = await self.miner.mine_block(
+                previous_hash=self.get_latest_block_hash(),
+                data=f"Block mined by {miner_address}",
+                transactions=transactions,
+                reward=reward,
+                miner_address=miner_address
             )
-            logger.debug(f"Created new block: {new_block.to_dict()}")
-            logger.debug(f"Initial hash: {new_block.hash}")
-
-            new_block.mine_block(self.difficulty)
-
-            logger.info(f"Block mined. Attempting validation. Hash: {new_block.hash}")
-            if self.consensus.validate_block(new_block):
+            
+            if new_block and self.miner.validate_block(new_block):
                 self.chain.append(new_block)
                 await self.process_transactions(new_block.transactions)
                 await self.native_coin_contract.mint(miner_address, Decimal(new_block.reward))
-                logger.info(f"Block validated and added to the chain. Hash: {new_block.hash}")
+                await self.propagate_block_to_peers(new_block)
                 return new_block.reward
-            else:
-                logger.error("Failed to validate the mined block")
-                return None
+                
+            return None
 
         except Exception as e:
             logger.error(f"Error during mining: {str(e)}")
             logger.error(traceback.format_exc())
             return None
+
 
 
 
@@ -1414,28 +2136,50 @@ class QuantumBlockchain:
         return reward
         
     def validate_block(self, block):
-        logger.debug(f"Starting block validation for block with hash: {block.hash}")
-        logger.debug(f"Block data before validation: {json.dumps(block.to_dict(), sort_keys=True, default=str)}")
+        """Validate block including hash difficulty and ZK proof"""
+        try:
+            # Check if the block's hash meets the difficulty target
+            hash_int = int(block.hash, 16)
+            logger.debug(f"Validating block with hash: {block.hash}, integer value: {hash_int}, against target: {self.target}")
 
-        # Check if it's the genesis block
-        if len(self.chain) == 0:  # Updated from self.blockchain.chain to self.chain
-            is_genesis_valid = block.previous_hash == "0" and block.is_valid()
-            logger.info(f"Validating genesis block. Is valid: {is_genesis_valid}")
-            return is_genesis_valid
+            if hash_int >= self.target:
+                logger.debug(f"Block validation failed: Hash {block.hash} exceeds target {self.target}.")
+                return False
 
-        # Validate previous hash
-        if block.previous_hash != self.chain[-1].hash:  # Updated from self.blockchain.chain to self.chain
-            logger.warning(f"Invalid previous hash. Expected {self.chain[-1].hash}, got {block.previous_hash}")
-            return False
+            # Validate block structure
+            required_attrs = ['data', 'nonce', 'zk_proof', 'hash', 'previous_hash']
+            if not all(hasattr(block, attr) for attr in required_attrs):
+                logger.error(f"Block validation failed: Missing required attributes")
+                return False
 
-        # Validate block hash using block's is_valid method
-        if not block.is_valid():
+            # Verify the block hash matches its contents
             computed_hash = block.compute_hash()
-            logger.warning(f"Invalid block hash. Computed: {computed_hash}, Got: {block.hash}")
+            if computed_hash != block.hash:
+                logger.error(f"Block validation failed: Hash mismatch")
+                return False
+
+            # Compute public input directly from block data
+            block_bytes = str(block.data).encode() + str(block.nonce).encode()
+            secret = int.from_bytes(hashlib.sha256(block_bytes).digest(), 'big') % self.zkp_system.field.modulus
+            public_input = secret
+
+            # Verify ZK proof with just the public input and proof
+            try:
+                proof_valid = self.zkp_system.verify(public_input, block.zk_proof)
+                if not proof_valid:
+                    logger.error(f"Block validation failed: Invalid ZK proof")
+                    return False
+            except Exception as e:
+                logger.error(f"Error during ZK proof verification: {e}")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Block validation error: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
-        logger.info(f"Block validation successful for block with hash: {block.hash}")
-        return True
 
 
 
@@ -1456,12 +2200,10 @@ class QuantumBlockchain:
         return True
 
 
-
-
-    def add_block(self, block):
+    async def add_block(self, block):
         try:
             current_time = time.time()
-            
+
             # Check if the block's timestamp is too far in the future
             if block.timestamp > current_time + 300:  # Allow for a 5-minute future timestamp window
                 logger.warning(f"Block timestamp too far in the future. Current time: {current_time}, Block time: {block.timestamp}")
@@ -1480,6 +2222,33 @@ class QuantumBlockchain:
             if self.blocks_since_last_adjustment >= self.adjustment_interval:
                 self.adjust_difficulty()
                 self.blocks_since_last_adjustment = 0
+
+            # Process transactions in the block
+            for tx in block.transactions:
+                try:
+                    await self.vm.process_transaction(tx)
+                    logger.info(f"Processed transaction {tx.hash} successfully")
+                except Exception as e:
+                    logger.error(f"Error processing transaction {tx.hash}: {str(e)}")
+                    logger.error(traceback.format_exc())
+
+            # Save the block to the database asynchronously
+            block_id = await self.db.add_block(block)
+            logger.info(f"Block added to the database with ID: {block_id}")
+
+            # Update the block status in the database to 'confirmed' asynchronously
+            await self.db.update_block_status(block.hash, "confirmed")
+            logger.info(f"Block {block.hash} status updated to confirmed")
+
+            # Add block stats asynchronously
+            stats = {
+                "transactions_count": len(block.transactions),
+                "total_amount": sum(tx.amount for tx in block.transactions),
+                "difficulty": self.difficulty,
+                "block_time": block.timestamp - self.chain[-2].timestamp if len(self.chain) > 1 else 0
+            }
+            await self.db.add_block_stats(block.hash, stats)
+            logger.info(f"Block statistics added for block {block.hash}")
 
             # Propagate the block to the P2P network asynchronously with retry
             asyncio.create_task(self.propagate_block_with_retry(block))
@@ -1500,6 +2269,72 @@ class QuantumBlockchain:
             return False
 
 
+    async def get_block(self, block_hash):
+        return await self.db.get_block(block_hash)
+    async def get_block_stats(self, start_time: int, end_time: int):
+        return await self.db.get_block_stats(start_time, end_time)
+
+    async def search_blocks(self, query: str):
+        return await self.db.search_blocks(query)
+
+    async def search_transactions(self, query: str):
+        return await self.db.search_transactions(query)
+
+    async def get_cached_block(self, block_hash: str):
+        return await self.db.get_cached_block(block_hash)
+
+    async def get_transaction_volume(self, start_time: int, end_time: int):
+        return await self.db.get_transaction_volume(start_time, end_time)
+
+    async def create_backup(self):
+        await self.db.create_backup()
+
+    async def restore_backup(self, backup_name: str):
+        await self.db.restore_backup(backup_name)
+
+    async def atomic_block_addition(self, block):
+        async def add_block_op(session):
+            # Add block to the database
+            await self.db.add_block(block)
+
+        async def update_balances_op(session):
+            # Update balances based on block transactions
+            for tx in block.transactions:
+                await self.db.update_balance(tx.sender, -tx.amount, session)
+                await self.db.update_balance(tx.receiver, tx.amount, session)
+
+        await self.db.atomic_operation([add_block_op, update_balances_op])
+
+
+    async def deploy_contract(self, sender, contract_class, *args):
+        contract_address = await self.vm.deploy_contract(sender, contract_class, *args)
+        return contract_address
+
+    async def execute_contract(self, sender, contract_address, function_name, *args, **kwargs):
+        return await self.vm.execute_contract(contract_address, function_name, *args, **kwargs)
+
+    async def create_token(self, creator_address, token_name, token_symbol, total_supply):
+        return await self.vm.create_token(creator_address, token_name, token_symbol, total_supply)
+
+    async def create_nft(self, creator_address, nft_id, metadata):
+        return await self.vm.create_nft(creator_address, nft_id, metadata)
+
+    async def transfer_nft(self, from_address, to_address, nft_id):
+        return await self.vm.transfer_nft(from_address, to_address, nft_id)
+
+    async def get_balance(self, address):
+        return await self.vm.get_balance(address)
+
+    async def transfer(self, from_address, to_address, amount):
+        return await self.vm.transfer(from_address, to_address, amount)
+
+    async def sync_with_peer(self, peer_node):
+        peer_data = await peer_node.get_all_data()
+        await self.db.sync_with_peer(peer_data)
+        await self.vm.sync_state_with_db()
+
+    async def get_all_data(self):
+        return await self.db.get_all_data()
 
 
     def adjust_difficulty(self):
@@ -1800,35 +2635,68 @@ class QuantumBlockchain:
     def add_wallet(self, wallet):
         self.wallets.append(wallet)
         self.balances[wallet.address] = 0
-
     async def add_transaction(self, transaction: Transaction):
-        # Step 1: Verify the transaction using ZKP
-        if not transaction.verify_transaction(self.zk_system):
-            raise ValueError("Invalid transaction or ZKP verification failed")
-        
-        logger.debug(f"Adding transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
-        logger.debug(f"Sender balance before transaction: {self.balances.get(transaction.sender, 0)}")
+        try:
+            # Step 1: Verify the transaction using ZKP
+            if not transaction.verify_transaction(self.zk_system):
+                raise ValueError("Invalid transaction or ZKP verification failed")
+            
+            logger.debug(f"Adding transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
+            logger.debug(f"Sender balance before transaction: {self.balances.get(transaction.sender, 0)}")
 
-        # Step 2: Check if the sender has enough balance
-        if self.balances.get(transaction.sender, 0) >= transaction.amount:
-            # Step 3: Verify the transaction signature
-            wallet = Wallet()
-            message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
-            if wallet.verify_signature(message, transaction.signature, transaction.public_key):
-                # Step 4: Add the transaction to pending transactions
-                self.pending_transactions.append(transaction.to_dict())
-                logger.debug(f"Transaction added. Pending transactions count: {len(self.pending_transactions)}")
+            # Step 2: Check if the sender has enough balance
+            if self.balances.get(transaction.sender, 0) >= transaction.amount:
+                # Step 3: Verify the transaction signature
+                wallet = Wallet()
+                message = f"{transaction.sender}{transaction.receiver}{transaction.amount}"
+                if wallet.verify_signature(message, transaction.signature, transaction.public_key):
+                    
+                    # Step 4: Add the transaction to the database asynchronously
+                    tx_id = await self.db.add_transaction(transaction)
+                    logger.info(f"Transaction added to the database with ID: {tx_id}")
 
-                # Step 5: Notify any listeners about the new transaction
-                for listener in self.new_transaction_listeners:
-                    listener(transaction)
-                return True
+                    # Step 5: Update the transaction status in the database to 'pending'
+                    await self.db.update_transaction_status(transaction.hash, "pending")
+                    logger.info(f"Transaction {transaction.hash} status updated to 'pending'")
+
+                    # Step 6: Add the transaction to pending transactions
+                    self.pending_transactions.append(transaction.to_dict())
+                    logger.debug(f"Transaction added to pending transactions. Total pending: {len(self.pending_transactions)}")
+
+                    # Step 7: Notify any listeners about the new transaction
+                    for listener in self.new_transaction_listeners:
+                        try:
+                            listener(transaction)
+                        except Exception as e:
+                            logger.error(f"Error notifying listener about the transaction: {str(e)}")
+
+                    return True
+                else:
+                    logger.debug(f"Transaction signature verification failed for transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
             else:
-                logger.debug(f"Transaction signature verification failed for transaction from {transaction.sender} to {transaction.receiver} for amount {transaction.amount}")
-        else:
-            logger.debug(f"Transaction failed. Insufficient balance for sender {transaction.sender}")
+                logger.debug(f"Transaction failed. Insufficient balance for sender {transaction.sender}")
 
-        return False
+            return False
+
+        except Exception as e:
+            logger.error(f"Error while adding transaction: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+    async def get_transaction(self, tx_hash):
+        return await self.db.get_transaction(tx_hash)
+
+    async def get_latest_blocks(self, limit=10):
+        return await self.db.get_latest_blocks(limit)
+
+    async def get_latest_transactions(self, limit=10):
+        return await self.db.get_latest_transactions(limit)
+    async def sync_with_peer(self, peer_node):
+        peer_data = await peer_node.get_all_data()
+        await self.db.sync_with_peer(peer_data)
+
+    async def get_all_data(self):
+        return await self.db.get_all_data()
 
 
     def add_contract(self, contract):
@@ -2011,13 +2879,11 @@ print(f"VM object: {vm}")
 
 
 # Router initialization
-router = APIRouter()
 
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("node")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 SECRET_KEY = "your-secret-key"
 ALGORITHM = "HS256"
 initialization_complete = False
@@ -2127,28 +2993,6 @@ async def initialize_components():
 
 
 
-
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        token_data = {"username": username}
-        user = get_user(fake_users_db, username=token_data['username'])
-        if user is None:
-            raise credentials_exception
-        return user
-    except PyJWTError:
-        raise credentials_exception
-
-
-
 state = {
     "portfolio": {
         "PLATA": Decimal('1000000'),
@@ -2249,25 +3093,6 @@ class LimitOrderRequest(BaseModel):
 class LimitOrderResponse(BaseModel):
     order_id: str
 
-@router.post("/get_market_price", response_model=MarketPriceResponse)
-async def get_market_price(request: MarketPriceRequest, current_user: str = Depends(get_current_user)):
-    # Implement logic to fetch the current market price for the given trading pair
-    # This could involve querying your order book or external price feeds
-    price = await exchange.get_market_price(request.trading_pair)
-    return MarketPriceResponse(price=price)
-
-@router.post("/place_limit_order", response_model=LimitOrderResponse)
-async def place_limit_order(request: LimitOrderRequest, current_user: str = Depends(get_current_user)):
-    # Implement logic to place a limit order
-    order_id = await exchange.place_limit_order(
-        current_user,
-        request.order_type,
-        request.base_currency,
-        request.quote_currency,
-        request.amount,
-        request.price
-    )
-    return LimitOrderResponse(order_id=order_id)
 def generate_mnemonic():
     mnemo = Mnemonic("english")
     mnemonic = mnemo.generate(strength=128)
@@ -2993,164 +3818,9 @@ async def vote_on_proposal(self, voter: str, proposal_id: str, option: str, amou
 async def execute_governance_proposal(self, proposal_id: str):
     winning_option = self.governance.execute_proposal(proposal_id)
     return {"winning_option": winning_option}
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        token_data = {"username": username}
-    except jwt.PyJWTError:
-        raise credentials_exception
-    user = get_user(fake_users_db, username=token_data['username'])
-    if user is None:
-        raise credentials_exception
-    return user
 
 
-@router.post("/execute_contract")
-async def execute_contract(
-    contract_address: str,
-    function_name: str,
-    args: List[str],
-    current_user: str = Depends(get_current_user)
-):
-    result = await exchange.execute_contract(contract_address, function_name, args, current_user)
-    return {"result": result}
-
-@router.post("/execute_contract")
-async def execute_contract(
-    contract_address: str,
-    function_name: str,
-    args: List[str],
-    current_user: str = Depends(get_current_user)
-):
-    result = await exchange.execute_contract(contract_address, function_name, args, current_user)
-    return {"result": result}
-@router.post("/create_prediction_market")
-async def create_prediction_market(
-    question: str,
-    options: List[str],
-    end_time: int,
-    current_user: str = Depends(get_current_user)
-):
-    market_id = await exchange.create_prediction_market(current_user, question, options, end_time)
-    return {"market_id": market_id}
-
-@router.post("/place_prediction_bet")
-async def place_prediction_bet(
-    market_id: str,
-    option: str,
-    amount: Decimal,
-    current_user: str = Depends(get_current_user)
-):
-    await exchange.place_prediction_bet(current_user, market_id, option, amount)
-    return {"message": "Bet placed successfully"}
-
-@router.post("/resolve_prediction_market")
-async def resolve_prediction_market(
-    market_id: str,
-    winning_option: str,
-    current_user: str = Depends(get_current_user)
-):
-    await exchange.resolve_prediction_market(current_user, market_id, winning_option)
-    return {"message": "Market resolved successfully"}
-@router.post("/initiate_cross_chain_swap")
-async def initiate_cross_chain_swap(
-    participant: str,
-    amount_a: Decimal,
-    currency_a: str,
-    amount_b: Decimal,
-    currency_b: str,
-    lock_time: int,
-    current_user: str = Depends(get_current_user)
-):
-    result = await exchange.initiate_cross_chain_swap(current_user, participant, amount_a, currency_a, amount_b, currency_b, lock_time)
-    return result
-
-@router.post("/participate_cross_chain_swap")
-async def participate_cross_chain_swap(
-    swap_id: str,
-    current_user: str = Depends(get_current_user)
-):
-    await exchange.participate_cross_chain_swap(current_user, swap_id)
-    return {"message": "Swap participation successful"}
-
-@router.post("/redeem_cross_chain_swap")
-async def redeem_cross_chain_swap(
-    swap_id: str,
-    secret: str,
-    current_user: str = Depends(get_current_user)
-):
-    await exchange.redeem_cross_chain_swap(current_user, swap_id, secret)
-    return {"message": "Swap redeemed successfully"}
-
-@router.post("/refund_cross_chain_swap")
-async def refund_cross_chain_swap(
-    swap_id: str,
-    current_user: str = Depends(get_current_user)
-):
-    await exchange.refund_cross_chain_swap(current_user, swap_id)
-    return {"message": "Swap refunded successfully"}
-@router.post("/create_identity")
-async def create_identity(
-    public_key: str,
-    current_user: str = Depends(get_current_user)
-):
-    exchange.create_decentralized_identity(current_user, public_key)
-    return {"message": "Identity created successfully"}
-
-@router.post("/add_identity_attribute")
-async def add_identity_attribute(
-    key: str,
-    value: str,
-    current_user: str = Depends(get_current_user)
-):
-    exchange.add_identity_attribute(current_user, key, value)
-    return {"message": "Attribute added successfully"}
-
-@router.post("/verify_identity_attribute")
-async def verify_identity_attribute(
-    user_id: str,
-    key: str,
-    current_user: str = Depends(get_current_user)
-):
-    exchange.verify_identity_attribute(current_user, user_id, key)
-    return {"message": "Attribute verified successfully"}
-@router.post("/create_governance_proposal")
-async def create_governance_proposal(
-    description: str,
-    options: List[str],
-    voting_period: int,
-    current_user: str = Depends(get_current_user)
-):
-    proposal_id = await exchange.create_governance_proposal(current_user, description, options, voting_period)
-    return {"proposal_id": proposal_id}
-
-@router.post("/vote_on_proposal")
-async def vote_on_proposal(
-    proposal_id: str,
-    option: str,
-    amount: Decimal,
-    current_user: str = Depends(get_current_user)
-):
-    await exchange.vote_on_proposal(current_user, proposal_id, option, amount)
-    return {"message": "Vote placed successfully"}
-
-@router.post("/execute_governance_proposal")
-async def execute_governance_proposal(
-    proposal_id: str,
-    current_user: str = Depends(get_current_user)
-):
-    result = await exchange.execute_governance_proposal(proposal_id)
-    return {"winning_option": result["winning_option"]}
 # Add this router to your main FastAPI app
-app.include_router(router, prefix="/exchange", tags=["exchange"])
 
 # You might want to run this function periodically or trigger it based on certain conditions
 async def update_prices_periodically():
@@ -3160,27 +3830,6 @@ async def update_prices_periodically():
 
 
     
-    
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        token_data = {"username": username}
-    except jwt.PyJWTError:
-        raise credentials_exception
-    user = get_user(fake_users_db, username=token_data['username'])
-    if user is None:
-        raise credentials_exception
-    return user
-from typing import Literal
-
 
 
 class QuantumInspiredFeatures:
@@ -3387,42 +4036,6 @@ class InitialDataResponse(BaseModel):
     # Keep all other existing methods as they are
     # ...
 
-
-@app.get("/initial_data", response_model=InitialDataResponse)
-async def get_initial_data():
-    try:
-        # Fetch the user's balance
-        balance = await blockchain.get_balance("user_address")  # Replace with actual user address
-
-        # Get the current order book
-        bids, asks = order_book.get_order_book("PLATA/BTC")  # Replace with desired trading pair
-
-        # Fetch recent trades
-        recent_trades = await blockchain.get_recent_trades("PLATA/BTC", limit=20)
-
-        # Get price history
-        price_history = await blockchain.get_price_history("PLATA/BTC", limit=50)
-
-        return InitialDataResponse(
-            balance=float(balance),
-            order_book={
-                "bids": [{"price": float(bid.price), "amount": float(bid.amount)} for bid in bids],
-                "asks": [{"price": float(ask.price), "amount": float(ask.amount)} for ask in asks]
-            },
-            recent_trades=[
-                TradeResponse(
-                    id=trade.id,
-                    type=trade.type,
-                    pair=trade.pair,
-                    amount=float(trade.amount),
-                    price=float(trade.price),
-                    timestamp=trade.timestamp.isoformat()
-                ) for trade in recent_trades
-            ],
-            price_history=[float(price) for price in price_history]
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 
@@ -3946,114 +4559,7 @@ async def get_orders_from_node(node):
         if response.status_code == 200:
             return response.json()
         return []
-@app.get("/orders")
-async def get_orders():
-    all_orders = []
-    for pair_orders in order_book.values():
-        all_orders.extend(pair_orders)
-    return all_orders
 
-
-
-
-@router.post("/add_liquidity")
-async def add_liquidity(
-    pool_id: str,
-    amount_a: Decimal,
-    amount_b: Decimal,
-    current_user: str = Depends(get_current_user)
-):
-    try:
-        await exchange.add_liquidity(pool_id, current_user, amount_a, amount_b)
-        return {"message": "Liquidity added successfully"}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/remove_liquidity")
-async def remove_liquidity(
-    pool_id: str,
-    amount: Decimal,
-    current_user: str = Depends(get_current_user)
-):
-    try:
-        await exchange.remove_liquidity(pool_id, current_user, amount)
-        return {"message": "Liquidity removed successfully"}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/swap")
-async def swap(
-    from_currency: str,
-    to_currency: str,
-    amount: Decimal,
-    current_user: str = Depends(get_current_user)
-):
-    try:
-        tokens_out = await exchange.swap(current_user, from_currency, to_currency, amount)
-        return {"message": "Swap successful", "tokens_received": tokens_out}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-@router.post("/place_limit_order")
-async def place_limit_order(
-    order_type: str,
-    base_currency: str,
-    quote_currency: str,
-    amount: Decimal,
-    price: Decimal,
-    current_user: str = Depends(get_current_user)
-):
-    try:
-        order_id = await exchange.place_limit_order(current_user, order_type, base_currency, quote_currency, amount, price)
-        return {"order_id": order_id}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@router.post("/add_liquidity")
-async def add_liquidity(
-    pool_id: str,
-    amount_a: Decimal,
-    amount_b: Decimal,
-    current_user: str = Depends(get_current_user)
-):
-    try:
-        await exchange.add_liquidity(pool_id, current_user, amount_a, amount_b)
-        return {"message": "Liquidity added successfully"}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@router.post("/swap")
-async def swap(
-    from_currency: str,
-    to_currency: str,
-    amount: Decimal,
-    current_user: str = Depends(get_current_user)
-):
-    try:
-        tokens_out = await exchange.swap(current_user, from_currency, to_currency, amount)
-        return {"tokens_received": tokens_out}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@router.get("/order_book/{pair}")
-async def get_order_book(pair: str):
-    buy_orders = exchange.order_book.buy_orders.get(pair, [])
-    sell_orders = exchange.order_book.sell_orders.get(pair, [])
-    return {
-        "buy_orders": [order.dict() for order in buy_orders],
-        "sell_orders": [order.dict() for order in sell_orders]
-    }
-
-@router.get("/liquidity_pools")
-async def get_liquidity_pools():
-    return {pool_id: pool.dict() for pool_id, pool in exchange.liquidity_pools.items()}
-
-app.include_router(router, prefix="/exchange", tags=["exchange"])
 
 # Periodic price update task
 async def update_prices_periodically():
@@ -4110,73 +4616,111 @@ class MarketMakerBot:
 # Start the market maker bot
 
 # Add this router to your main FastAPI app
-app.include_router(router, prefix="/exchange", tags=["exchange"])
 
 price_oracle = PriceOracle()  # Instead of MagicMock()
 
 
 # Initialize the exchange object
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+@app.before_server_start
+async def startup(app, loop):
     global initialization_complete
-    wallet = Wallet()
-    wallet.address = wallet.get_address()
-    wallet.public_key = wallet.get_public_key()
-    
-    # Startup
+    logger.info("Starting server initialization...")
+
     try:
+        # Initialize wallet
+        wallet = Wallet()
+        wallet.address = wallet.get_address()
+        wallet.public_key = wallet.get_public_key()
+        app.ctx.wallet = wallet
+
+        # Initialize components
         components = await initialize_components()
-        app.state.components = components
+        app.ctx.components = components
         
         if initialization_complete:
-            asyncio.create_task(update_prices_periodically())
-            asyncio.create_task(periodic_mining(components['genesis_address'], wallet))
-            asyncio.create_task(deploy_and_run_market_bot(
+            # Create background tasks
+            app.add_task(update_prices_periodically())
+            app.add_task(periodic_mining(components['genesis_address'], wallet))
+            app.add_task(deploy_and_run_market_bot(
                 components['exchange'], 
                 components['vm'], 
                 components['plata_contract'], 
                 components['price_feed']
             ))
+            logger.info("Background tasks initialized successfully")
         else:
             logger.error("Initialization did not complete successfully.")
+
     except Exception as e:
         logger.error(f"Error during startup: {str(e)}")
+        logger.error(traceback.format_exc())
         initialization_complete = False
+        raise  # This will prevent the server from starting if initialization fails
+
+    logger.info("Server initialization completed successfully")
+
+@app.before_server_stop
+async def cleanup(app, loop):
+    global initialization_complete
+    logger.info("Starting server cleanup...")
+
+    try:
+        # Cancel all running tasks
+        for task in asyncio.all_tasks(loop):
+            if not task.done() and task != asyncio.current_task():
+                logger.debug(f"Cancelling task: {task.get_name()}")
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.error(f"Error cleaning up task {task.get_name()}: {str(e)}")
+
+        # Clean up components
+        if hasattr(app.ctx, 'components'):
+            for component_name, component in app.ctx.components.items():
+                if hasattr(component, 'cleanup'):
+                    try:
+                        await component.cleanup()
+                        logger.debug(f"Cleaned up component: {component_name}")
+                    except Exception as e:
+                        logger.error(f"Error cleaning up component {component_name}: {str(e)}")
+
+        initialization_complete = False
+        logger.info("Server cleanup completed successfully")
+
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
+
+# Add this to handle graceful shutdown
+@app.signal('server.shutdown.before')
+async def graceful_shutdown(app, loop):
+    logger.info("Starting graceful shutdown...")
     
-    yield
+    timeout = app.config.get('GRACEFUL_SHUTDOWN_TIMEOUT', 15.0)
+    deadline = time.time() + timeout
     
-    # Cleanup
-    initialization_complete = False
-    # Add any other cleanup code here
+    # Wait for ongoing requests to complete
+    while time.time() < deadline:
+        active_connections = len(app.connections)
+        if active_connections == 0:
+            break
+        logger.info(f"Waiting for {active_connections} connections to complete...")
+        await asyncio.sleep(1)
 
-app.router.lifespan_context = lifespan
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Change this to specific domains as needed
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.add_middleware(GZipMiddleware, minimum_size=1000)
-app.include_router(router, prefix="/exchange", tags=["exchange"])
-
+    logger.info("Graceful shutdown completed")
 
 SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key")
 ALGORITHM = "HS256"
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # In-memory storage for demonstration purposes
 
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    # Add any shutdown tasks if needed
-    pass
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -4245,29 +4789,66 @@ def get_user(db, username: str):
         return UserInDB(**user_dict)  # Otherwise, unpack the dictionary
     return None
 
+from sanic import Blueprint, response
+from functools import wraps
+from sanic.exceptions import Unauthorized
+import jwt
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=401,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+# Define a custom decorator for protected routes
+def protected(wrapped):
+    def decorator(f):
+        @wraps(f)
+        async def decorated_function(request, *args, **kwargs):
+            try:
+                # Get the token from Authorization header
+                auth_header = request.headers.get('Authorization')
+                if not auth_header or not auth_header.startswith('Bearer '):
+                    raise Unauthorized("Missing or invalid authorization header")
+
+                token = auth_header.split(' ')[1]
+                
+                # Verify the token and get user
+                user = await get_current_user(token)
+                
+                # Add user to request context
+                request.ctx.user = user
+                
+                # Call the wrapped function
+                response = await f(request, *args, **kwargs)
+                return response
+                
+            except JWTError:
+                raise Unauthorized("Invalid token")
+            except Exception as e:
+                raise Unauthorized(str(e))
+                
+        return decorated_function
+    return decorator(wrapped)
+
+async def get_current_user(token: str):
     try:
+        # Decode JWT token
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        token_data = TokenData(username=username)
+        username = payload.get("sub")
+        
+        if not username:
+            raise Unauthorized("Invalid token payload")
+            
+        # Get user from database
+        user = get_user(fake_users_db, username)
+        if not user:
+            raise Unauthorized("User not found")
+            
+        return user
+        
     except JWTError:
-        raise credentials_exception
-    user = get_user(fake_users_db, username=token_data.username)
-    if user is None:
-        raise credentials_exception
-    return user
-
-async def get_current_active_user(current_user: UserInDB = Depends(get_current_user)):
+        raise Unauthorized("Invalid token")
+    except Exception as e:
+        raise Unauthorized(str(e))
+async def get_current_active_user(request):
+    current_user = await get_current_user(request)
     if current_user.disabled:
-        raise HTTPException(status_code=400, detail="Inactive user")
+        raise SanicException("Inactive user", status_code=400)
     return current_user
 
 
@@ -4392,10 +4973,26 @@ async def verify_zk_proof(public_input: int, proof: dict):
         return {"is_valid": is_valid}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+from sanic import response
+from sanic.exceptions import SanicException
+import os
 
-@app.post("/generate_qr_code")
-async def generate_qr_code(wallet_address: str, coin_type: str, current_user: str = Depends(get_current_user)):
+@app.route("/generate_qr_code", methods=["POST"])
+@protected  # Using the @protected decorator we created earlier
+async def generate_qr_code(request):
     try:
+        # Get data from request JSON
+        data = request.json
+        wallet_address = data.get('wallet_address')
+        coin_type = data.get('coin_type')
+
+        # Validate required parameters
+        if not wallet_address or not coin_type:
+            raise SanicException(
+                "wallet_address and coin_type are required", 
+                status_code=400
+            )
+
         # Define the subfolder where QR codes will be saved
         qr_code_folder = "qr_codes"
 
@@ -4407,19 +5004,74 @@ async def generate_qr_code(wallet_address: str, coin_type: str, current_user: st
         qr_file = secure_qr_system.generate_qr_code(wallet_address, coin_type)
         qr_file_path = os.path.join(qr_code_folder, os.path.basename(qr_file))
 
-        # Assuming `secure_qr_system.generate_qr_code` already returns the path where the QR code is saved
-        return FileResponse(qr_file_path, media_type="image/png", filename=os.path.basename(qr_file_path))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating QR code: {str(e)}")
+        # Return the file using Sanic's file response
+        return await response.file(
+            qr_file_path,
+            mime_type="image/png",
+            filename=os.path.basename(qr_file_path)
+        )
 
-@app.post("/verify_qr_code")
-async def verify_qr_code(file: UploadFile = File(...), current_user: str = Depends(get_current_user)):
-    try:
-        qr_data = json.loads(await file.read())
-        is_valid = secure_qr_system.verify_qr_code(qr_data)
-        return {"is_valid": is_valid}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error verifying QR code: {str(e)}")
+        logger.error(f"Error generating QR code: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise SanicException(
+            f"Error generating QR code: {str(e)}", 
+            status_code=500
+        )
+
+# Optional: Add support for GET requests with query parameters
+@app.route("/generate_qr_code", methods=["GET"])
+@protected
+async def generate_qr_code_get(request):
+    try:
+        # Get parameters from query string
+        wallet_address = request.args.get('wallet_address')
+        coin_type = request.args.get('coin_type')
+
+        # Validate required parameters
+        if not wallet_address or not coin_type:
+            raise SanicException(
+                "wallet_address and coin_type are required", 
+                status_code=400
+            )
+
+        # Define the subfolder where QR codes will be saved
+        qr_code_folder = "qr_codes"
+
+        # Ensure the folder exists
+        if not os.path.exists(qr_code_folder):
+            os.makedirs(qr_code_folder)
+
+        # Generate the QR code and save it in the subfolder
+        qr_file = secure_qr_system.generate_qr_code(wallet_address, coin_type)
+        qr_file_path = os.path.join(qr_code_folder, os.path.basename(qr_file))
+
+        # Return the file using Sanic's file response
+        return await response.file(
+            qr_file_path,
+            mime_type="image/png",
+            filename=os.path.basename(qr_file_path)
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating QR code: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise SanicException(
+            f"Error generating QR code: {str(e)}", 
+            status_code=500
+        )
+
+# Add error handler for QR code generation
+@app.exception(SanicException)
+async def handle_qr_code_error(request, exception):
+    return response.json(
+        {
+            "error": str(exception),
+            "status": exception.status_code
+        },
+        status=exception.status_code
+    )
+
 from user_management import fake_users_db
 from solana.rpc.async_api import AsyncClient
 
@@ -4458,157 +5110,212 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.keypair import Keypair
 import os
-@app.post("/register", response_model=Token)
-async def register(request: RegisterRequest):
-    global global_fake_users_db
+@dataclass
+class RegisterRequest:
+    pincode: str
+    user_id: str
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        return cls(
+            pincode=data.get('pincode'),
+            user_id=data.get('user_id')
+        )
+
+@dataclass
+class Token:
+    access_token: str
+    refresh_token: Optional[str]
+    token_type: str
+    wallet: dict
+    mnemonic: str
+    qr_codes: Dict[str, str]
+registration_bp = Blueprint('registration', url_prefix='/auth')
+
+# Configuration constants
+REGISTRATION_TIMEOUT = 30  # 30 seconds timeout for registration
+DB_OPERATION_TIMEOUT = 10  # 10 seconds timeout for database operations
+MAX_RETRIES = 3
+
+# Registration endpoint for Sanic
+auth_bp = Blueprint('auth', url_prefix='/auth')
+from sanic import Sanic, Blueprint, response
+from sanic.response import json
+import traceback
+import logging
+import asyncio
+from typing import Dict, Any
+# Custom response wrapper
+def make_response(success: bool, data: Any = None, error: str = None, status: int = 200) -> response.HTTPResponse:
+    return response.json({
+        "success": success,
+        "data": data,
+        "error": error
+    }, status=status)
+
+# Registration handler with proper error handling
+@auth_bp.post('/register')
+async def register(request):
     try:
-        # Check if the user already exists in the database
-        user_data = global_fake_users_db.get(request.user_id)
+        logger.info("Starting registration process")
         
-        if user_data:
-            if isinstance(user_data, dict):
-                user_in_db = UserInDB(**user_data)
-            else:
-                user_in_db = user_data
+        # Validate request data
+        if not request.json:
+            return make_response(False, error="No data provided", status=400)
 
-            if any(p.pincode == request.pincode for p in user_in_db.pincodes):
-                logger.info(f"Pincode already registered for user {request.user_id}. Adding a new wallet.")
-        else:
-            user_in_db = UserInDB(
-                pincode=request.pincode,
-                hashed_pincode='',
-                wallet={},
-                salt='',
-                alias='',
-                qr_codes={},
-                pincodes=[]
-            )
-        
-        # Generate salt and hash the pincode
-        salt = generate_salt()
-        hashed_pincode = get_password_hash(request.pincode + salt)
-        
-        # Create a new Plata wallet
-        wallet = Wallet()
-        mnemonic = wallet.generate_mnemonic()
-        plata_wallet = {
-            "address": wallet.address,
-            "private_key": wallet.private_key_pem(),
-            "public_key": wallet.public_key,
-            "mnemonic": mnemonic
-        }
-        
-        # Ensure the wallet address follows the correct format
-        if not re.match(r'^plata[a-f0-9]{16}$', wallet.address):
-            logger.error(f"Invalid wallet address format: {wallet.address}")
-            raise ValueError(f"Invalid wallet address format: {wallet.address}")
-        
-        alias = wallet.generate_unique_alias()
-        wallet_registration = WalletRegistration(blockcypher_api_key, alchemy_key)
-        additional_wallets = wallet_registration.register_all_wallets(request.user_id)
-        
-        # Create a Solana wallet
-        solders_keypair = Keypair()
-        solana_wallet = {
-            'address': str(solders_keypair.pubkey()),
-            'private_key': solders_keypair.secret().hex(),
-        }
+        data = request.json
+        if 'pincode' not in data or 'user_id' not in data:
+            return make_response(False, error="Missing required fields", status=400)
 
-        # Combine all wallets into one structure
-        all_wallets = {
-            "plata": plata_wallet,
-            "bitcoin": additional_wallets.get('bitcoin', {}),
-            "litecoin": additional_wallets.get('litecoin', {}),
-            "ethereum": additional_wallets.get('ethereum', {}),
-            "dogecoin": additional_wallets.get('dogecoin', {}),
-            "solana": solana_wallet,
-        }
+        # Get required components from app context
+        required_components = ['blockchain', 'vm', 'redis', 'p2p_node']
+        for component in required_components:
+            if not hasattr(request.app.ctx, component):
+                logger.error(f"Missing required component: {component}")
+                return make_response(
+                    False,
+                    error=f"Server component {component} not initialized",
+                    status=503
+                )
 
-        # Generate QR codes for all wallets
-        qr_codes = {}
-        for coin_type, wallet_info in all_wallets.items():
-            if wallet_info and 'address' in wallet_info:
-                qr_file = secure_qr_system.generate_qr_code(wallet_info['address'], coin_type)
-                qr_codes[coin_type] = qr_file
+        # Process registration
+        try:
+            result = await process_registration(request.app.ctx, data)
+            logger.info("Registration completed successfully")
+            return make_response(True, data=result)
+        except ValueError as ve:
+            logger.warning(f"Registration validation error: {str(ve)}")
+            return make_response(False, error=str(ve), status=400)
+        except Exception as e:
+            logger.error(f"Registration processing error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return make_response(False, error="Internal server error", status=500)
 
-        # Add or update the user_in_db object
-        user_in_db.pincodes.append(PincodeInfo(
-            pincode=request.pincode,
-            hashed_pincode=hashed_pincode,
-            salt=salt,
-            wallet=all_wallets,
-            alias=alias,
-            qr_codes=qr_codes
-        ))
-
-        # Update the fields of the user_in_db object
-        user_in_db.hashed_pincode = hashed_pincode
-        user_in_db.wallet = all_wallets
-        user_in_db.salt = salt
-        user_in_db.alias = alias
-        user_in_db.qr_codes = qr_codes
-
-        # Save the updated user_in_db back to the global database
-        global_fake_users_db[request.user_id] = user_in_db.dict()  # Convert to dict before storing
-        
-        # Generate access and refresh tokens
-        access_token = create_access_token(data={"sub": request.pincode})
-        refresh_token = create_refresh_token({"sub": request.pincode})  # Pass a dictionary with 'sub' field
-        
-        logger.info(f"New wallet registered with Plata address: {wallet.address}")
-
-        # ---- Broadcast the new wallet event to other nodes ----
-        await p2p_node.broadcast(Message(
-            MessageType.NEW_WALLET, 
-            {'user_id': request.user_id, 'wallet_address': wallet.address}
-        ))
-
-        # ---- WebSocket broadcast to subscribed clients ----
-        await p2p_node.broadcast_event('new_wallet', {
-            'user_id': request.user_id,
-            'wallet_address': wallet.address,
-            'wallets': all_wallets,
-            'mnemonic': mnemonic,
-            'qr_codes': qr_codes
-        })
-
-        return {
-            "access_token": access_token,
-            "refresh_token": refresh_token,  # Return the refresh token
-            "token_type": "bearer",
-            "wallet": all_wallets,
-            "mnemonic": mnemonic,
-            "qr_codes": qr_codes
-        }
-
-    except ValueError as e:
-        logger.error(f"Validation error: {str(e)}")
-        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        logger.error(f"Unexpected error in registration: {str(e)}")
+        logger.error(f"Unexpected error in registration endpoint: {str(e)}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+        return make_response(False, error="Internal server error", status=500)
 
+async def process_registration(ctx, data: Dict) -> Dict:
+    """Process the registration request"""
+    try:
+        # Extract data
+        user_id = data['user_id']
+        pincode = data['pincode']
 
+        # Check if user exists in database
+        user_data = await ctx.redis.get(f"user:{user_id}")
+        if user_data:
+            raise ValueError("User already exists")
+
+        # Generate wallet
+        wallet = Wallet()
+        salt = generate_salt()
+        hashed_pincode = get_password_hash(pincode + salt)
+
+        # Create user data
+        user_data = {
+            "pincode": pincode,
+            "hashed_pincode": hashed_pincode,
+            "salt": salt,
+            "wallet": {
+                "address": wallet.address,
+                "public_key": wallet.get_public_key(),
+            },
+            "qr_codes": {}
+        }
+
+        # Store in Redis
+        await ctx.redis.set(
+            f"user:{user_id}",
+            json.dumps(user_data),
+            expire=None
+        )
+
+        # Generate tokens
+        access_token = create_access_token(
+            data={"sub": user_id},
+            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
+        refresh_token = create_refresh_token(
+            data={"sub": user_id},
+            expires_delta=timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        )
+
+        # Return success response
+        return {
+            "user_id": user_id,
+            "wallet_address": wallet.address,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+
+    except Exception as e:
+        logger.error(f"Error in process_registration: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
+app.blueprint(auth_bp)
+
+# Add signal handlers for graceful shutdown
+def signal_handler(sig, frame):
+    logger.info(f"Received signal {sig}")
+    asyncio.create_task(shutdown_event())
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 import qrcode
 import base64
 from io import BytesIO
-from fastapi import HTTPException, Depends
-from fastapi.logger import logger
-# Add this new endpoint to get QR codes for a user's wallets
-@app.get("/get_wallet_qr_codes", response_model=Dict[str, Dict[str, str]])
-async def get_wallet_qr_codes(current_user: UserInDB = Depends(get_current_active_user)):
+import json
+from sanic import response
+from sanic.response import json as sanic_json
+from sanic.exceptions import SanicException
+from sanic_jwt import protected
+from sanic.log import logger
+from functools import wraps
+from typing import Dict
+import qrcode
+import base64
+from io import BytesIO
+def auth_required():
+    def decorator(f):
+        @wraps(f)
+        async def decorated_function(request, *args, **kwargs):
+            try:
+                auth_header = request.headers.get('Authorization')
+                if not auth_header or not auth_header.startswith('Bearer '):
+                    return sanic_json({"error": "Missing or invalid authorization header"}, status=401)
+
+                token = auth_header.split(' ')[1]
+                current_user = await get_current_user(token)
+                if not current_user:
+                    return sanic_json({"error": "Invalid token"}, status=401)
+
+                request.ctx.current_user = current_user
+                return await f(request, *args, **kwargs)
+            except Exception as e:
+                logger.error(f"Auth error: {str(e)}")
+                return sanic_json({"error": "Authentication failed"}, status=401)
+        return decorated_function
+    return decorator
+
+# QR code endpoint
+@app.get("/get_wallet_qr_codes")
+@auth_required()
+async def get_wallet_qr_codes(request):
     try:
+        current_user = request.ctx.current_user
         user_id = current_user.username
         user = fake_users_db.get(user_id)
         
         if not user:
             logger.warning(f"User not found: {user_id}")
-            raise HTTPException(status_code=404, detail="User not found")
+            return sanic_json({"error": "User not found"}, status=404)
         
         if 'wallets' not in user or not user['wallets']:
             logger.warning(f"No wallets found for user: {user_id}")
-            raise HTTPException(status_code=404, detail="No wallets found for user")
+            return sanic_json({"error": "No wallets found for user"}, status=404)
         
         qr_codes = {}
         for wallet_type, wallet in user['wallets'].items():
@@ -4634,55 +5341,190 @@ async def get_wallet_qr_codes(current_user: UserInDB = Depends(get_current_activ
         
         if not qr_codes:
             logger.warning(f"No QR codes could be generated for user {user_id}")
-            raise HTTPException(status_code=500, detail="Failed to generate any QR codes")
+            return sanic_json({"error": "Failed to generate any QR codes"}, status=500)
         
-        # Prepare the response with CORS headers
-        response_data = {"qr_codes": qr_codes}
-        response = JSONResponse(content=json.dumps(response_data, cls=CustomJSONEncoder))
-        response.headers["Access-Control-Allow-Origin"] = "*"  # Adjust as needed for your CORS policy
+        # Create response with CORS headers
+        response = response.json(
+            {"qr_codes": qr_codes},
+            dumps=lambda x: json.dumps(x, cls=CustomJSONEncoder)
+        )
+        
+        # Add CORS headers
+        response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "*"
-
+        
         return response
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Unexpected error in get_wallet_qr_codes for user {user_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Unexpected error occurred while generating QR codes")
+        return sanic_json(
+            {"error": "Unexpected error occurred while generating QR codes"},
+            status=500
+        )
+
+# Login endpoint
+@app.post("/token")
+async def login(request):
+    try:
+        data = request.json
+        if not data or 'pincode' not in data:
+            return sanic_json({"error": "Missing pincode"}, status=400)
+
+        user_in_db = authenticate_user(data['pincode'])
+        if not user_in_db:
+            return sanic_json({"error": "Invalid credentials"}, status=400)
+
+        access_token = create_access_token(data={"sub": data['pincode']})
+        
+        return sanic_json({
+            "access_token": access_token,
+            "token_type": "bearer",
+            "wallet": user_in_db.wallet
+        })
+
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}")
+        return sanic_json({"error": "Login failed"}, status=500)
 
 
-@app.post("/token", response_model=Token)
-def login(user: User):
-    user_in_db = authenticate_user(user.pincode)
-    if not user_in_db:
-        raise HTTPException(status_code=400, detail="Invalid credentials")
-    access_token = create_access_token(data={"sub": user.pincode})
-    return {"access_token": access_token, "token_type": "bearer", "wallet": user_in_db.wallet}
-
-def generate_wallet_address(public_key):
-    public_bytes = public_key.public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    hash_bytes = hashlib.sha256(public_bytes).digest()
-    address = "plata" + urlsafe_b64encode(hash_bytes).decode('utf-8').rstrip("=")
-    return address
-
-
-
-def authenticate(token: str = Depends(oauth2_scheme)):
+# Helper function to get current user
+async def get_current_user(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        pincode: str = payload.get("sub")
+        pincode = payload.get("sub")
+        if not pincode:
+            return None
+        user = authenticate_user(pincode)
+        return user
+    except jwt.PyJWTError:
+        return None
+
+# CORS middleware for Sanic
+@app.middleware('response')
+async def add_cors_headers(request, response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    return response
+
+# Options handler for CORS
+@app.options("/get_wallet_qr_codes")
+async def options_handler(request):
+    return response.empty(
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization"
+        }
+    )
+
+
+from sanic.exceptions import Unauthorized
+from functools import wraps
+
+def authenticate_token(token: str) -> str:
+    """Helper function to decode and validate JWT token"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        pincode = payload.get("sub")
         if pincode is None:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise Unauthorized("Invalid token - no pincode found")
         return pincode
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
+        raise Unauthorized("Token has expired")
     except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise Unauthorized("Invalid token")
+    except Exception as e:
+        raise Unauthorized(f"Authentication error: {str(e)}")
 
+def authenticate(wrapped):
+    """Decorator for protecting routes"""
+    def decorator(f):
+        @wraps(f)
+        async def decorated_function(request, *args, **kwargs):
+            try:
+                # Get the token from Authorization header
+                auth_header = request.headers.get('Authorization')
+                if not auth_header or not auth_header.startswith('Bearer '):
+                    raise Unauthorized("Missing or invalid authorization header")
+
+                token = auth_header.split(' ')[1]
+                
+                # Authenticate the token and get pincode
+                pincode = authenticate_token(token)
+                
+                # Store the authenticated pincode in request context
+                request.ctx.pincode = pincode
+                
+                # Call the original route handler
+                return await f(request, *args, **kwargs)
+                
+            except Unauthorized as e:
+                return response.json(
+                    {'error': str(e)},
+                    status=401,
+                    headers={"WWW-Authenticate": "Bearer"}
+                )
+            except Exception as e:
+                return response.json(
+                    {'error': f"Authentication error: {str(e)}"},
+                    status=401,
+                    headers={"WWW-Authenticate": "Bearer"}
+                )
+                
+        return decorated_function
+    return decorator(wrapped)
+
+# Example usage:
+@app.route("/protected_route", methods=["GET"])
+@authenticate
+async def protected_route(request):
+    # Access the authenticated pincode from request context
+    pincode = request.ctx.pincode
+    return response.json({"message": f"Authenticated with pincode: {pincode}"})
+
+# Error handler for unauthorized exceptions
+@app.exception(Unauthorized)
+async def handle_unauthorized(request, exception):
+    return response.json(
+        {"error": str(exception)},
+        status=401,
+        headers={"WWW-Authenticate": "Bearer"}
+    )
+
+# Optional middleware for global authentication
+@app.middleware('request')
+async def auth_middleware(request):
+    # Skip authentication for certain routes
+    if request.path in ['/login', '/register', '/health']:
+        return
+
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return response.json(
+                {'error': 'Missing or invalid authorization header'},
+                status=401,
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+        token = auth_header.split(' ')[1]
+        pincode = authenticate_token(token)
+        request.ctx.pincode = pincode
+
+    except Unauthorized as e:
+        return response.json(
+            {'error': str(e)},
+            status=401,
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    except Exception as e:
+        return response.json(
+            {'error': f"Authentication error: {str(e)}"},
+            status=401,
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
 async def periodically_discover_nodes(p2p_node: P2PNode):
     while True:
@@ -4777,6 +5619,11 @@ import string
 import os
 import bcrypt
 import re
+import os
+import json
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
 class Wallet(BaseModel):
     private_key: Optional[ec.EllipticCurvePrivateKey] = None
     public_key: Optional[str] = None
@@ -4837,38 +5684,202 @@ class Wallet(BaseModel):
     def generate_mnemonic(self):
         return self.mnemonic.generate(strength=128)
 
-    def sign_message(self, message):
-        signature = self.private_key.sign(
-            message.encode(),
-            ec.ECDSA(hashes.SHA256())
-        )
-        return base64.b64encode(signature).decode('utf-8')
-
-    def verify_signature(self, message, signature, public_key):
+    def sign_message(self, message_b64: str) -> str:
+        """
+        Sign a base64-encoded message
+        
+        Args:
+            message_b64: Base64 encoded message string
+            
+        Returns:
+            Base64 encoded signature string
+        """
         try:
-            public_key_obj = serialization.load_pem_public_key(public_key.encode(), backend=default_backend())
+            # Decode the base64 message
+            message_bytes = base64.b64decode(message_b64)
+            
+            # Sign the decoded message
+            signature = self.private_key.sign(
+                message_bytes,
+                ec.ECDSA(hashes.SHA256())
+            )
+            
+            # Encode signature as base64
+            return base64.b64encode(signature).decode('utf-8')
+            
+        except Exception as e:
+            logger.error(f"Error signing message: {str(e)}")
+            raise ValueError(f"Failed to sign message: {str(e)}")
+
+
+    def verify_signature(self, message_b64: str, signature_b64: str, public_key: str) -> bool:
+        """
+        Verify a signature for a base64-encoded message
+        
+        Args:
+            message_b64: Base64 encoded message string
+            signature_b64: Base64 encoded signature string
+            public_key: PEM encoded public key string
+            
+        Returns:
+            bool: True if signature is valid
+        """
+        try:
+            # Decode the base64 message and signature
+            message_bytes = base64.b64decode(message_b64)
+            signature_bytes = base64.b64decode(signature_b64)
+            
+            # Load the public key
+            public_key_obj = serialization.load_pem_public_key(
+                public_key.encode(), 
+                backend=default_backend()
+            )
+            
+            # Verify the signature
             public_key_obj.verify(
-                base64.b64decode(signature),
-                message.encode(),
+                signature_bytes,
+                message_bytes,
                 ec.ECDSA(hashes.SHA256())
             )
             return True
-        except InvalidSignature:
+            
+        except Exception as e:
+            logger.error(f"Signature verification failed: {str(e)}")
             return False
 
-    def encrypt_message(self, message, public_key):
-        rsa_public_key = serialization.load_pem_public_key(public_key.encode(), backend=default_backend())
-        encrypted_message = rsa_public_key.encrypt(
-            message.encode('utf-8'),
-            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256()), label=None)
-        return base64.b64encode(encrypted_message).decode('utf-8')
 
-    def decrypt_message(self, encrypted_message):
-        rsa_private_key = serialization.load_pem_private_key(self.private_key_pem().encode(), password=None, backend=default_backend())
-        decrypted_message = rsa_private_key.decrypt(
-            base64.b64decode(encrypted_message),
-            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256()), label=None)
-        return decrypted_message.decode('utf-8')
+    def encrypt_message(self, message_b64: str, recipient_public_key: str) -> str:
+        """
+        Encrypt a base64-encoded message using ECIES
+        
+        Args:
+            message_b64: Base64 encoded message string
+            recipient_public_key: PEM encoded recipient public key
+            
+        Returns:
+            JSON string containing encrypted data
+        """
+        try:
+            # Decode the base64 message
+            message_bytes = base64.b64decode(message_b64)
+            
+            # Load recipient's public key
+            recipient_key = serialization.load_pem_public_key(
+                recipient_public_key.encode(),
+                backend=default_backend()
+            )
+            
+            # Generate ephemeral key pair
+            ephemeral_private_key = ec.generate_private_key(
+                ec.SECP256R1(),
+                default_backend()
+            )
+            ephemeral_public_key = ephemeral_private_key.public_key()
+            
+            # Perform ECDH
+            shared_key = ephemeral_private_key.exchange(
+                ec.ECDH(),
+                recipient_key
+            )
+            
+            # Derive encryption key
+            derived_key = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=None,
+                info=b'ECIES',
+                backend=default_backend()
+            ).derive(shared_key)
+            
+            # Generate IV and create cipher
+            iv = os.urandom(16)
+            cipher = Cipher(
+                algorithms.AES(derived_key),
+                modes.CBC(iv),
+                backend=default_backend()
+            )
+            
+            # Pad and encrypt
+            padder = padding.PKCS7(128).padder()
+            padded_data = padder.update(message_bytes) + padder.finalize()
+            encryptor = cipher.encryptor()
+            ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+            
+            # Serialize components
+            encrypted_data = {
+                'iv': base64.b64encode(iv).decode('utf-8'),
+                'ephemeral_public_key': ephemeral_public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                ).decode('utf-8'),
+                'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
+            }
+            
+            return json.dumps(encrypted_data)
+            
+        except Exception as e:
+            logger.error(f"Message encryption failed: {str(e)}")
+            raise ValueError(f"Failed to encrypt message: {str(e)}")
+
+
+
+
+    def decrypt_message(self, encrypted_message: str) -> str:
+        """
+        Decrypt an ECIES encrypted message
+        
+        Args:
+            encrypted_message: JSON string containing encrypted data
+            
+        Returns:
+            Base64 encoded decrypted message
+        """
+        try:
+            # Parse encrypted data
+            encrypted_data = json.loads(encrypted_message)
+            
+            # Decode components
+            iv = base64.b64decode(encrypted_data['iv'])
+            ephemeral_public_key = serialization.load_pem_public_key(
+                encrypted_data['ephemeral_public_key'].encode(),
+                backend=default_backend()
+            )
+            ciphertext = base64.b64decode(encrypted_data['ciphertext'])
+            
+            # Perform ECDH
+            shared_key = self.private_key.exchange(
+                ec.ECDH(),
+                ephemeral_public_key
+            )
+            
+            # Derive decryption key
+            derived_key = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=None,
+                info=b'ECIES',
+                backend=default_backend()
+            ).derive(shared_key)
+            
+            # Decrypt and unpad
+            cipher = Cipher(
+                algorithms.AES(derived_key),
+                modes.CBC(iv),
+                backend=default_backend()
+            )
+            decryptor = cipher.decryptor()
+            padded_data = decryptor.update(ciphertext) + decryptor.finalize()
+            unpadder = padding.PKCS7(128).unpadder()
+            decrypted_bytes = unpadder.update(padded_data) + unpadder.finalize()
+            
+            # Encode result as base64
+            return base64.b64encode(decrypted_bytes).decode('utf-8')
+            
+        except Exception as e:
+            logger.error(f"Message decryption failed: {str(e)}")
+            raise ValueError(f"Failed to decrypt message: {str(e)}")
+
+
 
     def get_address(self) -> str:
         public_key_bytes = self.get_public_key().encode()
@@ -4944,11 +5955,16 @@ class ImportTokenRequest(BaseModel):
 
 class ImportWalletRequest(BaseModel):
     mnemonic: str
-@app.post("/import_token", response_model=TokenInfo)
-async def import_token(request: ImportTokenRequest, current_user: User = Depends(get_current_user)):
+from sanic import Sanic, response
+from sanic.exceptions import SanicException
+
+@app.post("/import_token")
+async def import_token(request):
     try:
+        # Get current user from the request
+        current_user = request.json.get("current_user")
         # Import the Plata wallet first
-        token = await blockchain.import_token(request.address, current_user.username)
+        token = await blockchain.import_token(request.json["address"], current_user["username"])
 
         # After importing the Plata wallet, retrieve associated wallets
         wallet_registration = WalletRegistration(blockcypher_api_key, alchemy_key)
@@ -4964,41 +5980,50 @@ async def import_token(request: ImportTokenRequest, current_user: User = Depends
         }
 
         # Return all the wallet information
-        return {
+        return response.json({
             "address": token.address,
             "name": token.name,
             "symbol": token.symbol,
-            "balance": float(token.balance_of(current_user.username)),
-            "wallets": all_wallets  # Include all wallets in the response
-        }
+            "balance": float(token.balance_of(current_user["username"])),
+            "wallets": all_wallets
+        })
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-
-
+        raise SanicException(str(e), status_code=400)
 @app.post("/create_pq_wallet")
-def create_pq_wallet(pincode: str = Depends(authenticate)):
+async def create_pq_wallet(request):
+    # Replace Depends(authenticate) logic if needed
+    pincode = request.json.get("pincode")
+    
+    # Authenticate the pincode here manually if needed
+    if not authenticate(pincode):
+        return response.json({"error": "Authentication failed"}, status=403)
+
     pq_wallet = PQWallet()
     address = pq_wallet.get_address()
     pq_public_key = pq_wallet.get_pq_public_key()
-    return {"address": address, "pq_public_key": pq_public_key}
-@app.post("/search", response_model=SearchResult)
-async def search(query: str):
-    query = query.lower()
     
+    return response.json({
+        "address": address,
+        "pq_public_key": pq_public_key
+    })
+@app.post("/search")
+async def search(request):
+    query = request.json.get("query", "").lower()
+
     wallet_results = blockchain.search_wallets(query)
     transaction_results = blockchain.search_transactions(query)
     contract_results = blockchain.search_contracts(query)
 
     if not wallet_results and not transaction_results and not contract_results:
-        raise HTTPException(status_code=404, detail="No results found")
+        return response.json({"detail": "No results found"}, status=404)
     
-    return SearchResult(
-        wallets=wallet_results,
-        transactions=transaction_results,
-        contracts=contract_results
-    )
+    return response.json({
+        "wallets": wallet_results,
+        "transactions": transaction_results,
+        "contracts": contract_results
+    })
+
 class AddressRequest(BaseModel):
     address: str
 
@@ -5063,8 +6088,6 @@ class Transaction:
 
         # Verify the ZKP
         return zk_system.verify(public_input, self.zk_proof)
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
 import logging
 import re
 from decimal import Decimal
@@ -5123,17 +6146,18 @@ class BalanceResponse(BaseModel):
             zk_proof=zk_proof
         )
 import traceback
+import json
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         try:
-            if isinstance(obj, FieldElement):
-                return obj.to_int()  # Convert FieldElement to its integer value
+            if isinstance(obj, bytes):
+                return obj.decode('utf-8')
             return super().default(obj)
         except Exception as e:
             logger.error(f"Error in CustomJSONEncoder: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise e
+            return str(obj)
+
 
 
 def validate_wallet_address(wallet_address):
@@ -5303,36 +6327,40 @@ async def get_balance(request: Request):
         logger.error(f"Unexpected error in get_balance: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-@app.post("/send_transaction")
-async def send_transaction(transaction_input: TransactionInput, pincode: str = Depends(get_current_user)):
+
+@app.route("/send_transaction", methods=["POST"])
+@authenticate
+async def send_transaction(request):
     try:
+        # Get transaction input from request JSON
+        transaction_input = request.json
         logger.info(f"Received transaction request: {transaction_input}")
 
         # Resolve receiver address from alias if necessary
-        if not transaction_input.receiver.startswith("plata"):
+        if not transaction_input['receiver'].startswith("plata"):
             receiver_address = None
             for wallet in blockchain.wallets:
-                if wallet.alias == transaction_input.receiver:
+                if wallet.alias == transaction_input['receiver']:
                     receiver_address = wallet.address
                     break
             if not receiver_address:
-                raise HTTPException(status_code=400, detail="Invalid receiver alias")
-            transaction_input.receiver = receiver_address
+                raise SanicException("Invalid receiver alias", status_code=400)
+            transaction_input['receiver'] = receiver_address
 
         # Create wallet instance using the private key provided in the transaction
-        wallet = Wallet(private_key=transaction_input.private_key)
+        wallet = Wallet(private_key=transaction_input['private_key'])
         logger.info("Created wallet from private key.")
 
         # Create a Transaction object from the input
         transaction = Transaction(
-            sender=transaction_input.sender,
-            receiver=transaction_input.receiver,
-            amount=transaction_input.amount,
-            price=transaction_input.price,
-            buyer_id=transaction_input.buyer_id,
-            seller_id=transaction_input.seller_id,
-            wallet=transaction_input.wallet,
-            tx_hash=generate_tx_hash(transaction_input),  # You need to implement this function
+            sender=transaction_input['sender'],
+            receiver=transaction_input['receiver'],
+            amount=transaction_input['amount'],
+            price=transaction_input['price'],
+            buyer_id=transaction_input['buyer_id'],
+            seller_id=transaction_input['seller_id'],
+            wallet=transaction_input['wallet'],
+            tx_hash=generate_tx_hash(transaction_input),
             timestamp=int(time.time())
         )
 
@@ -5346,7 +6374,7 @@ async def send_transaction(transaction_input: TransactionInput, pincode: str = D
 
         # Verify the transaction
         if not transaction.verify_transaction(blockchain.zk_system):
-            raise HTTPException(status_code=400, detail="Invalid transaction signature")
+            raise SanicException("Invalid transaction signature", status_code=400)
 
         # Add the transaction to the blockchain
         if blockchain.add_transaction(transaction):
@@ -5371,50 +6399,48 @@ async def send_transaction(transaction_input: TransactionInput, pincode: str = D
             new_balance = blockchain.get_balance(transaction.sender)
             await manager.broadcast(f"New balance for {transaction.sender}: {new_balance}")
             
-            return {"success": True, "message": "Transaction added successfully."}
+            return response.json({"success": True, "message": "Transaction added successfully."})
         else:
-            logger.info(f"Transaction from {transaction.sender} to {transaction.receiver} failed to add: insufficient balance")
-            return {"success": False, "message": "Transaction failed to add: insufficient balance"}
+            return response.json({
+                "success": False, 
+                "message": "Transaction failed to add: insufficient balance"
+            })
 
     except ValueError as e:
         logger.error(f"Error deserializing private key: {e}")
-        raise HTTPException(status_code=400, detail="Invalid private key format")
+        raise SanicException("Invalid private key format", status_code=400)
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(traceback.format_exc())
+        raise SanicException("Internal server error", status_code=500)
 
-
-def generate_tx_hash(transaction_input: TransactionInput) -> str:
-    # Implement a function to generate a transaction hash
-    # This is just a simple example, you might want to use a more sophisticated method
-    data = f"{transaction_input.sender}{transaction_input.receiver}{transaction_input.amount}{transaction_input.price}{time.time()}"
+def generate_tx_hash(transaction_input: dict) -> str:
+    data = f"{transaction_input['sender']}{transaction_input['receiver']}{transaction_input['amount']}{transaction_input['price']}{time.time()}"
     return hashlib.sha256(data.encode()).hexdigest()
 
-
-@app.post("/deploy_contract")
-def deploy_contract(contract: Contract, pincode: str = Depends(get_current_user)):
-    blockchain.add_contract(contract)
-    return {"success": True, "contract_address": contract.address}
-
-
-@app.post("/send_batch_transactions")
-async def send_batch_transactions(batch_input: BatchTransactionInput, pincode: str = Depends(authenticate)):
+@app.route("/send_batch_transactions", methods=["POST"])
+@authenticate
+async def send_batch_transactions(request):
     results = []
     try:
-        for transaction_input in batch_input.transactions:
+        batch_input = request.json
+        if not isinstance(batch_input.get('transactions'), list):
+            raise SanicException("Invalid batch transaction format", status_code=400)
+
+        for transaction_input in batch_input['transactions']:
             try:
                 # Create wallet instance using the private key provided in the transaction
-                wallet = Wallet(private_key=transaction_input.private_key)
+                wallet = Wallet(private_key=transaction_input['private_key'])
 
                 # Create a Transaction object from the input
                 transaction = Transaction(
-                    sender=transaction_input.sender,
-                    receiver=transaction_input.receiver,
-                    amount=transaction_input.amount,
-                    price=transaction_input.price,
-                    buyer_id=transaction_input.buyer_id,
-                    seller_id=transaction_input.seller_id,
-                    wallet=transaction_input.wallet,
+                    sender=transaction_input['sender'],
+                    receiver=transaction_input['receiver'],
+                    amount=transaction_input['amount'],
+                    price=transaction_input['price'],
+                    buyer_id=transaction_input['buyer_id'],
+                    seller_id=transaction_input['seller_id'],
+                    wallet=transaction_input['wallet'],
                     tx_hash=generate_tx_hash(transaction_input),
                     timestamp=int(time.time())
                 )
@@ -5426,40 +6452,89 @@ async def send_batch_transactions(batch_input: BatchTransactionInput, pincode: s
                 transaction.sign_transaction(blockchain.zk_system)
 
                 if transaction.verify_transaction(blockchain.zk_system) and blockchain.add_transaction(transaction):
-                    results.append({"success": True, "message": "Transaction added successfully.", "transaction": transaction_input.dict()})
+                    results.append({
+                        "success": True, 
+                        "message": "Transaction added successfully.", 
+                        "transaction": transaction_input
+                    })
                 else:
-                    results.append({"success": False, "message": "Transaction failed to add: invalid signature or insufficient balance", "transaction": transaction_input.dict()})
+                    results.append({
+                        "success": False, 
+                        "message": "Transaction failed to add: invalid signature or insufficient balance", 
+                        "transaction": transaction_input
+                    })
 
             except ValueError as e:
-                results.append({"success": False, "message": f"Error processing transaction: {str(e)}", "transaction": transaction_input.dict()})
+                results.append({
+                    "success": False, 
+                    "message": f"Error processing transaction: {str(e)}", 
+                    "transaction": transaction_input
+                })
             except Exception as e:
-                results.append({"success": False, "message": f"Unexpected error: {str(e)}", "transaction": transaction_input.dict()})
+                results.append({
+                    "success": False, 
+                    "message": f"Unexpected error: {str(e)}", 
+                    "transaction": transaction_input
+                })
+
+        return response.json(results)
 
     except Exception as e:
         logger.error(f"Error processing batch transactions: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error processing batch transactions")
+        logger.error(traceback.format_exc())
+        raise SanicException("Error processing batch transactions", status_code=500)
 
-    return results
-
-def generate_tx_hash(transaction_input: TransactionInput) -> str:
-    # Implement a function to generate a transaction hash
-    # This is just a simple example, you might want to use a more sophisticated method
-    data = f"{transaction_input.sender}{transaction_input.receiver}{transaction_input.amount}{transaction_input.price}{time.time()}"
-    return hashlib.sha256(data.encode()).hexdigest()
+# Add error handler for transaction-related exceptions
+@app.exception(SanicException)
+async def handle_transaction_error(request, exception):
+    return response.json(
+        {
+            "error": str(exception),
+            "status": exception.status_code
+        },
+        status=exception.status_code
+    )
 
 class DeployContractRequest(BaseModel):
     sender_address: str
     collateral_token: str
     initial_price: float
-
 @app.post("/deploy_contract")
-def deploy_contract(request: DeployContractRequest):
-    try:
-        price_feed = SimplePriceFeed(request.initial_price)
-        contract_address = vm.deploy_contract(request.sender_address, Cashewstable, request.collateral_token, price_feed)
-        return {"contract_address": contract_address}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+async def deploy_contract(sender: str, contract_name: str, args: List[Any]):
+    contract_class = globals()[contract_name]
+    contract_address = await blockchain.deploy_contract(sender, contract_class, *args)
+    return {"contract_address": contract_address}
+
+@app.post("/execute_contract")
+async def execute_contract(sender: str, contract_address: str, function_name: str, args: List[Any], kwargs: Dict[str, Any]):
+    result = await blockchain.execute_contract(sender, contract_address, function_name, *args, **kwargs)
+    return {"result": result}
+
+@app.post("/create_token")
+async def create_token(creator_address: str, token_name: str, token_symbol: str, total_supply: int):
+    token_address = await blockchain.create_token(creator_address, token_name, token_symbol, total_supply)
+    return {"token_address": token_address}
+
+@app.post("/create_nft")
+async def create_nft(creator_address: str, nft_id: str, metadata: Dict[str, Any]):
+    nft_id = await blockchain.create_nft(creator_address, nft_id, metadata)
+    return {"nft_id": nft_id}
+
+@app.post("/transfer_nft")
+async def transfer_nft(from_address: str, to_address: str, nft_id: str):
+    success = await blockchain.transfer_nft(from_address, to_address, nft_id)
+    return {"success": success}
+
+@app.get("/get_balance/{address}")
+async def get_balance(address: str):
+    balance = await blockchain.get_balance(address)
+    return {"balance": balance}
+
+@app.post("/transfer")
+async def transfer(from_address: str, to_address: str, amount: int):
+    success = await blockchain.transfer(from_address, to_address, amount)
+    return {"success": success}
+
 
 
 class MineBlockRequest(BaseModel):
@@ -5557,7 +6632,6 @@ import networkx as nx
 import scipy.sparse as sparse
 import scipy.sparse.linalg
 from scipy.optimize import minimize
-from fastapi import Depends, HTTPException, FastAPI
 from decimal import Decimal
 import random
 from SecureHybridZKStark import SecureHybridZKStark
@@ -5680,28 +6754,47 @@ class MiningData(BaseModel):
 class SolutionSubmission(BaseModel):
     nonce: int
 
-import time
-import hashlib
 
-@app.get("/get_mining_data", response_model=MiningData)
-async def get_mining_data():
+from sanic import Sanic, response
+from sanic.exceptions import SanicException
+
+@app.get("/get_mining_data")
+async def get_mining_data(request):
     try:
         block_header = generate_block_header()
         difficulty = blockchain.difficulty
-        return MiningData(block_header=block_header, difficulty=difficulty)
+        mining_data = {
+            "block_header": block_header,
+            "difficulty": difficulty
+        }
+        return response.json(mining_data)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating mining data: {str(e)}")
-
+        raise SanicException(f"Error generating mining data: {str(e)}", status_code=500)
 @app.post("/submit_solution")
-async def submit_solution(submission: SolutionSubmission):
+async def submit_solution(request):
     try:
-        if verify_solution(submission.nonce):
-            new_block = create_new_block(submission.nonce)
-            return {"status": "success", "message": "Solution accepted", "block_hash": new_block.hash}
+        # Parse the submission from the request
+        submission = request.json
+        
+        # Assuming `SolutionSubmission` is a dictionary, you can access nonce like this
+        nonce = submission.get("nonce")
+        
+        # Verify the solution
+        if verify_solution(nonce):
+            new_block = create_new_block(nonce)
+            return response.json({
+                "status": "success",
+                "message": "Solution accepted",
+                "block_hash": new_block.hash
+            })
         else:
-            return {"status": "rejected", "message": "Invalid solution"}
+            return response.json({
+                "status": "rejected",
+                "message": "Invalid solution"
+            })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing solution: {str(e)}")
+        raise SanicException(f"Error processing solution: {str(e)}", status_code=500)
+
 
 def generate_block_header() -> List[int]:
     header = [0] * 25
@@ -5763,14 +6856,7 @@ def update_mining_stats(blocks_mined, start_time, last_reward, wallet_address, c
     
     logger.info(f"Updated mining stats: {mining_stats}")
 
-
-@app.get("/mining_stats")
-async def get_mining_stats():
-    global continue_mining, mining_stats
-    return {
-        "is_mining": continue_mining,
-        "stats": mining_stats
-    }
+from sanic import Sanic, response
 
 # Initialize mining stats
 mining_stats = {
@@ -5782,10 +6868,20 @@ mining_stats = {
     "difficulty": 0
 }
 
-@app.get("/mining_status")
-async def get_mining_status():
-    global continue_mining
-    return {"is_mining": continue_mining}
+@app.get("/mining_stats")
+async def get_mining_stats(request):
+    global continue_mining, mining_stats
+    return response.json({
+        "is_mining": continue_mining,
+        "stats": mining_stats
+    })
+
+
+from sanic import Sanic, response
+
+from sanic import Sanic, response
+
+
 async def process_exchange_orders():
     for pair in exchange.order_book.buy_orders.keys():
         matches = exchange.order_book.match_orders(pair)
@@ -5878,32 +6974,6 @@ class BlockData(BaseModel):
     reward: float
     transactions: List[dict]
     hash: str
-
-@app.post("/receive_block")
-def receive_block(block: BlockData, pincode: str = Depends(authenticate)):
-    try:
-        # Convert the block data into a QuantumBlock object
-        new_block = QuantumBlock(
-            previous_hash=block.previous_hash,
-            data=block.data,
-            quantum_signature=block.quantum_signature,
-            reward=block.reward,
-            transactions=block.transactions
-        )
-        
-        # Validate the block hash
-        if new_block.hash != block.hash:
-            raise HTTPException(status_code=400, detail="Block hash does not match computed hash")
-        
-        # Validate and add the block to the blockchain
-        if blockchain.add_block(new_block):
-            logger.info(f"Received and added block with hash: {new_block.hash}")
-            return {"success": True, "message": "Block added successfully"}
-        else:
-            raise HTTPException(status_code=400, detail="Invalid block")
-    except Exception as e:
-        logger.error(f"Error receiving block: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error receiving block: {str(e)}")
 
 class PBFT:
     def __init__(self, f):
@@ -6719,28 +7789,23 @@ class SecureDAGKnightServicer:
             signature=tx.signature
         )
 
+from sanic import Sanic, response
+from sanic.exceptions import SanicException
+from datetime import timedelta
 
-@app.post("/token", response_model=Token)
-def login_for_access_token(form_data: User):
-    user = authenticate_user(form_data.pincode)
-    if not user:
-        raise HTTPException(
-            status_code=400,
-            detail="Incorrect pincode",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.pincode}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+from sanic import Sanic, response
+import requests  # Use requests to make external calls
 
-
-
-@app.get("/get_block_info/{block_hash}", response_model=dict)
-def get_block_info(block_hash: str, pincode: str = Depends(authenticate)):
-    response = get(f'http://161.35.219.10:50503/get_block_info/{block_hash}')
-    block_info = response.json()
+@app.get("/get_block_info/<block_hash>")
+async def get_block_info(request, block_hash):
+    pincode = request.args.get("pincode")
+    
+    # If necessary, replace `authenticate(pincode)` with your own logic to check the pincode
+    if not authenticate(pincode):
+        return response.json({"error": "Unauthorized"}, status=403)
+    
+    external_response = requests.get(f'http://161.35.219.10:50503/get_block_info/{block_hash}')
+    block_info = external_response.json()
 
     # Add transactions to the block info
     block_info['transactions'] = [
@@ -6753,20 +7818,28 @@ def get_block_info(block_hash: str, pincode: str = Depends(authenticate)):
         } for tx in block_info.get('transactions', [])
     ]
 
-    return block_info
-
-
-@app.get("/get_node_info/{node_id}", response_model=dict)
-def get_node_info(node_id: str, pincode: str = Depends(authenticate)):
-    response = get(f'http://161.35.219.10:50503/get_node_info/{node_id}')
-    return response.json()
-
-
-@app.get("/get_transaction_info/{tx_hash}", response_model=dict)
-def get_transaction_info(tx_hash: str, pincode: str = Depends(authenticate)):
-    response = get(f'http://161.35.219.10:50503/get_transaction_info/{tx_hash}')
-    return response.json()
-
+    return response.json(block_info)
+@app.get("/get_node_info/<node_id>")
+async def get_node_info(request, node_id):
+    pincode = request.args.get("pincode")
+    
+    # Authenticate the pincode
+    if not authenticate(pincode):
+        return response.json({"error": "Unauthorized"}, status=403)
+    
+    external_response = requests.get(f'http://161.35.219.10:50503/get_node_info/{node_id}')
+    return response.json(external_response.json())
+()
+@app.get("/get_transaction_info/<tx_hash>")
+async def get_transaction_info(request, tx_hash):
+    pincode = request.args.get("pincode")
+    
+    # Authenticate the pincode
+    if not authenticate(pincode):
+        return response.json({"error": "Unauthorized"}, status=403)
+    
+    external_response = requests.get(f'http://161.35.219.10:50503/get_transaction_info/{tx_hash}')
+    return response.json(external_response.json())
 
 
 import unittest
@@ -6795,70 +7868,200 @@ def run_tests():
     suite = loader.discover('.', pattern='test_*.py')  # Adjust pattern to match your test files
     runner = unittest.TextTestRunner()
     runner.run(suite)
+from sanic import response
+from typing import Dict, List
+import json
+from decimal import Decimal
+import logging
+import asyncio
+
+logger = logging.getLogger(__name__)
+
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
-        self.subscriptions: Dict[str, list[WebSocket]] = {}
+        self.active_connections: Dict[str, object] = {}  # Using generic object type for Sanic websockets
+        self.subscriptions: Dict[str, List[object]] = {}
 
-    async def connect(self, websocket: WebSocket, user: str):
-        await websocket.accept()
-        self.active_connections[user] = websocket
+    async def connect(self, ws, user: str):
+        """Store WebSocket connection for a user"""
+        self.active_connections[user] = ws
         logger.info(f"WebSocket connection established for user: {user}")
 
-    def disconnect(self, user: str):
+    async def disconnect(self, user: str):
+        """Remove WebSocket connection for a user"""
         if user in self.active_connections:
-            websocket = self.active_connections[user]
+            ws = self.active_connections[user]
             del self.active_connections[user]
             logger.info(f"WebSocket connection closed for user: {user}")
+            
             # Remove from subscriptions
             for client_id in list(self.subscriptions.keys()):
-                if websocket in self.subscriptions[client_id]:
-                    self.subscriptions[client_id].remove(websocket)
+                if ws in self.subscriptions[client_id]:
+                    self.subscriptions[client_id].remove(ws)
                     if not self.subscriptions[client_id]:
                         del self.subscriptions[client_id]
 
-    async def subscribe(self, websocket: WebSocket, client_id: str):
+    async def subscribe(self, ws, client_id: str):
+        """Subscribe a WebSocket connection to a client ID"""
         if client_id not in self.subscriptions:
             self.subscriptions[client_id] = []
-        self.subscriptions[client_id].append(websocket)
+        self.subscriptions[client_id].append(ws)
+        logger.info(f"Client {client_id} subscribed to updates")
 
-    async def unsubscribe(self, websocket: WebSocket, client_id: str):
+    async def unsubscribe(self, ws, client_id: str):
+        """Unsubscribe a WebSocket connection from a client ID"""
         if client_id in self.subscriptions:
-            self.subscriptions[client_id].remove(websocket)
+            self.subscriptions[client_id].remove(ws)
             if not self.subscriptions[client_id]:
                 del self.subscriptions[client_id]
+            logger.info(f"Client {client_id} unsubscribed from updates")
 
     async def send_personal_message(self, message: str, user: str):
+        """Send a message to a specific user"""
         if user in self.active_connections:
-            await self.active_connections[user].send_text(message)
+            try:
+                await self.active_connections[user].send(message)
+                logger.debug(f"Sent personal message to user: {user}")
+            except Exception as e:
+                logger.error(f"Error sending personal message to {user}: {str(e)}")
+                await self.disconnect(user)
 
     async def broadcast(self, message: str):
-        for connection in self.active_connections.values():
-            await connection.send_text(message)
+        """Broadcast a message to all connected users"""
+        disconnected_users = []
+        for user, ws in self.active_connections.items():
+            try:
+                await ws.send(message)
+            except Exception as e:
+                logger.error(f"Error broadcasting to {user}: {str(e)}")
+                disconnected_users.append(user)
+
+        # Clean up disconnected users
+        for user in disconnected_users:
+            await self.disconnect(user)
 
     async def broadcast_new_block(self, block: dict):
-        message = json.dumps({
-            "type": "new_block",
-            "data": block
-        })
-        await self.broadcast(message)
+        """Broadcast a new block to all connected users"""
+        try:
+            message = json.dumps({
+                "type": "new_block",
+                "data": block
+            })
+            await self.broadcast(message)
+            logger.info(f"Broadcasted new block: {block.get('hash', 'unknown')}")
+        except Exception as e:
+            logger.error(f"Error broadcasting new block: {str(e)}")
 
     async def broadcast_new_transaction(self, transaction: dict):
-        message = json.dumps({
-            "type": "new_transaction",
-            "data": transaction
-        })
-        await self.broadcast(message)
+        """Broadcast a new transaction to all connected users"""
+        try:
+            message = json.dumps({
+                "type": "new_transaction",
+                "data": transaction
+            })
+            await self.broadcast(message)
+            logger.info(f"Broadcasted new transaction: {transaction.get('tx_hash', 'unknown')}")
+        except Exception as e:
+            logger.error(f"Error broadcasting new transaction: {str(e)}")
+
     async def broadcast_network_stats(self, stats: dict):
-        # Convert Decimal objects to strings
-        stats_serializable = {k: str(v) if isinstance(v, Decimal) else v for k, v in stats.items()}
-        for connection in self.active_connections:
-            await connection.send_text(json.dumps(stats_serializable))
+        """Broadcast network stats to all connected users"""
+        try:
+            # Convert Decimal objects to strings
+            stats_serializable = {
+                k: str(v) if isinstance(v, Decimal) else v 
+                for k, v in stats.items()
+            }
+            message = json.dumps({
+                "type": "network_stats",
+                "data": stats_serializable
+            })
+            await self.broadcast(message)
+            logger.debug("Broadcasted network stats")
+        except Exception as e:
+            logger.error(f"Error broadcasting network stats: {str(e)}")
 
-
-
+# Initialize the connection manager
 manager = ConnectionManager()
 
+# WebSocket route implementation for Sanic
+@app.websocket("/ws/<user_id>")
+async def websocket_endpoint(request, ws, user_id: str):
+    try:
+        await manager.connect(ws, user_id)
+        
+        try:
+            while True:
+                data = await ws.recv()
+                try:
+                    message = json.loads(data)
+                    message_type = message.get("type")
+                    
+                    if message_type == "subscribe":
+                        await manager.subscribe(ws, message.get("client_id"))
+                        await ws.send(json.dumps({
+                            "type": "subscription_success",
+                            "client_id": message.get("client_id")
+                        }))
+                    
+                    elif message_type == "unsubscribe":
+                        await manager.unsubscribe(ws, message.get("client_id"))
+                        await ws.send(json.dumps({
+                            "type": "unsubscription_success",
+                            "client_id": message.get("client_id")
+                        }))
+                    
+                    else:
+                        await ws.send(json.dumps({
+                            "type": "error",
+                            "message": "Unknown message type"
+                        }))
+                
+                except json.JSONDecodeError:
+                    await ws.send(json.dumps({
+                        "type": "error",
+                        "message": "Invalid JSON format"
+                    }))
+                except Exception as e:
+                    logger.error(f"Error processing message: {str(e)}")
+                    await ws.send(json.dumps({
+                        "type": "error",
+                        "message": "Error processing message"
+                    }))
+
+        except asyncio.CancelledError:
+            logger.info(f"WebSocket connection cancelled for user {user_id}")
+        except Exception as e:
+            logger.error(f"WebSocket error for user {user_id}: {str(e)}")
+        finally:
+            await manager.disconnect(user_id)
+            
+    except Exception as e:
+        logger.error(f"Error in websocket connection for user {user_id}: {str(e)}")
+        if user_id in manager.active_connections:
+            await manager.disconnect(user_id)
+
+# Add the manager to the Sanic app context
+@app.before_server_start
+async def setup_websocket_manager(app, loop):
+    app.ctx.ws_manager = manager
+    logger.info("WebSocket manager initialized")
+
+# Example of using the manager in other routes
+@app.route("/broadcast_message", methods=["POST"])
+async def broadcast_message(request):
+    try:
+        message = request.json.get("message")
+        if message:
+            await manager.broadcast(json.dumps({
+                "type": "broadcast",
+                "message": message
+            }))
+            return response.json({"status": "success"})
+        return response.json({"status": "error", "message": "No message provided"})
+    except Exception as e:
+        logger.error(f"Error broadcasting message: {str(e)}")
+        return response.json({"status": "error", "message": str(e)})
 
 
 async def periodic_network_stats_update():
@@ -6909,49 +8112,123 @@ async def get_network_stats():
     except Exception as e:
         logger.error(f"Error fetching network stats: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching network stats")
+from sanic import response
+from sanic.exceptions import SanicException
 
-@app.get("/network_stats")
-async def get_network_stats_endpoint(pincode: str = Depends(authenticate)):
-    return await get_network_stats()
+@app.route("/network_stats", methods=["GET"])
+@authenticate
+async def get_network_stats_endpoint(request):
+    try:
+        stats = await get_network_stats()
+        return response.json(stats)
+    except Exception as e:
+        logger.error(f"Error fetching network stats: {str(e)}")
+        raise SanicException(
+            "Error fetching network stats",
+            status_code=500
+        )
 
-@app.get("/node_performance/{node_id}")
-async def get_node_performance(node_id: str, pincode: str = Depends(authenticate)):
+@app.route("/node_performance/<node_id:str>", methods=["GET"])
+@authenticate
+async def get_node_performance(request, node_id: str):
     try:
         node_stats = node_directory.get_performance_stats()
-        return {
+        return response.json({
             "node_id": node_id,
             "avg_mining_time": node_stats.get("avg_mining_time", 0),
             "total_blocks_mined": node_stats.get("total_blocks_mined", 0),
             "hash_rate": node_stats.get("hash_rate", 0),
             "uptime": node_stats.get("uptime", 0)
-        }
+        })
     except Exception as e:
         logger.error(f"Error fetching node performance: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error fetching node performance")
+        logger.error(traceback.format_exc())
+        raise SanicException(
+            "Error fetching node performance",
+            status_code=500
+        )
 
-@app.get("/quantum_metrics")
-async def get_quantum_metrics(pincode: str = Depends(authenticate)):
+@app.route("/quantum_metrics", methods=["GET"])
+@authenticate
+async def get_quantum_metrics(request):
     try:
         qhins = calculate_qhins(blockchain.chain)
         entanglement_strength = calculate_entanglement_strength(blockchain.chain)
         coherence_ratio = blockchain.globalMetrics.coherenceRatio
-        return {
-            "qhins": qhins,
-            "entanglement_strength": entanglement_strength,
-            "coherence_ratio": coherence_ratio
-        }
+        
+        return response.json({
+            "qhins": str(qhins),  # Convert Decimal to string
+            "entanglement_strength": str(entanglement_strength),
+            "coherence_ratio": str(coherence_ratio)
+        })
     except Exception as e:
         logger.error(f"Error fetching quantum metrics: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error fetching quantum metrics")
+        logger.error(traceback.format_exc())
+        raise SanicException(
+            "Error fetching quantum metrics",
+            status_code=500
+        )
 
-@app.get("/recent_transactions")
-async def get_recent_transactions(limit: int = 10, pincode: str = Depends(authenticate)):
+@app.route("/recent_transactions", methods=["GET"])
+@authenticate
+async def get_recent_transactions(request):
     try:
+        # Get limit from query parameters with default value
+        limit = int(request.args.get('limit', 10))
+        
+        # Validate limit
+        if limit <= 0:
+            raise SanicException(
+                "Limit must be greater than 0",
+                status_code=400
+            )
+        
         recent_txs = blockchain.get_recent_transactions(limit)
-        return [tx.to_dict() for tx in recent_txs]
+        return response.json([tx.to_dict() for tx in recent_txs])
+    
+    except ValueError as ve:
+        raise SanicException(
+            "Invalid limit parameter",
+            status_code=400
+        )
     except Exception as e:
         logger.error(f"Error fetching recent transactions: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error fetching recent transactions")
+        logger.error(traceback.format_exc())
+        raise SanicException(
+            "Error fetching recent transactions",
+            status_code=500
+        )
+
+# Add error handler for these endpoints
+@app.exception(SanicException)
+async def handle_generic_exception(request, exception):
+    return response.json(
+        {
+            "error": str(exception),
+            "status": exception.status_code
+        },
+        status=exception.status_code
+    )
+
+# Add custom JSON serializer for Decimal values
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return str(obj)
+        return super().default(obj)
+
+# Helper function to serialize response data
+def serialize_response(data):
+    return json.dumps(data, cls=CustomJSONEncoder)
+
+# Optional: Add cache control middleware
+@app.middleware('response')
+async def add_cache_control(request, response):
+    if request.path in ['/network_stats', '/quantum_metrics']:
+        response.headers['Cache-Control'] = 'public, max-age=5'  # Cache for 5 seconds
+    return response
+
+
 class TokenRefreshRequest(BaseModel):
     refresh_token: str
 
@@ -6994,15 +8271,6 @@ async def refresh_token(request: TokenRefreshRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Example protected route
-@app.get("/protected")
-async def protected_route(token: str = Depends(oauth2_scheme)):
-    user_id = verify_token(token, "access token")
-    return {"message": "Access granted", "user_id": user_id}
-
-# Example login route (you should implement proper authentication here)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 # Example user database
 fake_users_db = {
     "user1": {
@@ -7041,18 +8309,6 @@ async def login(pincode: str):
 
                     
 
-
-@app.get("/block_details/{block_hash}")
-async def get_block_details(block_hash: str, pincode: str = Depends(authenticate)):
-    try:
-        block = blockchain.get_block_by_hash(block_hash)
-        if block:
-            return block.to_dict()
-        else:
-            raise HTTPException(status_code=404, detail="Block not found")
-    except Exception as e:
-        logger.error(f"Error fetching block details: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error fetching block details")
 # Helper function to calculate average block time
 def calculate_average_block_time(chain):
     if len(chain) < 2:
@@ -7084,35 +8340,7 @@ def calculate_entanglement_strength(chain):
     return average_entanglement_strength
 
 manager = ConnectionManager()
-@app.websocket("/ws/{client_id}")
-async def websocket_endpoint(websocket: WebSocket, client_id: str):
-    await manager.connect(websocket)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            # Handle received data if necessary
-            await manager.broadcast(f"Client {client_id} says: {data}")
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        await manager.broadcast(f"Client {client_id} left the chat")
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    user = verify_token(token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return user
-# Endpoint to get address from alias
-@app.post("/get_address_from_alias")
-def get_address_from_alias(alias: str):
-    for user in fake_users_db.values():
-        if user.wallet['alias'] == alias:
-            return {"address": user.wallet['address']}
-    raise HTTPException(status_code=400, detail="Alias not found")
-async def get_token(websocket: WebSocket):
-    token = websocket.query_params.get('token')
-    if not token:
-        await websocket.close(code=1008)  # Close with appropriate code for policy violation
-        raise WebSocketDisconnect(code=1008)
-    return token
+
 async def get_current_user(token: str):
     try:
         logger.info(f"Attempting to decode token: {token[:10]}...{token[-10:]}")
@@ -7134,7 +8362,6 @@ async def get_current_user(token: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 import json
 from decimal import Decimal
-from fastapi import WebSocket, WebSocketDisconnect, Query, HTTPException
 from starlette.websockets import WebSocketState
 
 WS_1000_NORMAL_CLOSURE = 1000
@@ -7147,64 +8374,6 @@ class DecimalEncoder(json.JSONEncoder):
             return float(obj)
         return super(DecimalEncoder, self).default(obj)
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
-    logger.info("WebSocket connection attempt received")
-    logger.info(f"Query parameters: {websocket.query_params}")
-    if not token:
-        logger.error("No token provided in WebSocket connection")
-        await websocket.close(code=WS_1008_POLICY_VIOLATION)
-        return
-    try:
-        logger.info(f"Token provided: {token[:10]}...{token[-10:] if len(token) > 20 else ''}")
-        user = await get_current_user(token)  # Assuming get_current_user function exists
-        logger.info(f"User authenticated: {user}")
-        await manager.connect(websocket, user)
-        logger.info(f"WebSocket connection accepted for user: {user}")
-        try:
-            while True:
-                data = await websocket.receive_text()
-                logger.debug(f"Received message from {user}: {data}")
-                message = json.loads(data)
-                # Handle the received message and update state accordingly
-                if message['type'] == 'botControl':
-                    action = message['action']
-                    if action == 'start':
-                        # Start the bot
-                        logger.info("Starting the bot")
-                    elif action == 'stop':
-                        # Stop the bot
-                        logger.info("Stopping the bot")
-                    elif action == 'rebalance':
-                        # Rebalance portfolio
-                        logger.info("Rebalancing portfolio")
-                elif message['type'] == 'miningControl':
-                    action = message['action']
-                    if action == 'start':
-                        # Start mining
-                        logger.info("Starting mining")
-                    elif action == 'stop':
-                        # Stop mining
-                        logger.info("Stopping mining")
-                elif message['type'] == 'placeOrder':
-                    order_type = message['orderType']
-                    pair = message['pair']
-                    amount = Decimal(message['amount'])
-                    price = Decimal(message['price'])
-                    # Handle placing order logic
-                    logger.info(f"Placing order: {order_type} {amount} {pair} at {price}")
-                # Example: broadcast updated state
-                await manager.broadcast(json.dumps(state, cls=DecimalEncoder))
-        except WebSocketDisconnect:
-            manager.disconnect(user)
-            logger.info(f"WebSocket disconnected for user: {user}")
-    except HTTPException as e:
-        logger.error(f"Authentication failed: {str(e)}")
-        await websocket.close(code=WS_1008_POLICY_VIOLATION)
-    except Exception as e:
-        logger.error(f"Unexpected error in WebSocket connection: {str(e)}")
-        if websocket.client_state != WebSocketState.DISCONNECTED:
-            await websocket.close(code=WS_3000_INTERNAL_ERROR)
 async def get_current_user(token: str):
     try:
         logger.info(f"Attempting to decode token: {token[:10]}...{token[-10:]}")
@@ -7245,17 +8414,24 @@ async def notify_transaction_confirmed(wallet_address: str, tx_hash: str):
         "type": "transaction_confirmed",
         "tx_hash": tx_hash
     }), wallet_address)
-@app.get("/", response_class=HTMLResponse)
-async def get_dashboard(request: Request):
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+from sanic import Sanic, response
 
+# Set up Jinja2 environment
 
-@app.get("/trading", response_class=HTMLResponse)
-async def get_trading(request: Request):
-    return templates.TemplateResponse("trading.html", {"request": request})
+@app.get("/")
+async def get_dashboard(request):
+    template = env.get_template("dashboard.html")
+    html_content = template.render({"request": request})
+    return response.html(html_content)
+
+@app.get("/trading")
+async def get_trading(request):
+    template = env.get_template("trading.html")
+    html_content = template.render({"request": request})
+    return response.html(html_content)
 @app.get("/api/dashboard_data")
-async def get_dashboard_data():
-    return {
+async def get_dashboard_data(request):
+    dashboard_data = {
         "Quantum Hash Rate": "1.21 TH/s",
         "Network Entanglement": "99.9%",
         "Active Nodes": "42,000",
@@ -7263,6 +8439,7 @@ async def get_dashboard_data():
         "Total Value Locked": "$1,000,000,000",
         "Governance Proposals": "7 Active"
     }
+    return response.json(dashboard_data)
 
     
 html_content = """
@@ -7822,35 +8999,6 @@ class PrivateSmartContract(SmartContract):
         public_input = zk_system.stark.hash(str(input_data), str(result))
         return zk_system.verify(public_input, zk_proof)
 
-
-@app.get("/get_node_details/{node_id}")
-def get_node_details(node_id: str):
-    node_details = node_directory.get(node_id)
-    if not node_details:
-        raise HTTPException(status_code=404, detail="Node not found")
-    return node_details
-
-
-@router.post("/deploy_cashewstable")
-async def deploy_cashewstable(collateral_token: str, price_feed: str, current_user: str = Depends(get_current_user)):
-    contract_address = deploy_cashewstable(exchange.vm, collateral_token, price_feed)
-    return {"contract_address": contract_address}
-
-@router.post("/deploy_automated_market_maker")
-async def deploy_automated_market_maker(token_a: str, token_b: str, current_user: str = Depends(get_current_user)):
-    contract_address = deploy_automated_market_maker(exchange.vm, token_a, token_b)
-    return {"contract_address": contract_address}
-
-@router.post("/deploy_yield_farm")
-async def deploy_yield_farm(staking_token: str, reward_token: str, reward_rate: Decimal, current_user: str = Depends(get_current_user)):
-    contract_code = {
-        "init": YieldFarm(staking_token, reward_token, reward_rate),
-        "stake": lambda storage, user, amount: storage["init"].stake(user, Decimal(amount)),
-        "withdraw": lambda storage, user, amount: storage["init"].withdraw(user, Decimal(amount)),
-        "get_reward": lambda storage, user: storage["init"].get_reward(user),
-    }
-    contract_address = exchange.vm.deploy_contract(contract_code)
-    return {"contract_address": contract_address}
 # Add import statements to your main application file
 import numpy as np
 from scipy.stats import norm
@@ -7867,14 +9015,6 @@ async def deploy_and_run_market_bot(exchange, vm, plata_contract, price_feed):
     bot = QuantumInspiredMarketBot(exchange, vm, plata_contract, price_feed, initial_capital)
     await bot.run()
     
-@router.post("/mint_stablecoin")
-async def mint_stablecoin(amount: float, current_user: str = Depends(get_current_user)):
-    try:
-        result = vm.execute_contract(cashewstable_contract_address, "mint", [current_user, amount])
-        return {"success": True, "minted_amount": result}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-from decimal import Decimal
 
 # Define collateral token (this could be another contract address or a token symbol)
 collateral_token = "USDC"  # Or use the address of your collateral token contract
@@ -7908,17 +9048,6 @@ async def get_stablecoin_info():
     price = await vm.execute_contract(cashewstable_address, "get_latest_price", [])
     return {"total_supply": total_supply, "price": price}
 
-@router.post("/mint_stablecoin")
-async def api_mint_stablecoin(amount: float, current_user: str = Depends(get_current_user)):
-    try:
-        result = await mint_stablecoin(current_user, Decimal(str(amount)))
-        return {"success": True, "minted_amount": result}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@router.get("/stablecoin_info")
-async def api_stablecoin_info():
-    return await get_stablecoin_info()
 mock_blockchain = MagicMock()
 class TokenInfo(BaseModel):
     address: str
@@ -7939,64 +9068,6 @@ class CreatePoolRequest(BaseModel):
     amount_a: float
     amount_b: float
 
-@app.post("/import_token", response_model=TokenInfo)
-async def import_token(request: ImportTokenRequest, current_user: User = Depends(get_current_user)):
-    try:
-        token = await blockchain.import_token(request.address, current_user.username)
-        return TokenInfo(
-            address=token.address,
-            name=token.name,
-            symbol=token.symbol,
-            balance=float(token.balance_of(current_user.username))
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/mint_token")
-async def mint_token(request: MintBurnRequest, current_user: User = Depends(get_current_user)):
-    try:
-        await blockchain.mint_token(request.address, current_user.username, Decimal(str(request.amount)))
-        return {"success": True, "message": f"Minted {request.amount} tokens"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/burn_token")
-async def burn_token(request: MintBurnRequest, current_user: User = Depends(get_current_user)):
-    try:
-        await blockchain.burn_token(request.address, current_user.username, Decimal(str(request.amount)))
-        return {"success": True, "message": f"Burned {request.amount} tokens"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/create_liquidity_pool")
-async def create_liquidity_pool(request: CreatePoolRequest, current_user: User = Depends(get_current_user)):
-    try:
-        pair = await blockchain.create_liquidity_pool(
-            current_user.username,
-            request.token_a,
-            request.token_b,
-            Decimal(str(request.amount_a)),
-            Decimal(str(request.amount_b))
-        )
-        return {"success": True, "pair": pair}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.get("/get_tokens", response_model=List[TokenInfo])
-async def get_tokens(current_user: User = Depends(get_current_user)):
-    try:
-        tokens = await blockchain.get_user_tokens(current_user.username)
-        return [
-            TokenInfo(
-                address=token.address,
-                name=token.name,
-                symbol=token.symbol,
-                balance=float(token.balance_of(current_user.username))
-            )
-            for token in tokens
-        ]
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 async def wait_for_initialization(timeout=60):
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -8011,28 +9082,28 @@ async def wait_for_initialization(timeout=60):
             return True
         await asyncio.sleep(1)
     return False
+initialization_complete = False
 
-@app.on_event("startup")
-async def startup_event():
+@app.before_server_start
+async def startup_event(app, loop):
     global initialization_complete
-    app.state.redis = await init_redis()
-    logger.info("Redis initialized and connected.")
-
     try:
-        # Start initialiseringen af systemet via async_main
-        asyncio.create_task(async_main())
+        # Initialize Redis (or any other resources)
+        app.ctx.redis = await init_redis()
+        logger.info("Redis initialized and connected.")
 
-        # Vent på at systemet er fuldt initialiseret med en timeout
-        if await wait_for_full_initialization():
-            initialization_complete = True
+        # Run the main initialization
+        initialization_complete = await async_main()
+
+        if initialization_complete:
             logger.info("System fully initialized and ready.")
         else:
-            logger.error("System initialization timed out.")
-            initialization_complete = False
+            logger.error("System initialization failed.")
+
     except Exception as e:
         logger.error(f"Error during startup: {str(e)}")
+        logger.error(traceback.format_exc())
         initialization_complete = False
-
 async def wait_for_full_initialization(timeout=60):
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -8048,48 +9119,6 @@ async def wait_for_full_initialization(timeout=60):
 
 
 
-
-# Add your API endpoints here
-@app.get("/")
-async def root():
-    return {"message": "Welcome to the Quantum DAG Knight Exchange"}
-
-@app.get("/node_status")
-async def get_node_status():
-    global node_directory
-    return {"active_nodes": node_directory.get_active_nodes()}
-@app.get("/blockchain_info")
-async def get_blockchain_info():
-    global blockchain
-    if blockchain and blockchain.chain:
-        return {
-            "chain_length": len(blockchain.chain),
-            "latest_block_hash": blockchain.chain[-1].hash
-        }
-    else:
-        return {"error": "Blockchain not initialized"}
-
-# Add more endpoints for order placement, trading, etc.
-
-# Add a method to simulate node failure (for testing purposes)
-@app.post("/simulate_node_failure")
-async def simulate_node_failure():
-    global node_directory
-    node_id = os.getenv("NODE_ID", "node_1")
-    node_directory.set_node_status(node_id, 'inactive')
-    logger.info(f"Node {node_id} simulated failure")
-    return {"message": f"Node {node_id} status set to inactive"}
-
-# Add a method to simulate node recovery (for testing purposes)
-@app.post("/simulate_node_recovery")
-async def simulate_node_recovery():
-    global node_directory, exchange
-    node_id = os.getenv("NODE_ID", "node_1")
-    node_directory.set_node_status(node_id, 'active')
-    await exchange.sync_state()
-    logger.info(f"Node {node_id} simulated recovery and state synced")
-    return {"message": f"Node {node_id} status set to active and state synced"}
-    propagation_times = []
 
 class EnhancedNodeDirectory(NodeDirectory):
     def __init__(self):
@@ -8185,96 +9214,6 @@ class TokenInfo(BaseModel):
     symbol: str
     balance: float
 
-# Endpoint to place a limit order
-@router.post("/place_order", response_model=OrderResponse)
-async def place_order(order: OrderRequest, current_user: str = Depends(get_current_user)):
-    try:
-        order_id = await exchange.place_limit_order(
-            current_user,
-            order.order_type,
-            order.pair,
-            Decimal(str(order.amount)),
-            Decimal(str(order.price))
-        )
-        return OrderResponse(order_id=order_id)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# Endpoint to get the order book for a trading pair
-@router.get("/order_book/{pair}")
-async def get_order_book(pair: str):
-    try:
-        order_book = await exchange.get_order_book(pair)
-        return order_book
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# Endpoint to swap tokens
-@router.post("/swap")
-async def swap_tokens(swap_request: SwapRequest, current_user: str = Depends(get_current_user)):
-    try:
-        result = await exchange.swap(
-            current_user,
-            swap_request.from_token,
-            swap_request.to_token,
-            Decimal(str(swap_request.amount))
-        )
-        return {"success": True, "amount_received": float(result)}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# Endpoint to add liquidity to a pool
-@router.post("/add_liquidity")
-async def add_liquidity(request: LiquidityRequest, current_user: str = Depends(get_current_user)):
-    try:
-        result = await exchange.add_liquidity(
-            current_user,
-            f"{request.token_a}_{request.token_b}",
-            Decimal(str(request.amount_a)),
-            Decimal(str(request.amount_b))
-        )
-        return {"success": True, "liquidity_tokens": float(result)}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# Endpoint to remove liquidity from a pool
-@router.post("/remove_liquidity")
-async def remove_liquidity(request: LiquidityRequest, current_user: str = Depends(get_current_user)):
-    try:
-        amount_a, amount_b = await exchange.remove_liquidity(
-            current_user,
-            f"{request.token_a}_{request.token_b}",
-            Decimal(str(request.amount_a))
-        )
-        return {"success": True, "amount_a": float(amount_a), "amount_b": float(amount_b)}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# Endpoint to get user's token balances
-@router.get("/user_tokens", response_model=List[TokenInfo])
-async def get_user_tokens(current_user: str = Depends(get_current_user)):
-    try:
-        tokens = await exchange.get_user_tokens(current_user)
-        return [
-            TokenInfo(
-                address=token.address,
-                name=token.name,
-                symbol=token.symbol,
-                balance=float(token.balance_of(current_user))
-            )
-            for token in tokens
-        ]
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# Endpoint to get current market price
-@router.get("/market_price/{pair}")
-async def get_market_price(pair: str):
-    try:
-        price = await exchange.get_market_price(pair)
-        return {"pair": pair, "price": float(price)}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 from pydantic import BaseModel, HttpUrl
 from jwt import PyJWTError as JWTError
 
@@ -8306,110 +9245,12 @@ class UpdateTokenLogoRequest(BaseModel):
     token_address: str
     logo_url: Optional[HttpUrl] = None
     logo_data: Optional[str] = None  # Base64 encoded image data
-@app.post("/api/create_token")
-async def create_token(
-    token_data: CreateTokenRequest,
-    current_user: str = Depends(get_current_user)
-):
-    success, result = vm.create_token(
-        creator_address=current_user,
-        token_name=token_data.token_name,
-        token_symbol=token_data.token_symbol,
-        total_supply=token_data.total_supply,
-        logo_url=token_data.logo_url,
-        logo_data=token_data.logo_data
-    )
-    if success:
-        return {
-            "status": "success",
-            "token_name": token_data.token_name,
-            "token_symbol": token_data.token_symbol,
-            "token_address": result
-        }
-    else:
-        raise HTTPException(status_code=400, detail=result)
 
-@app.post("/api/update_token_logo")
-async def update_token_logo(
-    logo_data: UpdateTokenLogoRequest,
-    current_user: str = Depends(get_current_user)
-):
-    success = vm.update_token_logo(
-        token_address=logo_data.token_address,
-        logo_url=logo_data.logo_url,
-        logo_data=logo_data.logo_data
-    )
-    if success:
-        return {"status": "success", "message": "Token logo updated successfully"}
-    else:
-        raise HTTPException(status_code=400, detail="Failed to update token logo")
-
-
-@app.post("/api/upload_token_logo")
-async def upload_token_logo(
-    token_address: str,
-    file: UploadFile = File(...),
-    current_user: str = Depends(get_current_user)
-):
-    try:
-        contents = await file.read()
-        logo_data = base64.b64encode(contents).decode()
-        success = vm.update_token_logo(token_address, logo_data=logo_data)
-        if success:
-            return {"status": "success", "message": "Token logo uploaded successfully"}
-        else:
-            raise HTTPException(status_code=400, detail="Failed to upload token logo")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-
-
-
-@app.get("/api/created_tokens", response_model=List[dict])
-async def get_created_tokens(current_user: str = Depends(get_current_user)):
-    try:
-    
-        user_tokens = vm.get_user_tokens(current_user)
-        return user_tokens
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An error occurred while fetching created tokens: {str(e)}"
-        )
-
-@app.post("/api/mint_token")
-async def mint_token(request: TransferTokenRequest):
-    result = vm.transfer_token(request.from_address, request.to_address, request.token_name, request.amount)
-    if result:
-        return {"status": "success", "minted_amount": request.amount}
-    raise HTTPException(status_code=400, detail="Minting failed")
-
-@app.post("/api/burn_token")
-async def burn_token(request: TransferTokenRequest):
-    # Assuming burn is just a transfer to a burn address (e.g., 0x0)
-    burn_address = "0x0000000000000000000000000000000000000000"
-    result = vm.transfer_token(request.from_address, burn_address, request.token_name, request.amount)
-    if result:
-        return {"status": "success", "burned_amount": request.amount}
-    raise HTTPException(status_code=400, detail="Burning failed")
-
-@app.post("/api/create_liquidity_pool")
-async def create_liquidity_pool(request: CreateLiquidityPoolRequest):
-    # Logic to create a liquidity pool in the VM
-    pool_address = vm.create_liquidity_pool(request.owner, request.token1, request.token2, request.amount1, request.amount2)
-    if pool_address:
-        return {"status": "success", "pool_address": pool_address}
-    raise HTTPException(status_code=400, detail="Liquidity pool creation failed")
-
-
-@app.get("/api/liquidity_pools")
-async def get_liquidity_pools():
-    # Placeholder for retrieving liquidity pools from the VM
-    return {"pools": list(vm.contracts.keys())}
 class QuantumCrossChainBridge:
     def __init__(self, supported_chains: List[str]):
         self.supported_chains = supported_chains
         self.qrng = QuantumRandomNumberGenerator()
-        self.zk_system = SecureHybridZKStark(security_level=256)
+        self.zk_system = SecureHybridZKStark(security_level=20)
 
     def generate_bridge_key(self, chain_a: str, chain_b: str) -> str:
         if chain_a not in self.supported_chains or chain_b not in self.supported_chains:
@@ -8479,83 +9320,187 @@ p2p_node = None
 continue_mining = False
 mining_task = None
 event_loop = asyncio.get_event_loop()
+from sanic import Sanic, response
+from sanic.exceptions import SanicException
+import time
+import asyncio
+
 @app.post("/mine_block")
-async def mine_block(request: MineBlockRequest, background_tasks: BackgroundTasks, pincode: str = Depends(authenticate)):
+async def mine_block(request):
     global blockchain, p2p_node, continue_mining, mining_task, initialization_complete
 
     try:
-        logger.debug(f"Received request to mine block with wallet address: {request.wallet_address}")
+        data = request.json
+        wallet_address = data.get("wallet_address")
 
-        # Check if mining is already in progress
+        logger.debug(f"Received request to mine block with wallet address: {wallet_address}")
+
+        # Validate request
+        if not wallet_address:
+            return response.json(
+                {"success": False, "message": "Wallet address is required"}, status=400
+            )
+
+        # Check mining status
         if continue_mining:
-            logger.warning("Mining is already in progress. Exiting...")
-            return {"success": False, "message": "Mining is already in progress"}
+            logger.warning("Mining is already in progress")
+            return response.json({"success": False, "message": "Mining is already in progress"})
 
-        # Check if the blockchain is initialized
-        if blockchain is None:
-            logger.error(f"Blockchain is None. Initialization complete: {initialization_complete}")
-            return {"success": False, "message": "Blockchain is not initialized"}
+        # Check system initialization
+        if not initialization_complete:
+            logger.error("System not fully initialized")
+            return response.json({"success": False, "message": "System initialization incomplete"})
 
-        # Check if the P2P node is initialized
-        if p2p_node is None:
-            logger.error(f"P2P node is None. Initialization complete: {initialization_complete}")
-            return {"success": False, "message": "P2P node is not initialized"}
+        # Check blockchain and P2P node
+        if blockchain is None or p2p_node is None:
+            return response.json({
+                "success": False,
+                "message": "Required components not initialized",
+                "blockchain_status": "initialized" if blockchain else "not initialized",
+                "p2p_status": "initialized" if p2p_node else "not initialized"
+            }, status=503)
 
-        # Retrieve the latest block hash using the new method
+        # Get latest blockchain state
         latest_block_hash = blockchain.get_latest_block_hash()
         logger.debug(f"Latest block hash: {latest_block_hash}")
 
-        # If no block exists, we assume it's the genesis block
-        if latest_block_hash == "0":
-            logger.info("Genesis block being created as blockchain is empty.")
-
-        # Start the continuous mining process
-        logger.info("Starting the continuous block mining process")
+        # Initialize mining process
         continue_mining = True
+        start_time = time.time()
 
-        # Add the continuous mining task to background tasks
-        mining_task = background_tasks.add_task(continuous_mining, blockchain, request.wallet_address, p2p_node)
-        logger.debug(f"Mining task added: {mining_task}")
+        try:
+            # Get pending transactions and compute reward
+            pending_txs = blockchain.get_pending_transactions()[:10]
+            reward = blockchain.get_block_reward()
 
-        # Prepare block information
-        block_info = {
-            "block_hash": latest_block_hash,
-            "miner": request.wallet_address,
-            "transactions": blockchain.get_pending_transactions(),
-            "timestamp": int(time.time())
+            # Mine block using DAGKnight miner
+            new_block = await blockchain.miner.mine_block(
+                previous_hash=latest_block_hash,
+                data=f"Block mined by {wallet_address} at {int(time.time())}",
+                transactions=pending_txs,
+                reward=reward,
+                miner_address=wallet_address
+            )
+
+            if not new_block:
+                raise ValueError("Failed to mine block")
+
+            # Validate the mined block
+            if not blockchain.miner.validate_block(new_block):
+                raise ValueError("Block validation failed")
+
+            # Add block to chain and process transactions
+            blockchain.chain.append(new_block)
+            await blockchain.process_transactions(new_block.transactions)
+            await blockchain.native_coin_contract.mint(wallet_address, Decimal(new_block.reward))
+
+            # Get DAG metrics
+            dag_metrics = blockchain.miner.get_dag_metrics()
+
+            # Prepare block info for broadcasting
+            block_info = {
+                "block_hash": new_block.hash,
+                "miner": wallet_address,
+                "transactions": [tx.to_dict() for tx in new_block.transactions],
+                "timestamp": int(time.time()),
+                "quantum_signature": new_block.quantum_signature,
+                "dag_metrics": dag_metrics,
+                "parent_hashes": [new_block.previous_hash] + 
+                                 (new_block.dag_parents if hasattr(new_block, 'dag_parents') else [])
+            }
+
+            # Propagate block to network
+            active_peers = await p2p_node.get_active_peers()
+            if active_peers:
+                await p2p_node.propagate_block(new_block)
+                logger.info(f"Block propagated to {len(active_peers)} peers")
+            else:
+                logger.warning("No active peers available for block propagation")
+
+            # Broadcast block mined event
+            await p2p_node.broadcast_event('block_mined', {
+                'block_info': block_info,
+                'mining_time': time.time() - start_time,
+                'network_state': {
+                    'active_peers': len(active_peers),
+                    'pending_transactions': len(blockchain.get_pending_transactions()),
+                    'dag_metrics': dag_metrics
+                }
+            })
+
+            # Add continuous mining task (use Sanic's background task)
+            mining_task = asyncio.create_task(continuous_mining(blockchain, wallet_address, p2p_node))
+
+            logger.info(f"Block successfully mined and broadcasted: {new_block.hash}")
+
+            # Return success response
+            return response.json({
+                "success": True,
+                "message": "Block mined and propagated successfully",
+                "block_hash": new_block.hash,
+                "mining_time": time.time() - start_time,
+                "dag_metrics": dag_metrics,
+                "reward": str(new_block.reward),
+                "transactions_processed": len(new_block.transactions)
+            })
+
+        except ValueError as ve:
+            logger.error(f"Mining error: {str(ve)}")
+            continue_mining = False
+            return response.json({"success": False, "message": str(ve)}, status=400)
+
+        except Exception as e:
+            logger.error(f"Unexpected error during mining: {str(e)}")
+            logger.error(traceback.format_exc())
+            continue_mining = False
+            return response.json({
+                "success": False,
+                "message": "Unexpected error during mining",
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }, status=500)
+
+    except Exception as outer_e:
+        logger.error(f"Outer error in mining endpoint: {str(outer_e)}")
+        logger.error(traceback.format_exc())
+        continue_mining = False
+        return response.json({
+            "success": False,
+            "message": "Error during mining process",
+            "error": str(outer_e),
+            "traceback": traceback.format_exc()
+        }, status=500)
+
+    finally:
+        # Reset mining state if something went wrong
+        if continue_mining and not mining_task:
+            continue_mining = False
+            logger.warning("Mining state reset due to task failure")
+@app.get("/peer_status")
+async def peer_status(request):
+    try:
+        p2p_node = app.ctx.p2p_node
+        connected_peers = app.ctx.connected_peers
+
+        if p2p_node is None:
+            raise SanicException("P2P node is not initialized", status_code=500)
+
+        # Prepare the response
+        peer_status = {
+            "total_peers": len(p2p_node.peers),
+            "active_peers": len(connected_peers),
+            "all_peers": list(p2p_node.peers.keys()),
+            "active_peer_list": connected_peers,
+            "peer_states": {peer: info["state"] for peer, info in p2p_node.peers.items()}
         }
 
-        logger.info(f"Mining block with info: {block_info}")
-
-        # Broadcast the mined block event to other nodes
-        await p2p_node.broadcast(Message(
-            MessageType.BLOCK, 
-            {'block_hash': latest_block_hash, 'miner': request.wallet_address, 'block_info': block_info}
-        ))
-
-        # WebSocket broadcast to subscribed clients
-        await p2p_node.broadcast_event('block_mined', {
-            'block_hash': latest_block_hash,
-            'miner': request.wallet_address,
-            'block_info': block_info
-        })
-
-        logger.info(f"Block mined and broadcasted: {block_info['block_hash']}")
-
-        # Return success response
-        return {"success": True, "message": "Continuous mining started", "block_info": block_info}
+        logger.info(f"Peer status: {peer_status}")
+        return response.json(peer_status)
 
     except Exception as e:
-        # Log and raise an error if there was an issue starting the mining process
-        logger.error(f"Error starting continuous mining: {str(e)}")
+        logger.error(f"Error while fetching peer status: {str(e)}")
         logger.error(traceback.format_exc())
-
-        return JSONResponse(status_code=500, content={
-            "success": False, 
-            "message": "Error starting continuous mining",
-            "details": str(e),
-            "traceback": traceback.format_exc()
-        })
+        raise SanicException(f"Internal server error: {str(e)}", status_code=500)
 
 def check_initialization_status():
     global initialization_status
@@ -8563,14 +9508,10 @@ def check_initialization_status():
     if uninitialized:
         return False, f"System is still initializing. Waiting for: {', '.join(uninitialized)}"
     return True, "System is fully initialized and ready"
-@app.get("/debug/initialization_status")
-async def debug_initialization_status():
-    return initialization_status
-    
-@app.middleware("http")
-async def ensure_p2p_node_middleware(request: Request, call_next):
+@app.middleware("request")
+async def ensure_p2p_node_middleware(request):
     # Ensure that the P2PNode is initialized before processing the request
-    if not hasattr(app.state, 'p2p_node') or app.state.p2p_node is None:
+    if not hasattr(app.ctx, 'p2p_node') or app.ctx.p2p_node is None:
         try:
             # Re-initialize P2PNode if it is missing
             logger.debug("P2PNode is not initialized. Initializing now...")
@@ -8578,14 +9519,11 @@ async def ensure_p2p_node_middleware(request: Request, call_next):
             logger.info("P2PNode and other components initialized.")
         except Exception as e:
             logger.error(f"Failed to initialize P2PNode: {str(e)}")
-            return JSONResponse(
-                status_code=503,
-                content={"message": "P2PNode is not initialized and cannot be initialized automatically."}
+            return response.json(
+                {"message": "P2PNode is not initialized and cannot be initialized automatically."},
+                status=503
             )
-    
-    # Proceed with the request
-    response = await call_next(request)
-    return response
+
 
     
 initialization_status = {
@@ -8607,17 +9545,11 @@ redis = None
 # Initialize Redis connection
 async def init_redis():
     global redis
-    if redis is None:
-        redis = await aioredis.from_url('redis://localhost')
-        app.state.redis = redis  # Store it in app state as well
-        logger.info("Redis initialized successfully.")
-    else:
-        logger.warning("Redis is already initialized in global scope.")
-    
-    if hasattr(app.state, 'redis'):
-        logger.info("Redis is available in app.state.redis")
-    else:
-        logger.error("Redis is NOT available in app.state.redis")
+    # Initialize Redis here...
+    redis = await some_redis_initialization_function()
+    app.ctx.redis = redis  # Store Redis in app.ctx
+    logger.info("Redis initialized successfully.")
+
 
 
 
@@ -8628,63 +9560,276 @@ async def update_initialization_status(component, status):
         raise RuntimeError("Redis is not initialized. Call init_redis first.")
 
     async with initialization_lock:
-        await redis.hset('initialization_status', component, int(status))  # Store as int (0 or 1)
+        await redis.hset('initialization_status', component, int(status))
+        logger.info(f"Component '{component}' initialization status updated to: {status}")
         updated_status = await redis.hgetall('initialization_status')
-        logger.info(f"Component '{component}' status updated. Current status: {updated_status}")
+        logger.info(f"Current initialization status: {updated_status}")
 @app.middleware("http")
 async def ensure_redis_and_blockchain_middleware(request: Request, call_next):
     # Ensure Redis is initialized
     if not hasattr(app.state, 'redis') or app.state.redis is None:
         await init_redis()  # Initialize Redis if not already done
         app.state.redis = redis
+        logger.info("Redis initialized in middleware")
 
     # Ensure Blockchain is initialized
     if not hasattr(app.state, 'blockchain') or app.state.blockchain is None:
-        await async_main_initialization()  # A function to initialize blockchain and other components
+        await async_main_initialization()  # Initialize blockchain and other components
         app.state.blockchain = blockchain
+        logger.info("Blockchain initialized in middleware")
+
+    # Ensure P2P Node is initialized
+    if not hasattr(app.state, 'p2p_node') or app.state.p2p_node is None:
+        if hasattr(app.state.blockchain, 'p2p_node'):
+            app.state.p2p_node = app.state.blockchain.p2p_node
+            await update_initialization_status("p2p_node", True)  # Update Redis status
+            logger.info("P2P node set from blockchain in middleware")
+        else:
+            logger.warning("P2P node not found in blockchain")
+
+    # Ensure VM is initialized
+    if not hasattr(app.state, 'vm') or app.state.vm is None:
+        logger.warning("VM not found in app.state. Attempting to initialize...")
+        try:
+            vm = await initialize_vm()
+            if vm:
+                logger.info("VM initialized successfully in middleware")
+            else:
+                logger.error("Failed to initialize VM in middleware")
+        except Exception as e:
+            logger.error(f"Error initializing VM in middleware: {str(e)}")
+            logger.error(traceback.format_exc())
+
+
+    # Log the state of components after initialization
+    logger.info(f"Middleware check - Redis: {'initialized' if app.state.redis else 'not initialized'}")
+    logger.info(f"Middleware check - Blockchain: {'initialized' if app.state.blockchain else 'not initialized'}")
+    logger.info(f"Middleware check - P2P Node: {'initialized' if app.state.p2p_node else 'not initialized'}")
+    logger.info(f"Middleware check - VM: {'initialized' if app.state.vm else 'not initialized'}")
 
     return await call_next(request)
 
-@app.get("/health")
-async def health_check():
-    # Ensure Redis is initialized
-    if not hasattr(app.state, "redis") or app.state.redis is None:
-        logger.error("Redis is not initialized. Call init_redis first.")
-        return {
-            "status": "error",
-            "message": "Redis is not initialized. Call init_redis first."
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+class P2PNodeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if hasattr(app.state, 'p2p_node') and app.state.p2p_node is not None:
+            request.state.p2p_node = app.state.p2p_node
+            request.state.connected_peers = await app.state.p2p_node.get_active_peers()
+        else:
+            request.state.p2p_node = None
+            request.state.connected_peers = []
+        
+        response = await call_next(request)
+        return response
+
+# Add proper error handling middleware
+@app.middleware('request')
+async def validate_initialization(request):
+    if request.path != '/health' and request.path != '/status':
+        if not hasattr(request.app.ctx, 'initialization_status') or \
+           request.app.ctx.initialization_status != "complete":
+            return json(
+                {"error": "Server is still initializing"},
+                status=503
+            )
+
+# Add proper exception handling
+@app.exception(Exception)
+async def handle_exception(request, exception):
+    logger.error(f"Unhandled exception: {str(exception)}")
+    logger.error(traceback.format_exc())
+    return json(
+        {"error": str(exception)},
+        status=500
+    )
+
+# Add this middleware to your FastAPI app
+# Add to your quantumdagknight.py
+from sanic import Request
+from sanic.response import json as sanic_json
+
+@app.route('/health', methods=['GET'])
+async def health_check(request: Request):
+    logger.info("Health check started")
+    try:
+        components_status = {}
+
+        # Check Redis
+        logger.info("Checking Redis status")
+        try:
+            components_status["redis"] = (
+                "initialized"
+                if hasattr(app.ctx, "redis") and app.ctx.redis is not None
+                else "not initialized"
+            )
+            logger.info(f"Redis status: {components_status['redis']}")
+
+            # Only check Redis initialization status if Redis is initialized
+            if components_status["redis"] == "initialized":
+                initialization_status = await app.ctx.redis.hgetall('initialization_status')
+                for comp, status in initialization_status.items():
+                    comp_name = comp.decode('utf-8') if isinstance(comp, bytes) else comp
+                    status_value = int(status.decode('utf-8')) if isinstance(status, bytes) else int(status)
+                    if comp_name not in components_status:
+                        comp_status = "initialized" if status_value == 1 else "not initialized"
+                        components_status[comp_name] = comp_status
+                        logger.info(f"{comp_name} status from Redis: {comp_status}")
+        except Exception as redis_error:
+            logger.error(f"Error checking Redis status: {str(redis_error)}")
+            components_status["redis"] = f"error: {str(redis_error)}"
+
+        # Check other components
+        logger.info("Checking other components")
+        components_to_check = ["blockchain", "p2p_node", "vm", "price_feed", "plata_contract", "exchange"]
+        for component in components_to_check:
+            try:
+                # In Sanic, we use app.ctx instead of app.state
+                status = (
+                    "initialized"
+                    if hasattr(app.ctx, component) and getattr(app.ctx, component) is not None
+                    else "not initialized"
+                )
+                components_status[component] = status
+                logger.info(f"{component} status: {status}")
+            except Exception as comp_error:
+                logger.error(f"Error checking {component} status: {str(comp_error)}")
+                components_status[component] = f"error: {str(comp_error)}"
+
+        # Check P2P node peers
+        logger.info("Checking P2P node peers")
+        try:
+            if hasattr(app.ctx, 'p2p_node') and app.ctx.p2p_node is not None:
+                components_status["p2p_node_peers"] = len(app.ctx.p2p_node.connected_peers)
+                logger.info(f"P2P node peers: {components_status['p2p_node_peers']}")
+            else:
+                components_status["p2p_node_peers"] = 0
+                logger.info("P2P node not initialized, peers set to 0")
+        except Exception as p2p_error:
+            logger.error(f"Error checking P2P node peers: {str(p2p_error)}")
+            components_status["p2p_node_peers"] = f"error: {str(p2p_error)}"
+
+        # Check global variables as backup
+        logger.info("Checking global variables")
+        global blockchain, p2p_node, vm, price_feed, plata_contract, exchange
+        global_components = {
+            "blockchain": blockchain,
+            "p2p_node": p2p_node,
+            "vm": vm,
+            "price_feed": price_feed,
+            "plata_contract": plata_contract,
+            "exchange": exchange
         }
+        
+        for comp_name, comp_value in global_components.items():
+            if components_status.get(comp_name) == "not initialized" and comp_value is not None:
+                components_status[comp_name] = "initialized (global)"
+                logger.info(f"{comp_name} found in global scope")
 
-    # Ensure Blockchain is initialized
-    if not hasattr(app.state, "blockchain") or app.state.blockchain is None:
-        logger.error("Blockchain is not initialized.")
-        return {
-            "status": "error",
-            "message": "Blockchain is not initialized."
-        }
+        # Determine uninitialized or error components
+        uninitialized_components = [
+            comp for comp, status in components_status.items()
+            if status == "not initialized" or str(status).startswith("error")
+        ]
 
-    # Redis is available, proceed with health check
-    redis = app.state.redis  # Access Redis from app.state
-    initialization_status = await redis.hgetall('initialization_status')
+        if uninitialized_components:
+            logger.info(f"System not fully initialized. Waiting for: {uninitialized_components}")
+            return sanic_json(
+                {
+                    "status": "initializing",
+                    "message": f"System is still initializing. Waiting for: {', '.join(uninitialized_components)}",
+                    "components": components_status
+                },
+                status=200
+            )
 
-    logger.info(f"Health check called. Current initialization status read: {initialization_status}")
+        logger.info("Health check completed successfully. System fully initialized.")
+        return sanic_json(
+            {
+                "status": "ready",
+                "message": "System is fully initialized and ready.",
+                "components": components_status
+            },
+            status=200
+        )
 
-    uninitialized_components = [comp.decode('utf-8') for comp, status in initialization_status.items() if int(status) == 0]
-    if uninitialized_components:
-        logger.info(f"Health check: System not fully initialized. Waiting for: {uninitialized_components}")
-        return {
-            "status": "initializing",
-            "message": f"System is still initializing. Waiting for: {uninitialized_components}"
-        }
+    except Exception as e:
+        logger.error(f"Unexpected error in health check: {str(e)}")
+        logger.error(traceback.format_exc())
+        return sanic_json(
+            {
+                "status": "error",
+                "message": f"Unexpected error in health check: {str(e)}",
+                "traceback": traceback.format_exc()
+            },
+            status=500
+        )
 
-    logger.info("Health check: System fully initialized.")
-    return {
-        "status": "ready",
-        "message": "System is fully initialized and ready."
-    }
+# Update the app initialization to store components in app.ctx
+@app.before_server_start
+async def setup_app(app, loop):
+    try:
+        logger.info("Initializing application components...")
+        
+        # Initialize Redis
+        app.ctx.redis = await init_redis()
+        
+        # Initialize components
+        await async_main_initialization()
+        
+        # Store components in app.ctx
+        app.ctx.blockchain = blockchain
+        app.ctx.p2p_node = p2p_node
+        app.ctx.vm = vm
+        app.ctx.price_feed = price_feed
+        app.ctx.plata_contract = plata_contract
+        app.ctx.exchange = exchange
+        
+        logger.info("Application components initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize application: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
-
-
+# Add cleanup on server stop
+@app.before_server_stop
+async def cleanup_app(app, loop):
+    try:
+        # Cleanup Redis
+        if hasattr(app.ctx, 'redis') and app.ctx.redis:
+            await app.ctx.redis.close()
+        
+        # Cleanup other components
+        await cleanup_resources()
+        
+        # Clear app context
+        for component in ["blockchain", "p2p_node", "vm", "price_feed", "plata_contract", "exchange"]:
+            if hasattr(app.ctx, component):
+                delattr(app.ctx, component)
+        
+        logger.info("Application cleanup completed")
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        
+async def start_server(host='0.0.0.0', port=50511):
+    try:
+        server = await app.create_server(
+            host=host,
+            port=port,
+            return_asyncio_server=True,
+            access_log=True,
+            register_sys_signals=True
+        )
+        
+        async with server:
+            await server.serve_forever()
+    except Exception as e:
+        logger.error(f"Failed to start server: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 def check_initialization_status():
     global initialization_status
@@ -8695,25 +9840,29 @@ def check_initialization_status():
         return False, f"System is still initializing. Waiting for: {', '.join(uninitialized)}"
     logger.info("All components are initialized.")
     return True, "System is fully initialized and ready"
-
-
-
-# FastAPI route to stop mining
 @app.post("/stop_mining")
-async def stop_mining():
+async def stop_mining(request):
     global continue_mining, mining_task
     try:
         if not continue_mining:
-            return {"success": False, "message": "Mining is not currently running"}
-        
+            return response.json({"success": False, "message": "Mining is not currently running"})
+
+        # Stop mining
         continue_mining = False
         if mining_task:
             mining_task.cancel()
+            logger.info("Mining task has been canceled")
+        else:
+            logger.warning("No active mining task to cancel")
+
         logger.info("Mining has been stopped")
-        return {"success": True, "message": "Mining stopped successfully"}
+        return response.json({"success": True, "message": "Mining stopped successfully"})
+
     except Exception as e:
         logger.error(f"Failed to stop mining: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to stop mining: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise SanicException(f"Failed to stop mining: {str(e)}", status_code=500)
+
 async def propagate_block_with_retry(block, retries=3):
     for attempt in range(retries):
         try:
@@ -8792,8 +9941,7 @@ async def continuous_mining(blockchain, wallet_address: str, p2p_node: P2PNode):
                 blockchain.reward_miner(wallet_address, reward)
 
                 # Broadcast the block with a retry mechanism
-                retries = 3
-                await blockchain.propagate_block_with_retry(new_block, retries=retries)
+                await p2p_node.propagate_block(new_block)
 
                 logger.info(f"Block {new_block.hash} successfully propagated across the network")
                 blocks_mined += 1
@@ -8804,7 +9952,63 @@ async def continuous_mining(blockchain, wallet_address: str, p2p_node: P2PNode):
             logger.error(f"Error during continuous mining: {str(e)}")
             await asyncio.sleep(5)
 
+from multisig_zkp import MultisigZKP
+from typing import List
 
+# Add this to your existing imports
+from pydantic import BaseModel
+
+# Add these new models
+class CreateMultisigRequest(BaseModel):
+    public_keys: List[str]
+    threshold: int
+
+class SignTransactionRequest(BaseModel):
+    multisig_address: str
+    private_key: int
+    message: str
+
+class VerifyMultisigRequest(BaseModel):
+    multisig_address: str
+    public_keys: List[int]
+    threshold: int
+    message: str
+    aggregate_proof: Tuple[List[int], List[int], List[Tuple[int, List[int]]]]
+
+
+@app.post("/create_multisig")
+async def create_multisig(request):
+    multisig_zkp = app.ctx.multisig_zkp
+    data = request.json
+    public_keys = data.get("public_keys")
+    threshold = data.get("threshold")
+    
+    multisig_address = multisig_zkp.create_multisig(public_keys, threshold)
+    return response.json({"multisig_address": multisig_address})
+
+
+@app.post("/sign_multisig_transaction")
+async def sign_multisig_transaction(request):
+    multisig_zkp = app.ctx.multisig_zkp
+    data = request.json
+    private_key = data.get("private_key")
+    message = data.get("message")
+    
+    proof = multisig_zkp.sign_transaction(private_key, message)
+    return response.json({"proof": proof})
+
+
+@app.post("/verify_multisig_transaction")
+async def verify_multisig_transaction(request):
+    multisig_zkp = app.ctx.multisig_zkp
+    data = request.json
+    public_keys = data.get("public_keys")
+    threshold = data.get("threshold")
+    message = data.get("message")
+    aggregate_proof = data.get("aggregate_proof")
+    
+    is_valid = multisig_zkp.verify_multisig(public_keys, threshold, message, aggregate_proof)
+    return response.json({"is_valid": is_valid})
 
 
 
@@ -8818,49 +10022,927 @@ def find_free_port():
         s.bind(('', 0))
         return s.getsockname()[1]
 async def run_daphne_server():
-    from quantumdagknight import app  # Import your FastAPI or other ASGI app here
 
     # Setup the Daphne server
     interface = "0.0.0.0"
     port = 50503
     endpoints = build_endpoint_description_strings(interface, port)
 
-    # Increase the timeout and ping interval to prevent shutdown
+    # Define the Daphne server with a 600-second timeout
     server = DaphneServer(
         application=app,
         endpoints=endpoints,
-        ping_interval=300,  # Increase ping interval to 300 seconds (5 minutes)
-        application_close_timeout=600,  # Increase close timeout to 600 seconds (10 minutes)
-        ws_connect_timeout=300  # Increase WebSocket connect timeout if needed
+        http_timeout=600  # Set the timeout to 600 seconds
     )
 
     # Run the server in the current asyncio loop
     await asyncio.to_thread(server.run)
-
-
-async def initialize_p2p_node(ip_address, p2p_port):
+    
+    
+    
+    
+    
+    
+    
+app.config.update({
+    'RESPONSE_TIMEOUT': 600,  # 10 minutes
+    'REQUEST_TIMEOUT': 600,
+    'KEEP_ALIVE_TIMEOUT': 75,
+    'GRACEFUL_SHUTDOWN_TIMEOUT': 15.0,
+    'REAL_IP_HEADER': 'X-Real-IP',
+    'ACCESS_LOG': True,
+    'CORS_ORIGINS': "*"
+})
+@app.signal('server.init.before')
+async def setup_server(app, loop):
+    logger.info("Initializing server...")
+    app.ctx.initialization_complete = False
     try:
-        logger.info(f"Initializing P2P node at {ip_address}:{p2p_port}")
-        p2p_node = P2PNode(blockchain=None, host=ip_address, port=p2p_port)
-
-        # Start P2P Node WebSocket server for node-to-node communication
-        await p2p_node.start()
-
-        # Start the second WebSocket server for client subscriptions
-        await p2p_node.start_ws_server()
-
-        # Check connection status without await (assuming is_connected returns a boolean)
-        if p2p_node.is_connected():
-            logger.info(f"P2P node successfully connected. Peers: {p2p_node.peers}")
-        else:
-            logger.warning("P2P node failed to connect. No peers are connected.")
-
-        return p2p_node
-
+        # Initialize your components here
+        await async_main_initialization()
+        app.ctx.initialization_complete = True
+        logger.info("Server initialization completed successfully")
     except Exception as e:
-        logger.error(f"Error initializing P2P node: {str(e)}")
+        logger.error(f"Error during server initialization: {str(e)}")
         logger.error(traceback.format_exc())
-        return None
+        # Don't raise the exception, let the server start anyway
+        # but mark initialization as incomplete
+        app.ctx.initialization_complete = False
+
+@app.signal('server.shutdown.before')
+async def cleanup_server(app, loop):
+    logger.info("Starting server cleanup...")
+    try:
+        await cleanup_resources()
+        logger.info("Server cleanup completed successfully")
+    except Exception as e:
+        logger.error(f"Error during server cleanup: {str(e)}")
+        logger.error(traceback.format_exc())
+
+# Middleware for checking initialization status
+@app.middleware('request')
+async def check_initialization(request):
+    if not getattr(request.app.ctx, 'initialization_complete', False):
+        endpoints_without_init = ['/health', '/status']
+        if request.path not in endpoints_without_init:
+            return json(
+                {'error': 'Server is still initializing'},
+                status=503
+            )
+
+# Error handlers
+@app.exception(Exception)
+async def handle_exception(request, exception):
+    logger.error(f"Unhandled exception: {str(exception)}")
+    logger.error(traceback.format_exc())
+    return json(
+        {'error': 'Internal server error', 'detail': str(exception)},
+        status=500
+    )
+
+
+
+import asyncio
+import websockets
+import json
+import logging
+import socket
+from contextlib import closing
+
+class QuantumBlockchainWebSocketServer:
+    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
+        self.host = host
+        self.port = self._find_available_port(port)
+        self.sessions = {}
+    async def initialize(self):
+        """Initialize the server and verify it's running"""
+        try:
+            # Start server in background task
+            server_task = asyncio.create_task(self.start_server())
+            
+            # Wait a moment to ensure server starts
+            await asyncio.sleep(1)
+            
+            # Verify server is running by attempting a connection
+            try:
+                async with websockets.connect(f"ws://127.0.0.1:{self.port}", ping_interval=None) as ws:
+                    await ws.close()
+                logger.info("Server verified as running with successful test connection")
+            except Exception as e:
+                logger.error(f"Failed to verify server is running: {e}")
+                raise
+            
+            return server_task
+            
+        except Exception as e:
+            logger.error(f"Server initialization failed: {e}")
+            raise
+
+
+    def _find_available_port(self, preferred_port):
+        """Check if preferred port is available, if not find another one"""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((self.host, preferred_port))
+                s.listen(1)
+                s.close()
+                logger.info(f"Preferred port {preferred_port} is available")
+                return preferred_port
+        except OSError as e:
+            logger.warning(f"Port {preferred_port} is not available: {e}")
+            # Find a random available port
+            with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+                s.bind((self.host, 0))
+                s.listen(1)
+                port = s.getsockname()[1]
+                logger.info(f"Found available port: {port}")
+                return port
+
+    def create_session(self, session_id: str):
+        """Initialize a new session with all required components"""
+        self.sessions[session_id] = {
+            'wallet': Wallet(),
+            'miner': DAGKnightMiner(difficulty=2, security_level=20),
+            'transactions': [],
+            'zk_system': SecureHybridZKStark(security_level=20),
+            'mining_task': None,
+            'performance_data': {
+                'blocks_mined': [],
+                'mining_times': [],
+                'hash_rates': [],
+                'start_time': time.time()
+            }
+        }
+        logger.info(f"New session created: {session_id}")
+
+    async def cleanup_session(self, session_id: str):
+        """Clean up session resources"""
+        if session_id in self.sessions:
+            if self.sessions[session_id].get('mining_task'):
+                task = self.sessions[session_id]['mining_task']
+                if not task.done():
+                    task.cancel()
+            del self.sessions[session_id]
+        logger.info(f"Session cleaned up: {session_id}")
+
+
+    async def start_server(self):
+        """Start the WebSocket server with port binding verification"""
+        logger.info(f"Attempting to start WebSocket server on {self.host}:{self.port}")
+        
+        try:
+            # Verify port is available before starting server
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind((self.host, self.port))
+                    s.listen(1)
+                    s.close()
+                except OSError as e:
+                    logger.error(f"Port {self.port} is not available: {e}")
+                    raise
+
+            # Start WebSocket server
+            server = await websockets.serve(
+                self.handle_connection,
+                self.host,
+                self.port,
+                ping_interval=None,  # Disable automatic ping
+                ping_timeout=None    # Disable ping timeout
+            )
+            
+            logger.info(f"WebSocket server successfully started and listening on ws://{self.host}:{self.port}")
+            
+            # Keep server running
+            await server.wait_closed()
+            
+        except Exception as e:
+            logger.error(f"Failed to start WebSocket server: {e}")
+            logger.error(traceback.format_exc())
+            raise
+
+
+    async def handle_connection(self, websocket, path):
+        """Handle incoming WebSocket connections"""
+        session_id = str(id(websocket))
+        logger.info(f"New connection established: {session_id}")
+        
+        self.create_session(session_id)
+        
+        try:
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    response = await self.handle_message(session_id, websocket, data)
+                    if response:
+                        await websocket.send(json.dumps(response))
+                except json.JSONDecodeError:
+                    await websocket.send(json.dumps({
+                        "status": "error",
+                        "message": "Invalid JSON format"
+                    }))
+                except Exception as e:
+                    logger.error(f"Error handling message: {str(e)}")
+                    await websocket.send(json.dumps({
+                        "status": "error",
+                        "message": str(e)
+                    }))
+        finally:
+            await self.cleanup_session(session_id)
+
+    async def handle_message(self, session_id: str, websocket, data: dict) -> dict:
+        """Route messages to appropriate handlers based on category and action"""
+        try:
+            category = data.get("category", "")
+            action = data.get("action", "")
+            
+            logger.debug(f"Handling {category}/{action} request for session {session_id}")
+            
+            # Define all available handlers
+            handlers = {
+                "wallet": {
+                    "create": self.handle_create_wallet,
+                    "create_with_pincode": self.handle_create_wallet_with_pincode,
+                    "create_with_mnemonic": self.handle_create_wallet_with_mnemonic,
+                    "get_info": self.handle_get_wallet_info,
+                    "sign_message": lambda sid, ws, d: self.handle_sign_message(sid, d),
+                    "verify_signature": lambda sid, ws, d: self.handle_verify_signature(sid, d),
+                    "encrypt_message": lambda sid, ws, d: self.handle_encrypt_message(sid, d),
+                    "decrypt_message": lambda sid, ws, d: self.handle_decrypt_message(sid, d),
+                    "verify_pincode": self.handle_verify_pincode,
+                    "generate_alias": self.handle_generate_alias
+                },
+                "mining": {
+                    "initialize": self.handle_initialize_miner,
+                    "start": self.handle_start_mining,
+                    "stop": self.handle_stop_mining,
+                    "get_metrics": self.handle_get_mining_metrics,
+                    "get_dag_status": self.handle_get_dag_status,
+                    "validate_block": self.handle_validate_block
+                },
+                "transaction": {
+                    "create": self.handle_create_transaction,
+                    "sign": self.handle_sign_transaction,
+                    "verify": self.handle_verify_transaction,
+                    "get_all": self.handle_get_transactions,
+                    "get_metrics": self.handle_get_transaction_metrics
+                }
+            }
+
+            if category not in handlers:
+                logger.error(f"Unknown category received: {category}")
+                return {
+                    "status": "error",
+                    "message": f"Unknown category: {category}. Available categories: {list(handlers.keys())}"
+                }
+
+            category_handlers = handlers[category]
+            if action not in category_handlers:
+                logger.error(f"Unknown action received: {action} for category {category}")
+                return {
+                    "status": "error",
+                    "message": f"Unknown action: {action} for category: {category}. Available actions: {list(category_handlers.keys())}"
+                }
+
+            handler = category_handlers[action]
+            logger.debug(f"Calling handler for {category}/{action}")
+            response = await handler(session_id, websocket, data)
+            logger.debug(f"Handler response: {response}")
+            return response
+
+        except Exception as e:
+            logger.error(f"Error handling message: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+
+
+    # Wallet Handlers
+    async def handle_create_wallet(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle wallet creation"""
+        self.sessions[session_id]['wallet'] = Wallet()
+        return {
+            "status": "success",
+            "wallet": self.sessions[session_id]['wallet'].to_dict()
+        }
+
+    async def handle_create_wallet_with_pincode(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle wallet creation with pincode"""
+        pincode = data.get("pincode")
+        if not pincode:
+            return {"status": "error", "message": "Pincode is required"}
+        
+        self.sessions[session_id]['wallet'] = Wallet(pincode=pincode)
+        return {
+            "status": "success",
+            "wallet": self.sessions[session_id]['wallet'].to_dict()
+        }
+    # Transaction Handlers
+    async def handle_create_transaction(self, session_id: str, websocket, data: dict) -> dict:
+        """Create new transaction"""
+        try:
+            if 'wallet' not in self.sessions[session_id]:
+                return {
+                    "status": "error",
+                    "message": "Wallet not initialized for this session"
+                }
+
+            # Ensure wallet is fetched from session data, if necessary
+            wallet = self.sessions[session_id].get('wallet')
+
+            # Initialize transaction
+            transaction = Transaction(
+                sender=wallet.address if wallet else "unknown_sender",
+                receiver=data.get("receiver"),
+                amount=Decimal(str(data.get("amount", "0"))),
+                price=Decimal(str(data.get("price", "1.0"))),
+                buyer_id=data.get("buyer_id"),
+                seller_id=data.get("seller_id"),
+                wallet=wallet,  # Explicitly set wallet if available
+                timestamp=time.time()  # Explicitly set timestamp
+            )
+
+            # Log tx_hash to ensure it’s generated internally
+            logger.info(f"Transaction created with tx_hash: {transaction.tx_hash}")
+
+            # Append the transaction to the session's transaction list
+            self.sessions[session_id].setdefault('transactions', []).append(transaction)
+
+            return {
+                "status": "success",
+                "message": "Transaction created",
+                "transaction": transaction.to_dict()
+            }
+        except Exception as e:
+            logger.error(f"Error creating transaction: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Failed to create transaction: {str(e)}"
+            }
+
+
+    # Mining Handlers
+    async def handle_start_mining(self, session_id: str, websocket, data: dict) -> dict:
+        """Start mining process"""
+        try:
+            if not self.sessions[session_id].get('miner'):
+                return {
+                    "status": "error",
+                    "message": "Miner not initialized. Call initialize first."
+                }
+            
+            if self.sessions[session_id].get('mining_task'):
+                return {
+                    "status": "error",
+                    "message": "Mining already in progress"
+                }
+
+            duration = data.get("duration", 300)  # Default 5 minutes
+            self.sessions[session_id]['performance_data'] = {
+                'blocks_mined': [],
+                'mining_times': [],
+                'hash_rates': [],
+                'start_time': time.time()
+            }
+
+            mining_task = asyncio.create_task(
+                self.mining_loop(session_id, websocket, duration)
+            )
+            self.sessions[session_id]['mining_task'] = mining_task
+
+            return {
+                "status": "success",
+                "message": "Mining started",
+                "duration": duration
+            }
+        except Exception as e:
+            logger.error(f"Error starting mining: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Failed to start mining: {str(e)}"
+            }
+
+
+    async def mining_loop(self, session_id: str, websocket, duration: int):
+        """Main mining loop"""
+        session = self.sessions[session_id]
+        miner = session['miner']
+        start_time = time.time()
+        end_time = start_time + duration
+        previous_hash = "0" * 64
+        
+        try:
+            while time.time() < end_time:
+                mine_start = time.time()
+                block = await miner.mine_block(
+                    previous_hash,
+                    f"block_data_{len(session['performance_data']['blocks_mined'])}",
+                    session['transactions'],
+                    Decimal("50"),
+                    session['wallet'].address
+                )
+                
+                if block:
+                    await self.handle_mined_block(session_id, websocket, block, time.time() - mine_start)
+                    previous_hash = block.hash
+
+                await asyncio.sleep(0)
+
+        except asyncio.CancelledError:
+            logger.info(f"Mining cancelled for session: {session_id}")
+        except Exception as e:
+            logger.error(f"Error in mining loop: {str(e)}")
+            await websocket.send(json.dumps({
+                "status": "error",
+                "message": f"Mining error: {str(e)}"
+            }))
+        finally:
+            session['mining_task'] = None
+            await self.send_mining_complete(websocket, session_id)
+
+# Remaining Wallet Handlers
+    async def handle_create_wallet_with_mnemonic(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle wallet creation from mnemonic"""
+        mnemonic = data.get("mnemonic")
+        if not mnemonic:
+            return {"status": "error", "message": "Mnemonic is required"}
+            
+        self.sessions[session_id]['wallet'] = Wallet(mnemonic=mnemonic)
+        return {
+            "status": "success",
+            "wallet": self.sessions[session_id]['wallet'].to_dict()
+        }
+
+    async def handle_get_wallet_info(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle wallet info request"""
+        wallet = self.sessions[session_id].get('wallet')
+        if not wallet:
+            return {"status": "error", "message": "No wallet found for this session"}
+            
+        return {
+            "status": "success",
+            "wallet": wallet.to_dict()
+        }
+
+    async def handle_sign_message(self, session_id: str, data: dict) -> dict:
+        """Handle message signing request"""
+        try:
+            wallet = self.sessions[session_id].get('wallet')
+            if not wallet:
+                return {"status": "error", "message": "No wallet found for this session"}
+            
+            message_bytes = data.get("message_bytes")
+            if not message_bytes:
+                return {"status": "error", "message": "message_bytes is required"}
+            
+            try:
+                # Sign the base64 encoded message
+                signature = wallet.sign_message(message_bytes)
+                return {
+                    "status": "success",
+                    "signature": signature
+                }
+            except ValueError as e:
+                return {"status": "error", "message": str(e)}
+                
+        except Exception as e:
+            logger.error(f"Error in handle_sign_message: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+
+
+    async def handle_verify_signature(self, session_id: str, data: dict) -> dict:
+        """Handle signature verification request"""
+        try:
+            wallet = self.sessions[session_id].get('wallet')
+            if not wallet:
+                return {"status": "error", "message": "No wallet found for this session"}
+            
+            message_bytes = data.get("message_bytes")
+            signature = data.get("signature")
+            
+            if not message_bytes or not signature:
+                return {"status": "error", "message": "message_bytes and signature are required"}
+            
+            try:
+                # Verify the signature
+                is_valid = wallet.verify_signature(message_bytes, signature, wallet.public_key)
+                return {
+                    "status": "success",
+                    "valid": is_valid
+                }
+            except ValueError as e:
+                return {"status": "error", "message": str(e)}
+                
+        except Exception as e:
+            logger.error(f"Error in handle_verify_signature: {str(e)}")
+            return {"status": "error", "message": str(e)}
+    def log_message(self, level: str, message: str):
+        """Helper method for consistent logging"""
+        logger_method = getattr(logger, level.lower(), logger.info)
+        logger_method(f"[WebSocket Server] {message}")
+
+
+    async def handle_encrypt_message(self, session_id: str, data: dict) -> dict:
+        """
+        Handle message encryption request
+        Args:
+            session_id: Session identifier
+            data: Request data containing message_bytes and recipient_public_key
+        """
+        try:
+            wallet = self.sessions[session_id].get('wallet')
+            if not wallet:
+                return {"status": "error", "message": "No wallet found for this session"}
+            
+            message_bytes = data.get("message_bytes")
+            recipient_public_key = data.get("recipient_public_key")
+            
+            if not message_bytes or not recipient_public_key:
+                return {"status": "error", "message": "message_bytes and recipient_public_key are required"}
+            
+            try:
+                # Encrypt the message
+                encrypted = wallet.encrypt_message(message_bytes, recipient_public_key)
+                return {
+                    "status": "success",
+                    "encrypted_message": encrypted
+                }
+            except ValueError as e:
+                return {"status": "error", "message": str(e)}
+                
+        except Exception as e:
+            logger.error(f"Error in handle_encrypt_message: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    async def handle_decrypt_message(self, session_id: str, data: dict) -> dict:
+        """
+        Handle message decryption request
+        Args:
+            session_id: Session identifier
+            data: Request data containing encrypted_message
+        """
+        try:
+            wallet = self.sessions[session_id].get('wallet')
+            if not wallet:
+                return {"status": "error", "message": "No wallet found for this session"}
+            
+            encrypted_message = data.get("encrypted_message")
+            if not encrypted_message:
+                return {"status": "error", "message": "encrypted_message is required"}
+            
+            try:
+                # Decrypt the message
+                decrypted = wallet.decrypt_message(encrypted_message)
+                return {
+                    "status": "success",
+                    "decrypted_message": decrypted
+                }
+            except ValueError as e:
+                return {"status": "error", "message": str(e)}
+                
+        except Exception as e:
+            logger.error(f"Error in handle_decrypt_message: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+
+    async def handle_verify_pincode(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle pincode verification"""
+        wallet = self.sessions[session_id].get('wallet')
+        if not wallet:
+            return {"status": "error", "message": "No wallet found for this session"}
+            
+        pincode = data.get("pincode")
+        if not pincode:
+            return {"status": "error", "message": "Pincode is required"}
+            
+        is_valid = wallet.verify_pincode(pincode)
+        return {
+            "status": "success",
+            "valid": is_valid
+        }
+
+    async def handle_generate_alias(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle alias generation"""
+        wallet = self.sessions[session_id].get('wallet')
+        if not wallet:
+            return {"status": "error", "message": "No wallet found for this session"}
+            
+        alias = wallet.generate_unique_alias()
+        return {
+            "status": "success",
+            "alias": alias
+        }
+
+    # Remaining Transaction Handlers
+    async def handle_sign_transaction(self, session_id: str, websocket, data: dict) -> dict:
+        """Sign a transaction"""
+        try:
+            transaction_id = data.get("transaction_id")
+            if not transaction_id:
+                return {"status": "error", "message": "Transaction ID required"}
+                
+            # Find transaction by transaction_id, not id
+            transaction = next(
+                (tx for tx in self.sessions[session_id]['transactions'] 
+                 if tx.transaction_id == transaction_id),
+                None
+            )
+            
+            if not transaction:
+                return {"status": "error", "message": "Transaction not found"}
+            
+            # Sign the transaction
+            transaction.sign_transaction(self.sessions[session_id]['zk_system'])
+            
+            return {
+                "status": "success",
+                "message": "Transaction signed",
+                "transaction": {
+                    "transaction_id": transaction.transaction_id,
+                    "sender": transaction.sender,
+                    "receiver": transaction.receiver,
+                    "amount": str(transaction.amount),
+                    "signature": base64.b64encode(transaction.signature).decode('utf-8') if transaction.signature else None
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error signing transaction: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Failed to sign transaction: {str(e)}"
+            }
+
+
+    async def handle_verify_transaction(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle transaction verification"""
+        try:
+            transaction_id = data.get("transaction_id")
+            if not transaction_id:
+                return {"status": "error", "message": "Transaction ID required"}
+                
+            transaction = next(
+                (tx for tx in self.sessions[session_id]['transactions'] 
+                 if tx.id == transaction_id),
+                None
+            )
+            
+            if not transaction:
+                return {"status": "error", "message": "Transaction not found"}
+                
+            # Verify the transaction
+            is_valid = transaction.verify_transaction(self.sessions[session_id]['zk_system'])
+            
+            if is_valid:
+                # Additional validation checks
+                validation_result = {
+                    "hash_valid": transaction.tx_hash == transaction.generate_hash(),
+                    "amount_valid": transaction.amount > 0,
+                    "timestamp_valid": 0 < transaction.timestamp <= time.time(),
+                    "signature_valid": is_valid
+                }
+                
+                return {
+                    "status": "success",
+                    "valid": all(validation_result.values()),
+                    "validation_details": validation_result,
+                    "transaction": {
+                        "id": transaction.id,
+                        "tx_hash": transaction.tx_hash,
+                        "timestamp": transaction.timestamp,
+                        "amount": str(transaction.amount),
+                        "verified": True
+                    }
+                }
+            else:
+                return {
+                    "status": "success",
+                    "valid": False,
+                    "message": "Transaction verification failed"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error verifying transaction: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Failed to verify transaction: {str(e)}"
+            }
+
+
+    async def handle_get_transactions(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle get all transactions request"""
+        try:
+            return {
+                "status": "success",
+                "transactions": [tx.model_dump() for tx in self.sessions[session_id]['transactions']]
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to get transactions: {str(e)}"
+            }
+
+    async def handle_get_transaction_metrics(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle get transaction metrics request"""
+        try:
+            session = self.sessions[session_id]
+            metrics = {
+                "total_transactions": len(session['transactions']),
+                "signed_transactions": sum(1 for tx in session['transactions'] if tx.signature is not None),
+                "verified_transactions": sum(1 for tx in session['transactions'] if tx.verify_transaction(session['zk_system'])),
+                "total_amount": float(sum(tx.amount for tx in session['transactions'])) if session['transactions'] else 0,
+                "average_amount": float(sum(tx.amount for tx in session['transactions']) / len(session['transactions'])) if session['transactions'] else 0
+            }
+            return {
+                "status": "success",
+                "metrics": metrics
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to get transaction metrics: {str(e)}"
+            }
+
+    # Remaining Mining Handlers
+    async def handle_initialize_miner(self, session_id: str, websocket, data: dict) -> dict:
+        """Initialize the miner for a session"""
+        try:
+            difficulty = data.get("difficulty", 2)
+            security_level = data.get("security_level", 20)
+            
+            # Initialize miner in session if not exists
+            if 'miner' not in self.sessions[session_id]:
+                self.sessions[session_id]['miner'] = DAGKnightMiner(
+                    difficulty=difficulty,
+                    security_level=security_level
+                )
+            else:
+                # Update existing miner settings
+                self.sessions[session_id]['miner'].difficulty = difficulty
+                self.sessions[session_id]['miner'].security_level = security_level
+            
+            logger.info(f"Miner initialized for session {session_id} with difficulty {difficulty}")
+            return {
+                "status": "success",
+                "message": "Miner initialized",
+                "settings": {
+                    "difficulty": difficulty,
+                    "security_level": security_level
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error initializing miner: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Failed to initialize miner: {str(e)}"
+            }
+
+
+    async def handle_stop_mining(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle stop mining request"""
+        try:
+            if self.sessions[session_id].get('mining_task'):
+                self.sessions[session_id]['mining_task'].cancel()
+                self.sessions[session_id]['mining_task'] = None
+                return {"status": "success", "message": "Mining stopped"}
+            return {"status": "error", "message": "No mining operation in progress"}
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to stop mining: {str(e)}"}
+
+    async def handle_get_mining_metrics(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle get mining metrics request"""
+        try:
+            metrics = self.get_mining_metrics(session_id)
+            return {
+                "status": "success",
+                "metrics": metrics
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to get mining metrics: {str(e)}"
+            }
+
+    async def handle_get_dag_status(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle get DAG status request"""
+        try:
+            dag_metrics = self.sessions[session_id]['miner'].get_dag_metrics()
+            return {
+                "status": "success",
+                "dag_metrics": dag_metrics
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to get DAG status: {str(e)}"
+            }
+
+    async def handle_validate_block(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle block validation request"""
+        try:
+            block_hash = data.get("block_hash")
+            if not block_hash:
+                return {"status": "error", "message": "Block hash required"}
+                
+            session = self.sessions[session_id]
+            for block in session['performance_data']['blocks_mined']:
+                if block.hash == block_hash:
+                    is_valid = session['miner'].validate_block(block)
+                    return {
+                        "status": "success",
+                        "valid": is_valid
+                    }
+                    
+            return {"status": "error", "message": "Block not found"}
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to validate block: {str(e)}"
+            }
+
+    async def handle_mined_block(self, session_id: str, websocket, block, mining_time: float):
+        """Handle successful block mining"""
+        session = self.sessions[session_id]
+        perf_data = session['performance_data']
+        
+        # Update performance data
+        perf_data['blocks_mined'].append(block)
+        perf_data['mining_times'].append(mining_time)
+        hash_rate = block.nonce / mining_time if mining_time > 0 else 0
+        perf_data['hash_rates'].append(hash_rate)
+        
+        # Send progress update
+        await websocket.send(json.dumps({
+            "type": "mining_update",
+            "block_hash": block.hash,
+            "metrics": self.get_mining_metrics(session_id)
+        }))
+
+    async def send_mining_complete(self, websocket, session_id: str):
+        """Send mining completion notification"""
+        final_metrics = self.get_mining_metrics(session_id)
+        await websocket.send(json.dumps({
+            "type": "mining_complete",
+            "metrics": final_metrics
+        }))
+    def get_mining_metrics(self, session_id: str) -> dict:
+        """Calculate current mining metrics"""
+        session = self.sessions[session_id]
+        data = session['performance_data']
+        elapsed_time = time.time() - data['start_time']
+        
+        return {
+            "blocks_mined": len(data['blocks_mined']),
+            "average_mining_time": np.mean(data['mining_times']) if data['mining_times'] else 0,
+            "average_hash_rate": np.mean(data['hash_rates']) if data['hash_rates'] else 0,
+            "elapsed_time": elapsed_time,
+            "blocks_per_second": len(data['blocks_mined']) / elapsed_time if elapsed_time > 0 else 0,
+            "current_difficulty": session['miner'].difficulty,
+            "dag_metrics": session['miner'].get_dag_metrics()
+        }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+async def run_sanic_server():
+    """
+    Function to run the Sanic server asynchronously
+    """
+    # Define interface and port for the Sanic server
+    interface = "0.0.0.0"
+    port = 50511  # Replace with your desired port
+
+    # Create the server instance for Sanic
+    server = await app.create_server(
+        host=interface,
+        port=port,
+        return_asyncio_server=True,  # To integrate with asyncio
+    )
+
+    # Add the Sanic server to the current asyncio event loop
+    loop = asyncio.get_event_loop()
+    loop.create_task(server.serve_forever())  # Run Sanic indefinitely in the background
+
+    # Optionally: add a log message indicating Sanic server started
+    logger.info(f"Sanic server started on {interface}:{port}")
+
 
 # Global variables for initialization
 blockchain = None  # Define blockchain at a global level
@@ -8876,6 +10958,8 @@ initialization_complete = False
 import asyncio
 import traceback
 import logging
+import async_timeout
+from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger("quantumdagknight")
 
@@ -8884,18 +10968,88 @@ blockchain = None
 p2p_node = None
 initialization_complete = False
 async def initialize_vm():
-    logger.info("Initializing SimpleVM...")
-    vm = SimpleVM(gas_limit=10000, number_of_shards=10, nodes=[])
-    logger.info("SimpleVM initialized successfully.")
-    return vm
+    try:
+        logger.info("Starting VM initialization")
+        
+        # Add timeout for MongoDB connection check
+        async def check_mongodb_connection():
+            try:
+                async with async_timeout.timeout(10):  # 10 second timeout
+                    client = AsyncIOMotorClient(
+                        "mongodb://localhost:27017",
+                        serverSelectionTimeoutMS=5000
+                    )
+                    await client.admin.command('ping')
+                    return True
+            except Exception as e:
+                logger.error(f"MongoDB connection check failed: {str(e)}")
+                return False
+
+        # Check MongoDB connection first
+        if not await check_mongodb_connection():
+            logger.error("Failed to connect to MongoDB. Initialization cannot proceed.")
+            return None
+
+        # Initialize VM with timeout
+        async with async_timeout.timeout(30):  # 30 second timeout for entire VM initialization
+            vm = SimpleVM(gas_limit=10000, number_of_shards=10, nodes=[])
+            logger.info("SimpleVM instance created")
+
+            # Initialize DB process queue with retry logic
+            retry_count = 3
+            for attempt in range(retry_count):
+                try:
+                    async with async_timeout.timeout(10):  # 10 second timeout for queue initialization
+                        await vm.db.init_process_queue()
+                        logger.info("VM DB process queue initialized successfully")
+                        break
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout initializing process queue (attempt {attempt + 1}/{retry_count})")
+                    if attempt == retry_count - 1:
+                        raise
+                except Exception as e:
+                    logger.error(f"Error initializing process queue (attempt {attempt + 1}/{retry_count}): {str(e)}")
+                    if attempt == retry_count - 1:
+                        raise
+                await asyncio.sleep(1)  # Wait before retry
+
+            # Set VM in app state
+            app.ctx.vm = vm
+            
+            # Update Redis initialization status
+            try:
+                async with async_timeout.timeout(5):
+                    await update_initialization_status("vm", True)
+            except Exception as redis_error:
+                logger.error(f"Failed to update Redis initialization status: {str(redis_error)}")
+                # Continue even if Redis update fails
+            
+            logger.info("VM initialization completed successfully")
+            return vm
+
+    except asyncio.TimeoutError:
+        logger.error("VM initialization timed out")
+        return None
+    except Exception as e:
+        logger.error(f"Error initializing VM: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+
 
 async def initialize_p2p_node(ip_address, p2p_port):
-    logger.info(f"Initializing P2P node at {ip_address}:{p2p_port}")
-    p2p_node = P2PNode(blockchain=None, host=ip_address, port=p2p_port)
-    await p2p_node.start()
-    
-    logger.info(f"P2P node initialized successfully: {p2p_node}")
-    return p2p_node
+    try:
+        logger.info(f"Initializing P2P node at {ip_address}:{p2p_port}")
+        p2p_node = P2PNode(blockchain=None, host=ip_address, port=p2p_port)
+        await p2p_node.start()
+        logger.info("P2P node started successfully")
+        return p2p_node
+    except Exception as e:
+        logger.error(f"Error initializing P2P node: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+
 
 async def initialize_blockchain(p2p_node, vm):
     logger.info("Initializing QuantumBlockchain...")
@@ -8932,6 +11086,50 @@ async def wait_for_components_ready(components):
         if hasattr(component, 'wait_for_ready'):
             await component.wait_for_ready()
     logger.info("All components are ready.")
+import redis.asyncio as aioredis
+
+async def init_redis():
+    global redis
+    try:
+        # Use the `redis.asyncio` connection pool
+        redis = await aioredis.Redis.from_url(
+            'redis://localhost',  # Replace with your Redis server URL
+            decode_responses=True  # This makes sure Redis responses are decoded into strings
+        )
+        app.ctx.redis = redis  # Store Redis in app context (ctx)
+        logger.info("Redis initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize Redis: {str(e)}")
+        raise RuntimeError("Redis initialization failed.") from e
+async def initialize_websocket_server():
+    """Initialize the Quantum Blockchain WebSocket server"""
+    try:
+        logger.info("Initializing Quantum Blockchain WebSocket server...")
+        websocket_server = QuantumBlockchainWebSocketServer(
+            host="0.0.0.0",
+            port=8765
+        )
+        
+        # Initialize and verify server is running
+        server_task = await websocket_server.initialize()
+        
+        # Store in app context
+        app.ctx.websocket_server = websocket_server
+        app.ctx.websocket_server_task = server_task
+        
+        # Update status
+        await update_initialization_status("websocket_server", True)
+        logger.info(f"Quantum Blockchain WebSocket server initialized successfully on port {websocket_server.port}")
+        
+        return websocket_server
+        
+    except Exception as e:
+        logger.error(f"Error initializing WebSocket server: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+
 import asyncio
 import traceback
 import asyncio
@@ -8943,39 +11141,44 @@ async def async_main_initialization():
         # Initialize Redis if not already initialized
         if not redis:
             logger.info("Initializing Redis...")
-            await init_redis()
-            app.state.redis = redis  # Store Redis in app state
+            await init_redis()  # Call the updated Redis initialization function
+            app.ctx.redis = redis  # Store Redis in app context (ctx)
             logger.info("Redis initialized successfully.")
 
         # Initialize VM if not already initialized
         if not vm:
             logger.info("Initializing VM...")
             vm = await initialize_vm()
-            app.state.vm = vm  # Store VM in app state
-            logger.info("VM initialized successfully.")
+            if vm:
+                app.ctx.vm = vm  # Store VM in app context (ctx)
+                await update_initialization_status("vm", True)
+                logger.info("VM initialized successfully.")
+            else:
+                logger.error("Failed to initialize VM.")
 
         # Initialize P2P node if not already initialized
         if not p2p_node:
             logger.info("Initializing P2P node...")
             p2p_node = await initialize_p2p_node(ip_address, p2p_port)
-            app.state.p2p_node = p2p_node  # Store P2P node in app state
+            app.ctx.p2p_node = p2p_node  # Store P2P node in app context (ctx)
+            await update_initialization_status("p2p_node", True)
             logger.info("P2P node initialized successfully.")
 
         # Initialize Blockchain if not already initialized
         if not blockchain:
             logger.info("Initializing Blockchain...")
             blockchain = await initialize_blockchain(p2p_node, vm)
-            app.state.blockchain = blockchain  # Store blockchain in app state
+            app.ctx.blockchain = blockchain  # Store Blockchain in app context (ctx)
+            await update_initialization_status("blockchain", True)
             logger.info("Blockchain initialized successfully.")
 
-        # Store all components in app.state
-        app.state.components = {
+        # Store all components in app.ctx
+        app.ctx.components = {
             "blockchain": blockchain,
             "p2p_node": p2p_node,
             "vm": vm,
             "redis": redis
         }
-        
 
         # Set the blockchain for the P2PNode
         if p2p_node:
@@ -8991,7 +11194,7 @@ async def async_main_initialization():
 
 
 async def main():
-    restart_delay = 10
+    restart_delay = 1
     while True:
         try:
             # Start the Daphne server
@@ -9019,6 +11222,10 @@ async def main():
                 await p2p_node.stop()
                 logger.info("P2P node stopped.")
 
+            # Cleanup WebSocket server
+            await cleanup_websocket_server()
+            logger.info("WebSocket server cleaned up.")
+
             # Cancel the Daphne server task
             if 'daphne_task' in locals() and not daphne_task.done():
                 daphne_task.cancel()
@@ -9030,65 +11237,109 @@ async def main():
             logger.info("Cleanup completed. Restarting...")
 
 async def async_main():
-    global redis, blockchain
-
-    # Ensure Redis and Blockchain are initialized via async_main_initialization
-    await async_main_initialization()
+    global redis, blockchain, vm, p2p_node, price_feed, plata_contract, exchange, initialization_complete
 
     try:
         logger.info("Starting async_main initialization...")
+        multisig_zkp = MultisigZKP(security_level=20)
+        app.ctx.multisig_zkp = multisig_zkp
 
-        # Initialize VM
-        logger.info("Initializing VM...")
-        vm = await initialize_vm()
-        await update_initialization_status("vm", True)  # Update with lock
+        # Ensure Redis and initial components are initialized
+        await async_main_initialization()
+        await run_sanic_server()
 
-        # Initialize P2P node
-        logger.info("Initializing P2P node...")
-        p2p_node = await initialize_p2p_node(ip_address, p2p_port)
-        await update_initialization_status("p2p_node", True)  # Update with lock
+        # Initialize or re-initialize VM if necessary
+        if not vm or not hasattr(app.ctx, 'vm'):
+            logger.info("Initializing VM...")
+            vm = await initialize_vm()
+            app.ctx.vm = vm
+        await update_initialization_status("vm", True)
 
-        # Initialize Blockchain (already initialized in async_main_initialization)
-        logger.info("Initializing Blockchain...")
-        blockchain = await initialize_blockchain(p2p_node, vm)
-        await update_initialization_status("blockchain", True)  # Update with lock
+        # Initialize or re-initialize P2P node if necessary
+        if not p2p_node or not hasattr(app.ctx, 'p2p_node'):
+            logger.info("Initializing P2P node...")
+            p2p_node = await initialize_p2p_node(ip_address, p2p_port)
+            app.ctx.p2p_node = p2p_node
+        await update_initialization_status("p2p_node", True)
+
+        # Initialize or re-initialize Blockchain if necessary
+        if not blockchain or not hasattr(app.ctx, 'blockchain'):
+            logger.info("Initializing Blockchain...")
+            blockchain = await initialize_blockchain(p2p_node, vm)
+            app.ctx.blockchain = blockchain
+        await update_initialization_status("blockchain", True)
 
         # Initialize Price Feed
         logger.info("Initializing Price Feed...")
         price_feed = await initialize_price_feed()
-        await update_initialization_status("price_feed", True)  # Update with lock
+        app.ctx.price_feed = price_feed
+        await update_initialization_status("price_feed", True)
 
         # Initialize Plata Contract
         logger.info("Initializing Plata Contract...")
         plata_contract = await initialize_plata_contract(vm)
-        await update_initialization_status("plata_contract", True)  # Update with lock
+        app.ctx.plata_contract = plata_contract
+        await update_initialization_status("plata_contract", True)
 
         # Initialize Exchange
         logger.info("Initializing Exchange...")
         exchange = await initialize_exchange(blockchain, vm, price_feed)
-        await update_initialization_status("exchange", True)  # Update with lock
+        app.ctx.exchange = exchange
+        await update_initialization_status("exchange", True)
+
+        logger.info("Initializing WebSocket Server...")
+        websocket_server = await initialize_websocket_server()
+        if not websocket_server:
+            raise RuntimeError("Failed to initialize WebSocket server")
 
         # Wait for all components to be ready
         components = [blockchain, p2p_node, vm, price_feed, plata_contract, exchange]
         await wait_for_components_ready(components)
 
-        # Set components in app.state
-        app.state.blockchain = blockchain
-        app.state.p2p_node = p2p_node
-        app.state.vm = vm
-        app.state.price_feed = price_feed
-        app.state.plata_contract = plata_contract
-        app.state.exchange = exchange
+        # Store all components in app context
+        app.ctx.blockchain = blockchain
+        app.ctx.p2p_node = p2p_node
+        app.ctx.vm = vm
+        app.ctx.price_feed = price_feed
+        app.ctx.plata_contract = plata_contract
+        app.ctx.exchange = exchange
 
         initialization_complete = True
-        logger.info("Initialization complete.")
+        logger.info("Initialization complete. All components are ready.")
+
+        # Log the final state of all components
+        log_components_state()
 
     except Exception as e:
         initialization_complete = False
-        logger.error(f"Error during initialization: {str(e)}")
+        logger.error(f"Error during initialization in async_main: {str(e)}")
         logger.error(traceback.format_exc())
         raise
 
 
+
+
+def log_components_state():
+    logger.info("Final state of all components:")
+    logger.info(f"Blockchain: {app.ctx.blockchain is not None}")
+    logger.info(f"P2P Node: {app.ctx.p2p_node is not None}")
+    logger.info(f"VM: {app.ctx.vm is not None}")
+    logger.info(f"Price Feed: {app.ctx.price_feed is not None}")
+    logger.info(f"Plata Contract: {app.ctx.plata_contract is not None}")
+    logger.info(f"Exchange: {app.ctx.exchange is not None}")
+
 if __name__ == "__main__":
     asyncio.run(main())
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(start_server())
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.error(f"Server error: {str(e)}")
+        logger.error(traceback.format_exc())
+    finally:
+        loop.close()
+

@@ -72,6 +72,7 @@ import asyncio
 import time
 import traceback
 import concurrent.futures
+from decimal import Decimal 
 load_dotenv()
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -255,6 +256,10 @@ class MessageType(Enum):
     BLOCK_ACCEPTANCE = "block_acceptance"
     FULL_BLOCK_RESPONSE = "full_block_response"  
     NEW_WALLET = "new_wallet"  
+    GET_ALL_DATA = "get_all_data"
+    ALL_DATA = "all_data"
+
+
 from dataclasses import dataclass, field, asdict
 import json
 import time
@@ -300,7 +305,6 @@ class P2PNode:
         self.field_size = calculate_field_size(self.security_level)
         self.zk_system = SecureHybridZKStark(self.security_level)
         self.peers: Dict[str, websockets.WebSocketServerProtocol] = {}
-        self.connected_peers: Set[str] = set()  # Add this line
         self.peer_lock = asyncio.Lock()  # Change to asyncio.Lock()
         self.peer_lock = Lock()
         self.message_queue = asyncio.Queue()
@@ -378,7 +382,6 @@ class P2PNode:
         )
         self.public_key = self.private_key.public_key()
         
-        self.connected_peers = set()  # Initialize as a set instead of a list
         self.blockchain = blockchain
         self.heartbeat_interval = 15  # seconds
         self.reconnect_interval = 30  # seconds
@@ -398,13 +401,28 @@ class P2PNode:
         self.fernet = Fernet(self.encryption_key)
         self.peers = {}  # Dictionary to store active peer connections
         self.last_peer_check = time.time()
+        self.connected_peers = set()  # Use a set to store unique connected peers
 
 
         logger.info(f"P2PNode initialized with host: {self.host}, port: {self.port}")
         logger.info(f"Bootstrap nodes: {self.bootstrap_nodes}")
         logger.info(f"Seed nodes: {self.seed_nodes}")
         
-        
+
+    async def propagate_multisig_transaction(self, multisig_address: str, sender_public_keys: List[int], threshold: int, receiver: str, amount: Decimal, message: str, aggregate_proof: Tuple[List[int], List[int], List[Tuple[int, List[int]]]]):
+        transaction_data = {
+            "type": "multisig_transaction",
+            "multisig_address": multisig_address,
+            "sender_public_keys": sender_public_keys,
+            "threshold": threshold,
+            "receiver": receiver,
+            "amount": str(amount),
+            "message": message,
+            "aggregate_proof": aggregate_proof
+        }
+        await self.broadcast(Message(MessageType.TRANSACTION.value, transaction_data))
+
+
     async def start_ws_server(self):
         self.ws_server = await websockets.serve(self.handle_ws_connection, self.host, self.port + 1000)
         logger.info(f"WebSocket server started on {self.host}:{self.port + 1000}")
@@ -456,13 +474,26 @@ class P2PNode:
         await self.broadcast(Message(MessageType.NEW_WALLET, data))
         self.logger.info(f"Broadcasted NEW_WALLET message for {wallet_address} to peers")
 
+    async def handle_new_block(self, block_data: dict, sender: str):
+        try:
+            new_block = QuantumBlock.from_dict(block_data)
+            logger.info(f"Received new block from {sender}: {new_block.hash}")
+            
+            if self.blockchain.validate_block(new_block):
+                added = await self.blockchain.add_block(new_block)
+                if added:
+                    logger.info(f"Block {new_block.hash} added to blockchain")
+                    # Propagate the block to other peers
+                    await self.propagate_block(new_block)
+                else:
+                    logger.warning(f"Block {new_block.hash} not added to blockchain (might be duplicate)")
+            else:
+                logger.warning(f"Received invalid block from {sender}: {new_block.hash}")
+        except Exception as e:
+            logger.error(f"Error processing new block from {sender}: {str(e)}")
+            logger.error(traceback.format_exc())
 
-    async def handle_new_block(self, payload):
-        block_hash = payload.get('block_hash')
-        miner = payload.get('miner')
-        logger.info(f"Processing new block {block_hash} mined by {miner}")
-        # Update this node's local blockchain state
-        self.blockchain.add_block(payload['block_info'])
+
 
     async def handle_private_transaction(self, data):
         tx_hash = data['tx_hash']
@@ -565,6 +596,22 @@ class P2PNode:
                 await self.sync_blocks(peer, self.blockchain.get_latest_block().index + 1, latest_block.index)
         except Exception as e:
             logger.error(f"Error syncing with peer {peer}: {str(e)}")
+    async def sync_with_connected_peers(self):
+        logger.info("Starting sync with connected peers")
+        for peer in self.peers.keys():
+            try:
+                logger.info(f"Attempting to sync with peer: {peer}")
+                peer_data = await self.send_and_wait_for_response(peer, Message(MessageType.GET_ALL_DATA.value, {}))
+                if peer_data and isinstance(peer_data.payload, dict):
+                    await self.blockchain.sync_with_peer(peer_data.payload)
+                    logger.info(f"Successfully synced with peer: {peer}")
+                else:
+                    logger.warning(f"Received invalid data from peer: {peer}")
+            except Exception as e:
+                logger.error(f"Error syncing with peer {peer}: {str(e)}")
+                logger.error(traceback.format_exc())
+        logger.info("Finished sync with connected peers")
+
 
 
     async def sync_wallets(self, peer):
@@ -594,43 +641,42 @@ class P2PNode:
         except Exception as e:
             logger.error(f"Error handling get_wallets request: {str(e)}")
             logger.error(traceback.format_exc())
-    async def propagate_block(self, block):
+    async def propagate_block(self, block: QuantumBlock) -> bool:
         try:
-            self.logger.info(f"Propagating block with hash: {block.hash}")
+            logger.info(f"Propagating block with hash: {block.hash}")
+            self.logger.debug(f"Current connected peers: {self.connected_peers}")
+
             
             message = Message(
                 type=MessageType.BLOCK.value,
-                payload={
-                    "block_hash": block.hash,
-                    "block": block.to_dict()
-                }
+                payload=block.to_dict()
             )
             
-            # Collect all nodes from all buckets
-            all_nodes = [node for bucket in self.buckets for node in bucket]
-            self.logger.info(f"Propagating block to {len(all_nodes)} nodes across all buckets")
+            logger.debug(f"Created block message: {message.to_json()}")
             
-            propagation_tasks = []
-            for node in all_nodes:
-                task = asyncio.create_task(self.send_block_to_node(node, message))
-                propagation_tasks.append(task)
-            
-            # Wait for all propagation tasks to complete
-            await asyncio.gather(*propagation_tasks)
-            
-            self.logger.info(f"Block {block.hash} propagation completed")
-        except Exception as e:
-            self.logger.error(f"Error propagating block {block.hash}: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            if not self.connected_peers:
+                logger.warning("No active peers available for block propagation")
+                return False
 
-    async def send_block_to_node(self, node: KademliaNode, message: Message):
-        try:
-            await self.send_message(node.address, message)
-            self.logger.debug(f"Block sent to node: {node.id} at {node.address}")
+            logger.info(f"Attempting to propagate block to {len(self.connected_peers)} active peers")
+            
+            await self.broadcast(message)
+            logger.info(f"Block {block.hash} propagated to peers")
+            return True
+
         except Exception as e:
-            self.logger.error(f"Failed to send block to node {node.id} at {node.address}: {str(e)}")
-            # Optionally, you might want to remove the node from the bucket if it's unreachable
-            # await self.remove_node_from_bucket(node)
+            logger.error(f"Error propagating block {block.hash}: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+    async def send_block_to_peer(self, peer: str, message: Message) -> bool:
+        try:
+            await self.send_message(peer, message)
+            logger.debug(f"Block sent to peer: {peer}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send block to peer {peer}: {str(e)}")
+            return False
+
     def set_blockchain(self, blockchain):
         self.blockchain = blockchain
     def normalize_peer_address(self, peer_ip: str, peer_port: Optional[int] = None) -> str:
@@ -746,35 +792,19 @@ class P2PNode:
         except Exception as e:
             self.logger.error(f"Error finding new peers: {str(e)}")
 
-
-    async def complete_connection(self, peer):
-        logger.info(f"Completing connection with peer {peer}")
-
-        try:
-            # 1. Add the peer to the set of connected peers
-            self.connected_peers.add(peer)
+    async def complete_connection(self, peer_address: str):
+        self.logger.info(f"[COMPLETE] Completing connection with peer {peer_address}")
+        async with self.peer_lock:
+            self.peer_states[peer_address] = "connected"
+            self.connected_peers.add(peer_address)
             
-            # 2. Sync transactions
-            await self.sync_transactions(peer)
-            
-            # 3. Sync wallets
-            await self.sync_wallets(peer)
-            
-            # 4. Start background tasks for this peer
-            self.start_peer_tasks(peer)
-            
-            # 5. Send any initial data or handshake messages
-            await self.send_handshake(peer)
-            
-            logger.info(f"Connection with peer {peer} is now complete")
-            return True
-        except Exception as e:
-            logger.error(f"Error completing connection with peer {peer}: {str(e)}")
-            logger.error(traceback.format_exc())
-            await self.remove_peer(peer)
-            return False
-
-
+        await self.sync_transactions(peer_address)
+        await self.sync_wallets(peer_address)
+        self.start_peer_tasks(peer_address)
+        await self.send_handshake(peer_address)
+        
+        self.logger.info(f"[COMPLETE] Connection finalized with peer {peer_address}")
+        self.log_peer_status()
     async def sync_transactions(self, peer):
         try:
             # Request transactions from the peer
@@ -816,15 +846,53 @@ class P2PNode:
         # Start any background tasks specific to this peer
         # For example, you might want to start a task to periodically check the peer's status
         asyncio.create_task(self.periodic_peer_check())  # Remove the peer argument
-
+    async def find_and_connect_to_new_peers(self):
+        try:
+            self.logger.info("[FIND_PEERS] Attempting to find and connect to new peers")
+            nodes = await self.find_node(self.node_id)
+            for node in nodes:
+                if node.id not in self.peers and len(self.peers) < self.target_peer_count:
+                    self.logger.info(f"[FIND_PEERS] Attempting to connect to new peer: {node.id}")
+                    await self.connect_to_peer(node)
+            self.logger.info(f"[FIND_PEERS] Finished attempt to find new peers. Current peer count: {len(self.peers)}")
+        except Exception as e:
+            self.logger.error(f"[FIND_PEERS] Error finding new peers: {str(e)}")
+            self.logger.error(traceback.format_exc())
     async def periodic_peer_check(self):
-        while True:
-            for peer in list(self.peers.keys()):
-                if not await self.is_peer_connected(peer):
-                    logger.warning(f"Peer {peer} is not responsive. Removing.")
-                    await self.remove_peer(peer)
-            await asyncio.sleep(60)  # Check every minute
+        self.logger.info("[PEER_CHECK] Periodic peer check started")
 
+        while True:
+            try:
+                self.logger.info("[PEER_CHECK] Starting periodic peer check")
+                async with self.peer_lock:
+                    for peer in list(self.peers.keys()):
+                        peer_state = self.peer_states.get(peer)
+                        self.logger.info(f"[PEER_CHECK] Checking peer {peer}, current state: {peer_state}")
+                        
+                        if peer_state != "connected":
+                            if await self.is_peer_connected(peer):
+                                self.logger.info(f"[PEER_CHECK] Peer {peer} is responsive but not marked as connected. Finalizing connection.")
+                                await self.finalize_connection(peer)
+                            else:
+                                self.logger.warning(f"[PEER_CHECK] Peer {peer} is not responsive. Removing.")
+                                await self.remove_peer(peer)
+                        else:
+                            # Even for connected peers, perform a quick check
+                            if not await self.is_peer_connected(peer):
+                                self.logger.warning(f"[PEER_CHECK] Connected peer {peer} is not responsive. Removing.")
+                                await self.remove_peer(peer)
+
+                # After checking all peers, attempt to connect to new ones if needed
+                if len(self.peers) < self.target_peer_count:
+                    self.logger.info(f"[PEER_CHECK] Current peer count ({len(self.peers)}) is below target ({self.target_peer_count}). Attempting to find new peers.")
+                    await self.find_and_connect_to_new_peers()
+
+                self.log_peer_status()
+                await asyncio.sleep(30)  # Check every 30 seconds
+            except Exception as e:
+                self.logger.error(f"[PEER_CHECK] Error in periodic peer check: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                await asyncio.sleep(30)
     async def send_handshake(self, peer):
         try:
             await self.ensure_blockchain()
@@ -1096,6 +1164,7 @@ class P2PNode:
             asyncio.create_task(self.send_heartbeats())        # Send heartbeats to peers for liveness checks
             asyncio.create_task(self.periodic_connection_check()) # Check connections periodically
             asyncio.create_task(self.periodic_sync())
+            asyncio.create_task(self.update_active_peers())  # Add this line
 
             
             # Step 4: Start WebSocket updates handling
@@ -1145,7 +1214,6 @@ class P2PNode:
 
         # After processing the trade, broadcast the update
         await self.broadcast_trade_update(trade_data['pair'], trade_data)
-
     async def join_network(self):
         logger.info("Attempting to join the network...")
         connected = False
@@ -1163,6 +1231,8 @@ class P2PNode:
                     if connection_result:
                         connected = True
                         logger.info(f"Successfully connected to node: {node}")
+                        # Add the connected peer to the active list
+                        self.connected_peers.add(f"{ip}:{port}")
                     else:
                         logger.warning(f"Failed to establish connection with node: {node}")
 
@@ -1171,18 +1241,32 @@ class P2PNode:
                     logger.error(traceback.format_exc())
 
         if connected:
-            logger.info(f"Successfully joined the network. Connected to {len(self.peers)} peers.")
-            await self.bootstrap_from_connected_peers()
+            logger.info(f"Successfully joined the network. Connected to {len(self.connected_peers)} peers.")
+            await self.sync_with_connected_peers()
         else:
             logger.warning("Failed to connect to any nodes. Running as a standalone node.")
 
-        # Log the connected peers and their states
-        logger.debug(f"Connected peers after join_network: {list(self.peers.keys())}")
-        logger.debug(f"Peer states after join_network: {self.peer_states}")
-
         self.log_connected_peers()
 
-
+    async def update_active_peers(self):
+        while True:
+            try:
+                async with self.peer_lock:
+                    for peer in list(self.peers.keys()):
+                        if await self.is_peer_connected(peer):
+                            if peer not in self.connected_peers:
+                                self.connected_peers.add(peer)
+                                self.logger.info(f"Added {peer} to active peers list")
+                        else:
+                            if peer in self.connected_peers:
+                                self.connected_peers.remove(peer)
+                                self.logger.info(f"Removed {peer} from active peers list")
+                
+                self.logger.info(f"Updated active peers list. Current active peers: {list(self.connected_peers)}")
+                await asyncio.sleep(60)  # Update every minute
+            except Exception as e:
+                self.logger.error(f"Error updating active peers: {str(e)}")
+                await asyncio.sleep(60)
 
     async def bootstrap_from_connected_peers(self):
         logger.info("Bootstrapping from connected peers...")
@@ -1311,10 +1395,15 @@ class P2PNode:
                         bucket.remove(oldest_node)
                         bucket.append(node)
             node.update_last_seen()
-            logger.debug(f"Added/updated node {node.id} in bucket {bucket_index}")
+            
+            # Update peer_states
+            self.peer_states[node.address] = "connected"
+            
+            self.logger.debug(f"Added/updated node {node.id} in bucket {bucket_index}")
+            self.log_peer_status()  # Log updated peer status
         except Exception as e:
-            logger.error(f"Failed to add node to bucket: {str(e)}")
-            logger.error(traceback.format_exc())
+            self.logger.error(f"Failed to add node to bucket: {str(e)}")
+            self.logger.error(traceback.format_exc())
     def xor_distance(a: str, b: str) -> int:
         """
         Calculate the XOR distance between two node IDs (expected to be hexadecimal strings).
@@ -1533,15 +1622,26 @@ class P2PNode:
         received_logos = data['logos']
         self.token_logos.update(received_logos)
         logger.info(f"Synced logos with {sender}")
-
-
-    async def propose_block(self, block: QuantumBlock, zkp_timeout: int = 300):
+    async def propose_block(self, block: QuantumBlock, zkp_timeout: int = 6000):
+        """
+        Proposes a block to peers with Zero-Knowledge Proof (ZKP) generation and broadcasting.
+        Logs the process and tracks resource usage (CPU, memory).
+        """
         start_time = time.time()
         start_cpu = psutil.cpu_percent()
         start_memory = psutil.virtual_memory().percent
 
         try:
             self.logger.info(f"Starting block proposal for block {block.hash}")
+
+            # Ensure that peers are connected before proceeding
+            if not self.connected_peers:
+                self.logger.warning(f"No active peers available for block proposal. Block proposal aborted.")
+                return
+            
+            # Log current peer information
+            self.logger.info("Current peer status at block proposal start:")
+            self.logger.info(f"Connected peers: {self.connected_peers}")
 
             # Generate secret data from the block
             self.logger.debug(f"Generating secret data for block {block.hash}")
@@ -1586,8 +1686,7 @@ class P2PNode:
             self.logger.debug(f"Proposal message created for block {block.hash}")
 
             # Log connected peers before broadcasting
-            active_peers = await self.get_active_peers()
-            self.logger.info(f"Current active peers: {active_peers}")
+            self.logger.info(f"Current active peers: {self.connected_peers}")
 
             # Broadcast the block proposal to peers
             broadcast_start_time = time.time()
@@ -1601,6 +1700,7 @@ class P2PNode:
             self.pending_block_proposals[block.hash] = block
             self.logger.debug(f"Block {block.hash} stored in pending block proposals.")
 
+            # Log total time and resource usage
             total_time = time.time() - start_time
             end_cpu = psutil.cpu_percent()
             end_memory = psutil.virtual_memory().percent
@@ -1626,27 +1726,38 @@ class P2PNode:
             self.logger.info(f"  CPU usage: {end_cpu - start_cpu:.2f}%")
             self.logger.info(f"  Memory usage change: {end_memory - start_memory:.2f}%")
 
-    async def handle_block_proposal(self, message: Message, sender: str):
+
+
+    async def handle_block_proposal(self, payload: dict, sender: str):
         try:
-            proof = self.deserialize_proof(message.payload["proof"])
-            public_input = message.payload["public_input"]
-            block_hash = message.payload["block_hash"]
-            proposer = message.payload["proposer"]
+            proof = self.deserialize_proof(payload["proof"])
+            public_input = payload["public_input"]
+            block_hash = payload["block_hash"]
+            block = QuantumBlock.from_dict(payload["block"])
+            proposer = payload["proposer"]
+            
+            logger.info(f"Received block proposal from {proposer} for block {block_hash}")
             
             # Verify the ZKP
             is_valid = await self.verify_proof(public_input, proof)
             
             if is_valid:
-                self.logger.info(f"Received valid block proposal {block_hash} from {proposer}")
+                logger.info(f"Received valid block proposal {block_hash} from {proposer}")
                 
                 # If we're the chosen validator, request the full block
                 if self.is_chosen_validator(block_hash):
                     await self.request_full_block(block_hash, proposer)
             else:
-                self.logger.warning(f"Received invalid block proposal {block_hash} from {proposer}")
+                logger.warning(f"Received invalid block proposal {block_hash} from {proposer}")
         except Exception as e:
-            self.logger.error(f"Error handling block proposal: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            logger.error(f"Error handling block proposal: {str(e)}")
+            logger.error(traceback.format_exc())
+
+
+    def is_chosen_validator(self, block_hash: str) -> bool:
+        # Implement your validator selection logic here
+        # This could be based on stake, reputation, or other factors
+        return hash(f"{self.node_id}{block_hash}") % 10 == 0  # Example: 10% chance of being chosen
 
     async def request_full_block(self, block_hash: str, proposer: str):
         try:
@@ -1664,12 +1775,14 @@ class P2PNode:
                     await self.add_block_to_blockchain(full_block)
                     await self.broadcast_block_acceptance(block_hash)
                 else:
-                    self.logger.warning(f"Received invalid full block {block_hash} from {proposer}")
+                    logger.warning(f"Received invalid full block {block_hash} from {proposer}")
             else:
-                self.logger.warning(f"Failed to receive full block {block_hash} from {proposer}")
+                logger.warning(f"Failed to receive full block {block_hash} from {proposer}")
         except Exception as e:
-            self.logger.error(f"Error requesting full block: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            logger.error(f"Error requesting full block: {str(e)}")
+            logger.error(traceback.format_exc())
+
+
 
     def get_block_secret(self, block: QuantumBlock) -> int:
         # This method should return a secret integer derived from the block
@@ -1730,8 +1843,6 @@ class P2PNode:
         except Exception as e:
             self.logger.error(f"Error handling block acceptance: {str(e)}")
             self.logger.error(traceback.format_exc())
-
-
     async def handle_message(self, message: Message, sender: str):
         try:
             logger.debug(f"Handling message of type {message.type} from {sender}")
@@ -1813,6 +1924,12 @@ class P2PNode:
                 state = self.blockchain.get_node_state()
                 response = Message(type=MessageType.STATE_RESPONSE.value, payload=asdict(state))
 
+            # Handle GET_ALL_DATA message
+            elif message.type == MessageType.GET_ALL_DATA.value:
+                logger.info(f"Received GET_ALL_DATA request from {sender}")
+                all_data = await self.blockchain.get_all_data()
+                response = Message(MessageType.ALL_DATA.value, all_data)
+
             # Handle LOGO_UPLOAD message
             elif message.type == MessageType.LOGO_UPLOAD.value:
                 logger.info(f"[LOGO_UPLOAD] Received LOGO_UPLOAD message from {sender}. Logo details: {message.payload}")
@@ -1884,21 +2001,7 @@ class P2PNode:
             wallet = Wallet.from_dict(wallet_data)
             self.blockchain.add_wallet(wallet)
         logger.info(f"Processed {len(new_wallets)} wallets from {sender}")
-    async def handle_block_proposal(self, payload, sender):
-        try:
-            new_block = QuantumBlock.from_dict(payload)
-            logger.info(f"Received new block proposal from {sender}: {new_block.hash}")
-            
-            if self.blockchain.validate_block(new_block):
-                await self.blockchain.add_block(new_block)
-                logger.info(f"Block {new_block.hash} added to blockchain")
-                await self.broadcast(Message(MessageType.BLOCK_PROPOSAL.value, payload), exclude=sender)
-            else:
-                logger.warning(f"Received invalid block from {sender}: {new_block.hash}")
-        except Exception as e:
-            logger.error(f"Error processing block proposal from {sender}: {str(e)}")
-            logger.error(traceback.format_exc())
-
+ 
 
 
 
@@ -2289,76 +2392,75 @@ class P2PNode:
         except Exception as e:
             logger.error(f"Failed to ping node: {str(e)}")
             return False
-
     async def broadcast(self, message: Message, max_retries: int = 3, retry_delay: float = 2.0):
+        self.logger.info(f"Broadcasting message of type {message.type}")
+        self.logger.debug(f"Current connected peers: {self.connected_peers}")
+
         """Broadcast a message to all active peers with a retry mechanism."""
         retries = 0
         success = False
 
         while retries < max_retries and not success:
-            # Get active peers
-            active_peers = await self.get_active_peers()
-            
             # Log all connected peers
-            logger.info(f"All connected peers: {list(self.peers.keys())}")
-            
+            self.logger.debug(f"All connected peers: {self.connected_peers}")
+
             # If no active peers, log and return early
-            if not active_peers:
-                logger.warning("No active peers available for broadcasting.")
+            if not self.connected_peers:
+                self.logger.warning("No active peers available for broadcasting.")
+                self.log_peer_status()  # Log peer statuses when no active peers are found
                 return
             
-            # Log active peers specifically available for broadcasting
-            logger.info(f"Attempting to broadcast message of type {message.type} to {len(active_peers)} active peers (Attempt {retries + 1})")
-            logger.debug(f"Active peers: {active_peers}")
-            logger.debug(f"Peer states: {self.peer_states}")  # Log detailed peer states
-            
+            # Log attempt details
+            self.logger.info(f"Attempting to broadcast message of type {message.type} to {len(self.connected_peers)} active peers (Attempt {retries + 1})")
+
             # Initialize successful broadcast counter
             successful_broadcasts = 0
 
             # Loop through active peers and attempt to send messages
-            for peer_address in active_peers:
+            for peer_address in self.connected_peers.copy():  # Use .copy() to avoid modifying set during iteration
                 try:
                     # Send the message to the peer
                     await self.send_message(peer_address, message)
                     successful_broadcasts += 1
-                    logger.info(f"Message of type {message.type} successfully sent to peer {peer_address}")
+                    self.logger.info(f"Message of type {message.type} successfully sent to peer {peer_address}")
                 except Exception as e:
                     # If sending the message fails, log the error and remove the peer
-                    logger.error(f"Failed to send message to peer {peer_address}: {str(e)}")
-                    await self.remove_peer(peer_address)
+                    self.logger.error(f"Failed to send message to peer {peer_address}: {str(e)}")
+                    self.connected_peers.remove(peer_address)
             
             # Log the success rate of the broadcast
-            logger.info(f"Successfully broadcasted message to {successful_broadcasts} out of {len(active_peers)} active peers (Attempt {retries + 1})")
+            self.logger.info(f"Successfully broadcasted message to {successful_broadcasts} out of {len(self.connected_peers)} active peers (Attempt {retries + 1})")
 
             # Log current connected peers after broadcast
             self.log_connected_peers()
 
             # Check if all peers acknowledged the message
-            if successful_broadcasts == len(active_peers):
+            if successful_broadcasts == len(self.connected_peers):
                 success = True
-                logger.info("Message broadcasted to all peers successfully.")
+                self.logger.info("Message broadcasted to all peers successfully.")
             else:
-                logger.warning(f"Some peers failed to receive the message. {len(active_peers) - successful_broadcasts} peers did not acknowledge.")
+                self.logger.warning(f"Some peers failed to receive the message. {len(self.connected_peers) - successful_broadcasts} peers did not acknowledge.")
 
                 # Retry mechanism if broadcast was unsuccessful
                 if successful_broadcasts == 0:
                     retries += 1
-                    logger.warning(f"No peers acknowledged the broadcast. Retrying broadcast in {retry_delay} seconds (Attempt {retries}/{max_retries})...")
+                    self.logger.warning(f"No peers acknowledged the broadcast. Retrying broadcast in {retry_delay} seconds (Attempt {retries}/{max_retries})...")
                     await asyncio.sleep(retry_delay)
 
         if not success:
-            logger.error(f"Broadcast failed after {max_retries} retries.")
+            self.logger.error(f"Broadcast failed after {max_retries} retries.")
+
+
 
     async def is_peer_connected(self, peer):
-        if peer not in self.peers:
-            return False
         try:
-            pong_waiter = await self.peers[peer].ping()
-            await asyncio.wait_for(pong_waiter, timeout=5)
-            return True
-        except Exception:
-            return False
-            import websockets
+            websocket = self.peers.get(peer)
+            if websocket and websocket.open:
+                await asyncio.wait_for(websocket.ping(), timeout=5)
+                return True
+        except (asyncio.TimeoutError, websockets.exceptions.WebSocketException):
+            pass
+        return False
     def cleanup_challenges(self):
         current_time = time.time()
         for peer in list(self.challenges.keys()):
@@ -2653,29 +2755,26 @@ class P2PNode:
             raise ValueError(f"Decryption failed: {str(e)}")
     async def remove_peer(self, peer: str):
         normalized_peer = self.normalize_peer_address(peer)
-        self.logger.debug(f"Attempting to remove peer: {normalized_peer}")
+        self.logger.info(f"[REMOVE] Removing peer: {normalized_peer}")
 
-        if normalized_peer in self.peers:
-            try:
-                await self.peers[normalized_peer].close()
-                self.logger.debug(f"Closed WebSocket connection to peer {normalized_peer}")
-            except Exception as e:
-                self.logger.error(f"Error closing connection to peer {normalized_peer}: {str(e)}")
+        async with self.peer_lock:
+            if normalized_peer in self.peers:
+                try:
+                    await self.peers[normalized_peer].close()
+                    self.logger.debug(f"[REMOVE] Closed WebSocket connection to peer {normalized_peer}")
+                except Exception as e:
+                    self.logger.error(f"[REMOVE] Error closing connection to peer {normalized_peer}: {str(e)}")
+                
+                del self.peers[normalized_peer]
             
-            del self.peers[normalized_peer]
-            self.logger.info(f"Peer disconnected and removed: {normalized_peer}")
-        else:
-            self.logger.warning(f"Attempted to remove non-existent peer: {normalized_peer}")
+            self.peer_states.pop(normalized_peer, None)
+            self.peer_public_keys.pop(normalized_peer, None)
+            self.pending_challenges.pop(normalized_peer, None)
+            self.challenges.pop(normalized_peer, None)
+            self.connected_peers.discard(normalized_peer)
 
-        # Clean up peer-related data
-        self.peer_states.pop(normalized_peer, None)
-        self.peer_public_keys.pop(normalized_peer, None)
-        self.pending_challenges.pop(normalized_peer, None)
-        self.challenges.pop(normalized_peer, None)
-        self.connected_peers.discard(normalized_peer)
-
-        # Attempt to reconnect
-        await self.attempt_reconnection(normalized_peer)
+        self.logger.info(f"[REMOVE] Peer removed: {normalized_peer}")
+        self.log_peer_status()
 
     async def attempt_reconnection(self, peer: str):
         max_retries = 5
@@ -2816,29 +2915,13 @@ class P2PNode:
             logger.error(f"Error checking peer activity: {e}")
             return False
     async def get_active_peers(self) -> List[str]:
-        """Retrieve a list of active peers."""
-        return [peer for peer, state in self.peer_states.copy().items() if state == "connected"]
-
-        for node_address, state in self.peer_states.items():
-            logger.debug(f"Checking peer {node_address} with state: {state}")
-            
-            if state == "connected":
-                try:
-                    if await self.ping_node(node_address):
-                        logger.debug(f"Peer {node_address} is active")
-                        active_peers.append(node_address)
-                    else:
-                        logger.warning(f"Peer {node_address} did not respond to ping, removing peer")
-                        await self.remove_peer(node_address)
-                except Exception as e:
-                    logger.error(f"Error pinging peer {node_address}: {str(e)}")
-                    await self.remove_peer(node_address)
-            else:
-                logger.debug(f"Peer {node_address} is not in 'connected' state, current state: {state}")
-
-        logger.info(f"Active peers: {active_peers}")
+        async with self.peer_lock:
+            active_peers = list(self.connected_peers)
+        self.logger.debug(f"Active peers: {active_peers}")
+        self.logger.debug(f"All peers: {list(self.peers.keys())}")
+        self.logger.debug(f"Peer states: {self.peer_states}")
         return active_peers
-        
+
     async def handle_keepalive(self, message: Message, sender: str):
         logger.debug(f"Received keepalive from {sender}")
         # You can implement additional logic here if needed
@@ -2854,78 +2937,106 @@ class P2PNode:
                 logger.error(f"Error in periodic connection check: {str(e)}")
                 await asyncio.sleep(60)
     async def connect_to_peer(self, node: KademliaNode) -> bool:
-        if self.is_self_connection(node.ip, node.port):
-            logger.info(f"Skipping connection to self at {node.ip}:{node.port}")
-            return False
-
+        """
+        Connect to a peer, perform key exchange, send a challenge, and update peer states.
+        """
         peer_address = f"{node.ip}:{node.port}"
-        logger.info(f"Attempting to connect to peer: {peer_address}")
+        self.logger.info(f"[CONNECT] Attempting to connect to peer: {peer_address}")
 
         try:
-            # Establish WebSocket connection with a timeout and custom settings
+            # Step 1: Establish WebSocket connection with timeout
             websocket = await asyncio.wait_for(
-                websockets.connect(
-                    f"ws://{peer_address}",
-                    ping_interval=5,  # Send a ping every 20 seconds
-                    ping_timeout=10,   # Wait 10 seconds for a pong before considering the connection dead
-                    close_timeout=None,  # Wait 10 seconds for a clean close before forcibly closing
-                    max_size=None,     # No limit on message size
-                    create_protocol=LoggingWebSocket  # Custom WebSocket protocol for logging
-                ),
-                timeout=300  # Timeout for establishing the WebSocket connection
+                websockets.connect(f"ws://{peer_address}", timeout=30),
+                timeout=30
             )
-            logger.debug(f"WebSocket connection established with {peer_address}")
+            self.logger.info(f"[CONNECT] WebSocket connection established with {peer_address}")
 
-            # Add peer to peers dictionary and mark state as 'connecting'
+            # Step 2: Lock the peer list and update peer states
             async with self.peer_lock:
                 self.peers[peer_address] = websocket
-            self.peer_states[peer_address] = "connecting"
+                self.peer_states[peer_address] = "connecting"
+                self.connected_peers.add(peer_address)  # Add to connected_peers set
+            self.logger.info(f"[CONNECT] Peer {peer_address} added to peers list and connected_peers")
 
-            try:
-                # Step 1: Perform public key exchange
-                if await self.exchange_public_keys(peer_address):
-                    logger.debug(f"Public keys exchanged with {peer_address}")
+            # Step 3: Perform public key exchange
+            if await self.exchange_public_keys(peer_address):
+                self.logger.info(f"[CONNECT] Public keys exchanged with {peer_address}")
+                self.peer_states[peer_address] = "key_exchanged"
 
-                    # Step 2: Wait for peer to process the public key exchange
-                    await asyncio.sleep(1)
+                # Step 4: Send a challenge to the peer
+                our_challenge_id = await self.send_challenge(peer_address)
+                self.logger.info(f"[CONNECT] Sent challenge with ID {our_challenge_id} to {peer_address}")
+                self.peer_states[peer_address] = "challenge_sent"
 
-                    # Step 3: Send challenge to the peer
-                    our_challenge_id = await self.send_challenge(peer_address)
-                    logger.debug(f"Sent challenge with ID {our_challenge_id} to {peer_address}")
+                # Step 5: Wait for the challenge response
+                if await self.wait_for_challenge_response(peer_address, our_challenge_id, timeout=60):
+                    self.logger.info(f"[CONNECT] Challenge response verified for peer: {peer_address}")
 
-                    # Step 4: Wait for the challenge response
-                    if await self.wait_for_challenge_response(peer_address, our_challenge_id, timeout=60):
-                        logger.info(f"Successfully connected to peer: {peer_address}")
+                    # Step 6: Lock peer list, update peer states, and finalize connection
+                    async with self.peer_lock:
                         self.peer_states[peer_address] = "connected"
-                        await self.add_node_to_bucket(node)
-                        await self.complete_connection(peer_address)
+                        self.logger.debug(f"Attempting to add peer {peer_address} to active peer list")
+                        self.connected_peers.add(peer_address)
+                        self.logger.debug(f"Peer list after adding: {self.connected_peers}")
 
-                        # Step 5: Start handling messages and the keep-alive mechanism
-                        asyncio.create_task(self.handle_messages(websocket, peer_address))
-                        asyncio.create_task(self.keep_connection_alive(websocket, peer_address))
+                    self.logger.info(f"[CONNECT] Peer {peer_address} successfully connected and added to active list")
 
-                        return True
-                    else:
-                        logger.error(f"Failed to receive valid challenge response from {peer_address}")
+                    await self.finalize_connection(peer_address)
+
+                    # Step 7: Start handling messages and keep-alive mechanisms
+                    asyncio.create_task(self.handle_messages(websocket, peer_address))
+                    asyncio.create_task(self.keep_connection_alive(websocket, peer_address))
+
+                    # Step 8: Sync with connected peers after a successful connection
+                    await self.sync_with_connected_peers()
+                    self.logger.info(f"Successfully synced with connected peers after connecting to {peer_address}")
+
+                    return True
                 else:
-                    logger.warning(f"Failed to exchange keys with peer: {peer_address}")
+                    self.logger.error(f"[CONNECT] Failed to receive valid challenge response from {peer_address}")
+            else:
+                self.logger.warning(f"[CONNECT] Failed to exchange keys with peer: {peer_address}")
 
-            except Exception as e:
-                logger.error(f"Error during peer authentication: {str(e)}")
-            finally:
-                # If the peer is not successfully connected, remove it
-                if peer_address not in self.peer_states or self.peer_states[peer_address] != "connected":
-                    await self.remove_peer(peer_address)
-                    logger.info(f"Removed peer {peer_address} due to authentication failure")
-
-        except asyncio.TimeoutError:
-            logger.warning(f"Connection attempt to {peer_address} timed out")
-        except websockets.exceptions.WebSocketException as ws_error:
-            logger.error(f"WebSocket error while connecting to {peer_address}: {str(ws_error)}")
         except Exception as e:
-            logger.error(f"Unexpected error while connecting to peer {peer_address}: {str(e)}")
-            logger.error(traceback.format_exc())
+            self.logger.error(f"[CONNECT] Error connecting to peer {peer_address}: {str(e)}")
+            self.logger.error(traceback.format_exc())
 
+        # If the connection fails at any point, clean up and remove the peer
+        await self.remove_peer(peer_address)
+        return False
+
+
+    async def finalize_connection(self, peer_address: str):
+        self.logger.info(f"[FINALIZE] Finalizing connection with peer {peer_address}")
+        async with self.peer_lock:
+            self.peer_states[peer_address] = "connected"
+            logger.debug(f"Attempting to add peer {peer_address} to active peer list")
+            self.connected_peers.add(peer_address)
+            logger.debug(f"Peer list after adding: {self.connected_peers}")
+
+            if peer_address not in self.peers:
+                self.logger.warning(f"[FINALIZE] Peer {peer_address} not found in self.peers. Adding it.")
+                # You might need to establish a new WebSocket connection here if it's missing
+                websocket = await websockets.connect(f"ws://{peer_address}")
+                self.peers[peer_address] = websocket
+        
+        await self.complete_connection(peer_address)
+        self.logger.info(f"[FINALIZE] Connection finalized with peer {peer_address}")
+        self.log_peer_status()
+        
+        # Verify the peer was added correctly
+        self.logger.info(f"[FINALIZE] Verification after finalization:")
+        self.logger.info(f"  Peer in self.peers: {peer_address in self.peers}")
+        self.logger.info(f"  Peer in self.connected_peers: {peer_address in self.connected_peers}")
+        self.logger.info(f"  Peer state: {self.peer_states.get(peer_address)}")
+
+    def log_peer_status(self):
+        self.logger.info("Current peer status:")
+        self.logger.info(f"  All peers: {list(self.peers.keys())}")
+        self.logger.info(f"  Peer states: {self.peer_states}")
+        self.logger.info(f"  Connected peers: {self.connected_peers}")
+        active_peers = [peer for peer in self.connected_peers if self.peer_states.get(peer) == "connected"]
+        self.logger.info(f"  Active peers: {active_peers}")
     async def handle_messages(self, websocket: websockets.WebSocketServerProtocol, peer: str):
         try:
             while True:
@@ -3312,6 +3423,10 @@ class P2PNode:
                 await self.handle_disconnection(peer)
                 break
     async def handle_connection(self, websocket: websockets.WebSocketServerProtocol, path: str):
+        """
+        Handles the connection lifecycle with a peer, including public key exchange,
+        challenge-response handling, keep-alive mechanism, and reconnection attempts.
+        """
         peer_ip, peer_port = websocket.remote_address[:2]
         peer_normalized = self.normalize_peer_address(peer_ip, peer_port)
         self.logger.info(f"New incoming connection from {peer_ip}:{peer_port}")
@@ -3354,7 +3469,7 @@ class P2PNode:
                     self.logger.warning(f"Unexpected message type during handshake: {message.type}")
                     await self.handle_message(message, peer_normalized)
 
-            # Step 4: Start the keepalive task
+            # Step 4: Start the keep-alive task
             keepalive_task = asyncio.create_task(self.keep_connection_alive(peer_normalized))
 
             # Step 5: Handle regular messages after handshake completion
@@ -3385,7 +3500,7 @@ class P2PNode:
             self.logger.error(f"Unexpected error during connection with {peer_normalized}: {str(e)}")
             self.logger.error(traceback.format_exc())
         finally:
-            # Cancel the keepalive task and ensure peer is removed after disconnection
+            # Cancel the keep-alive task and ensure peer is removed after disconnection
             if 'keepalive_task' in locals():
                 keepalive_task.cancel()
             await self.handle_disconnection(peer_normalized)
@@ -3529,36 +3644,60 @@ class P2PNode:
                 await asyncio.sleep(60)
 
     async def find_and_connect_to_new_peers(self):
+        self.logger.info("[FIND_PEERS] Starting search for new peers")
         try:
+            self.logger.info("[FIND_PEERS] Attempting to find and connect to new peers")
             nodes = await self.find_node(self.node_id)
+            self.logger.info(f"[FIND_PEERS] Found {len(nodes)} potential new peers")
             for node in nodes:
+                self.logger.info(f"[FIND_PEERS] Considering peer: {node.id}")
                 if node.id not in self.peers and len(self.peers) < self.target_peer_count:
-                    await self.connect_to_peer(node)
+                    self.logger.info(f"[FIND_PEERS] Attempting to connect to new peer: {node.id}")
+                    success = await self.connect_to_peer(node)
+                    if success:
+                        self.logger.info(f"[FIND_PEERS] Successfully connected to new peer: {node.id}")
+                    else:
+                        self.logger.warning(f"[FIND_PEERS] Failed to connect to new peer: {node.id}")
+                else:
+                    self.logger.info(f"[FIND_PEERS] Skipping peer {node.id} (already connected or peer limit reached)")
+            self.logger.info(f"[FIND_PEERS] Finished attempt to find new peers. Current peer count: {len(self.peers)}")
         except Exception as e:
-            self.logger.error(f"Error finding new peers: {str(e)}")
+            self.logger.error(f"[FIND_PEERS] Error finding new peers: {str(e)}")
+            self.logger.error(traceback.format_exc())
+        self.logger.info("[FIND_PEERS] Finished search for new peers")
 
     async def run(self):
         try:
             await self.start_server()
             await self.join_network()
             await self.announce_to_network()
-            await asyncio.gather(
-                self.process_message_queue(),
-                self.periodic_peer_discovery(),
-                self.periodic_data_republish(),
-                self.send_heartbeats(),
-                self.periodic_logo_sync(),
-                self.periodic_connection_check(),
-                self.maintain_peer_connections(),
-                self.connection_monitor(),
-                self.maintain_connections()
-
-                # Add this line
-                # Add this line
-            )
+            
+            self.logger.info("Starting periodic tasks...")
+            tasks = [
+                asyncio.create_task(self.process_message_queue()),
+                asyncio.create_task(self.periodic_peer_discovery()),
+                asyncio.create_task(self.periodic_data_republish()),
+                asyncio.create_task(self.send_heartbeats()),
+                asyncio.create_task(self.periodic_logo_sync()),
+                asyncio.create_task(self.periodic_connection_check()),
+                asyncio.create_task(self.maintain_peer_connections()),
+                asyncio.create_task(self.connection_monitor()),
+                asyncio.create_task(self.maintain_connections()),
+                asyncio.create_task(self.periodic_peer_check())
+            ]
+            
+            for i, task in enumerate(tasks):
+                self.logger.info(f"Started task {i+1}: {task.get_name()}")
+            
+            self.logger.info("P2P node is now running")
+            
+            # Keep the node running
+            while True:
+                await asyncio.sleep(3600)  # Sleep for an hour, or use some other condition to keep the node running
+                
         except Exception as e:
-            logger.error(f"Failed to run P2P node: {str(e)}")
-            logger.error(traceback.format_exc())
+            self.logger.error(f"Error in P2P node run method: {str(e)}")
+            self.logger.error(traceback.format_exc())
     async def periodic_logo_sync(self):
         while True:
             try:
@@ -4169,7 +4308,29 @@ class P2PNode:
                 return data["value"]
         return None
 
+    async def handle_transaction(self, transaction_data: dict, sender: str):
+        try:
+            if transaction_data.get('type') == 'multisig_transaction':
+                # Handle multisig transaction
+                tx_hash = await self.blockchain.add_multisig_transaction(
+                    transaction_data['multisig_address'],
+                    transaction_data['sender_public_keys'],
+                    transaction_data['threshold'],
+                    transaction_data['receiver'],
+                    Decimal(transaction_data['amount']),
+                    transaction_data['message'],
+                    transaction_data['aggregate_proof']
+                )
+            else:
+                # Handle regular transaction
+                transaction = Transaction.from_dict(transaction_data)
+                tx_hash = await self.blockchain.add_transaction(transaction)
 
+            logger.info(f"Transaction added to blockchain: {tx_hash}")
+            await self.broadcast(Message(MessageType.TRANSACTION.value, transaction_data), exclude=sender)
+        except Exception as e:
+            logger.error(f"Failed to handle transaction: {str(e)}")
+            logger.error(traceback.format_exc())
 # Usage example
 async def main():
     blockchain = ...  # Initialize your blockchain object here
