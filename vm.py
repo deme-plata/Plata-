@@ -15,6 +15,29 @@ import requests
 import logging
 from SecureHybridZKStark import SecureHybridZKStark
 from finite_field_factory import FiniteFieldFactory
+from mongodb_manager import QuantumDAGKnightDB
+import hashlib
+import traceback
+import threading
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import time
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.exceptions import InvalidSignature
+from cachetools import LRUCache
+from collections import defaultdict
+from merkletools import MerkleTools
+from enum import Enum, auto
+import requests
+import logging
+from SecureHybridZKStark import SecureHybridZKStark
+from finite_field_factory import FiniteFieldFactory
+from mongodb_manager import QuantumDAGKnightDB
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +51,113 @@ class PersistentStorage:
 
     def save(self, key, value):
         self.storage[key] = value
+class SQLContract:
+    def __init__(self, vm, contract_address):
+        self.vm = vm
+        self.contract_address = contract_address
+        self.db_name = f"contract_{contract_address}"
+        self.conn = None
+        self.cursor = None
+        self.connect()
+
+    def connect(self):
+        try:
+            # Retrieve database settings from environment variables
+            user = os.getenv("DB_USER", "default_user")
+            password = os.getenv("DB_PASSWORD", "default_password")
+            host = os.getenv("DB_HOST", "localhost")
+
+            # Connect to the default database to manage databases
+            conn = psycopg2.connect(
+                dbname="postgres",
+                user=user,
+                password=password,
+                host=host
+            )
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            cur = conn.cursor()
+
+            # Terminate other connections to the database
+            cur.execute(sql.SQL("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s"), [self.db_name])
+
+            # Drop the database if it exists
+            cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(self.db_name)))
+            
+            # Create a new database for this contract
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(self.db_name)))
+
+            cur.close()
+            conn.close()
+
+            # Connect to the newly created database
+            self.conn = psycopg2.connect(
+                dbname=self.db_name,
+                user=user,
+                password=password,
+                host=host
+            )
+            self.cursor = self.conn.cursor()
+        except psycopg2.Error as e:
+            logger.error(f"PostgreSQL error: {e}")
+
+
+
+
+    def execute_query(self, query, params=None):
+        try:
+            if params:
+                self.cursor.execute(query, params)
+            else:
+                self.cursor.execute(query)
+            self.conn.commit()
+            if self.cursor.description:
+                return self.cursor.fetchall()
+            return None
+        except psycopg2.Error as e:
+            logger.error(f"PostgreSQL error: {e}")
+            return None
+
+    def create_table(self, table_name, columns):
+        query = sql.SQL("CREATE TABLE IF NOT EXISTS {} ({})").format(
+            sql.Identifier(table_name),
+            sql.SQL(', ').join(map(sql.SQL, columns))
+        )
+        self.execute_query(query)
+
+    def insert(self, table_name, data):
+        columns = data.keys()
+        values = data.values()
+        query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+            sql.Identifier(table_name),
+            sql.SQL(', ').join(map(sql.Identifier, columns)),
+            sql.SQL(', ').join(sql.Placeholder() * len(values))
+        )
+        self.execute_query(query, list(values))
+
+    def select(self, table_name, conditions=None):
+        query = sql.SQL("SELECT * FROM {}").format(sql.Identifier(table_name))
+        if conditions:
+            query += sql.SQL(" WHERE {}").format(sql.SQL(conditions))
+        return self.execute_query(query)
+
+    def update(self, table_name, data, conditions):
+        set_clause = sql.SQL(', ').join(
+            sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder())
+            for k in data.keys()
+        )
+        query = sql.SQL("UPDATE {} SET {} WHERE {}").format(
+            sql.Identifier(table_name),
+            set_clause,
+            sql.SQL(conditions)
+        )
+        self.execute_query(query, list(data.values()))
+
+    def delete(self, table_name, conditions):
+        query = sql.SQL("DELETE FROM {} WHERE {}").format(
+            sql.Identifier(table_name),
+            sql.SQL(conditions)
+        )
+        self.execute_query(query)
 
 
 class ComplexDataTypes:
@@ -232,7 +362,7 @@ class Node:
 
 
 class SimpleVM:
-    def __init__(self, gas_limit=10000, number_of_shards=10, nodes=None, max_supply=1000000, security_level=2):
+    def __init__(self, gas_limit=10000, number_of_shards=10, nodes=None, max_supply=1000000, security_level=20):
         self.global_scope = {}
         self.scope_stack = [self.global_scope]
         self.functions = {}
@@ -267,9 +397,23 @@ class SimpleVM:
         self.zk_proofs = {}  # Store ZK proofs for transactions
         self.security_level = security_level
         self.token_logos = {}  # New attribute to store token logos
-
+        self.db = QuantumDAGKnightDB("mongodb://localhost:27017", "quantumdagknight_db")
+        self.initialized = False
+        self.sql_contracts = {}
+        self.sql_contract_code = {}
         logger.info(f"SimpleVM initialized with gas_limit={gas_limit}, number_of_shards={number_of_shards}, nodes={nodes}")
+    async def initialize(self):
+        try:
+            await self.db.init_process_queue()
+            self.initialized = True
+            logger.info("VM fully initialized")
+        except Exception as e:
+            logger.error(f"Error initializing VM: {str(e)}")
+            logger.error(traceback.format_exc())
+            self.initialized = False
 
+    def is_initialized(self):
+        return self.initialized
     def save_state(self):
         self.persistent_storage.save('balances', self.balances)
         self.persistent_storage.save('total_supply', self.total_supply)
@@ -281,6 +425,63 @@ class SimpleVM:
         self.total_supply = self.persistent_storage.load('total_supply')
         self.token_balances = self.persistent_storage.load('token_balances')
         self.nfts = self.persistent_storage.load('nfts')
+    async def deploy_sql_contract(self, sender, contract_code):
+        contract_address = self.generate_contract_address(sender)
+        sql_contract = SQLContract(self, contract_address)
+        self.sql_contracts[contract_address] = sql_contract
+        self.sql_contract_code[contract_address] = contract_code
+
+        # Parse and execute the contract code
+        for statement in contract_code.split(';'):
+            statement = statement.strip()
+            if statement.lower().startswith('create table'):
+                sql_contract.execute_query(statement)
+
+        await self.db.deploy_contract(contract_address, "SQL_CONTRACT", sender, {"code": contract_code})
+        return contract_address
+
+    async def execute_sql_contract(self, contract_address, function_name, *args):
+        if contract_address not in self.sql_contracts:
+            raise ValueError(f"SQL Contract at address {contract_address} not found.")
+
+        contract = self.sql_contracts[contract_address]
+        contract_code = self.sql_contract_code[contract_address]
+
+        # Check if function_name looks like a SQL statement
+        sql_keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP"]
+        if any(function_name.strip().upper().startswith(keyword) for keyword in sql_keywords):
+            # Directly execute as SQL query
+            result = contract.execute_query(function_name)
+            return result
+
+        # Original function-based contract execution
+        function_start = contract_code.find(f"action {function_name}")
+        if function_start == -1:
+            raise ValueError(f"Function {function_name} not found in contract at address {contract_address}.")
+
+        function_end = contract_code.find("}", function_start)
+        function_code = contract_code[function_start:function_end]
+
+        # Extract and execute the SQL query
+        query_start = function_code.find("{") + 1
+        query = function_code[query_start:].strip()
+
+        # Replace placeholders with actual arguments
+        for i, arg in enumerate(args):
+            query = query.replace(f"${i+1}", sql.Literal(arg).as_string(contract.conn))
+
+        result = contract.execute_query(query)
+        return result
+
+
+    async def get_sql_contract(self, contract_address):
+        if contract_address not in self.sql_contracts:
+            contract_data = await self.db.get_contract(contract_address)
+            if contract_data and contract_data['code'] == "SQL_CONTRACT":
+                sql_contract = SQLContract(self, contract_address)
+                self.sql_contracts[contract_address] = sql_contract
+                self.sql_contract_code[contract_address] = contract_data['state']['code']
+        return self.sql_contracts.get(contract_address)
 
     def mint(self, address, amount):
         if self.total_supply + amount > self.max_supply:
@@ -352,8 +553,11 @@ class SimpleVM:
     def get_shard_for_contract(self, contract_address):
         return hash(contract_address) % self.number_of_shards
 
-    def update_contract_state(self, db_path, contract_address, new_state):
-        self.contract_states[contract_address] = new_state
+    async def update_contract_state(self, contract_address, new_state):
+        await self.db.update_contract_state(contract_address, new_state)
+        if contract_address in self.contracts:
+            self.contracts[contract_address].__dict__.update(new_state)
+
 
     def has_permission(self, user_id, permission):
         return self.access_control.check_permission(user_id, permission)
@@ -368,14 +572,12 @@ class SimpleVM:
     def set_contract_state(self, address, state):
         self.contract_states[address] = state.copy()
 
-    def add_user(self, user_id, permissions=None, roles=None):
-        if user_id not in self.users:
-            self.users[user_id] = {"permissions": set(), "roles": set()}
-        self.users[user_id]["permissions"].update(permissions or [])
-        self.users[user_id]["roles"].update(roles or [])
-        if roles:
-            for role in roles:
-                self.access_control.assign_role(user_id, role)
+    async def add_user(self, user_id, permissions=None, roles=None):
+        permissions = permissions or []
+        roles = roles or []
+        await self.db.create_user(user_id, permissions, roles)
+        self.users[user_id] = {"permissions": set(permissions), "roles": set(roles)}
+
 
     def assign_permission_to_user(self, user_id, permission):
         if user_id in self.users:
@@ -424,26 +626,43 @@ class SimpleVM:
 
     def get_events(self):
         return self.events
-    def deploy_contract(self, sender, contract_class, *args):
+    async def deploy_contract(self, sender, contract_class, *args):
         contract_instance = contract_class(self, *args)
-        contract_address = "0x" + hashlib.sha256(f"{contract_class.__name__}{time.time()}".encode()).hexdigest()[:40]
+        contract_address = self.generate_contract_address(sender)
+        contract_code = contract_instance.__class__.__name__  # You might want to serialize the actual code
+        initial_state = contract_instance.__dict__
+        await self.db.deploy_contract(contract_address, contract_code, sender, initial_state)
         self.contracts[contract_address] = contract_instance
-        
-        # Add a debug print statement to show the deployed contract address
-        print(f"Deployed contract at address: {contract_address}")
-        
         return contract_address
 
 
-    def get_contract(self, contract_address):
+    async def get_contract(self, contract_address):
         contract = self.contracts.get(contract_address)
         if not contract:
-            raise ValueError(f"Contract at address {contract_address} not found")
+            contract_data = await self.db.get_contract(contract_address)
+            if contract_data:
+                # Recreate the contract instance from the stored data
+                contract_class = globals()[contract_data['code']]
+                contract = contract_class(self)
+                contract.__dict__.update(contract_data['state'])
+                self.contracts[contract_address] = contract
         return contract
 
 
 
 
+
+
+    async def get_user(self, user_id):
+        user = self.users.get(user_id)
+        if not user:
+            user_data = await self.db.get_user(user_id)
+            if user_data:
+                self.users[user_id] = {
+                    "permissions": set(user_data['permissions']),
+                    "roles": set(user_data['roles'])
+                }
+        return self.users.get(user_id)
 
 
 
@@ -866,7 +1085,134 @@ class SimpleVM:
         """
         for token_address, logo_info in self.token_logos.items():
             self.distribute_logo(token_address)
+    async def assign_permission_to_user(self, user_id, permission):
+        user = await self.get_user(user_id)
+        if user:
+            user["permissions"].add(permission)
+            await self.db.update_user_permissions(user_id, list(user["permissions"]))
 
+    async def revoke_permission_from_user(self, user_id, permission):
+        user = await self.get_user(user_id)
+        if user:
+            user["permissions"].discard(permission)
+            await self.db.update_user_permissions(user_id, list(user["permissions"]))
+
+    async def assign_role_to_user(self, user_id, role):
+        user = await self.get_user(user_id)
+        if user:
+            user["roles"].add(role)
+            await self.db.update_user_roles(user_id, list(user["roles"]))
+
+    async def revoke_role_from_user(self, user_id, role):
+        user = await self.get_user(user_id)
+        if user and role in user["roles"]:
+            user["roles"].remove(role)
+            await self.db.update_user_roles(user_id, list(user["roles"]))
+
+    async def create_token(self, creator_address, token_name, token_symbol, total_supply):
+        token_address = self.generate_contract_address(creator_address)
+        await self.db.create_token(token_address, token_name, token_symbol, total_supply, creator_address)
+        self.token_balances[token_address] = {
+            'name': token_name,
+            'symbol': token_symbol,
+            'total_supply': total_supply,
+            'creator': creator_address,
+            'balances': {creator_address: total_supply}
+        }
+        return token_address
+
+    async def get_token(self, token_address):
+        token = self.token_balances.get(token_address)
+        if not token:
+            token_data = await self.db.get_token(token_address)
+            if token_data:
+                self.token_balances[token_address] = token_data
+        return self.token_balances.get(token_address)
+
+    async def update_token_supply(self, token_address, new_supply):
+        token = await self.get_token(token_address)
+        if token:
+            token['total_supply'] = new_supply
+            await self.db.update_token_supply(token_address, new_supply)
+
+    async def create_nft(self, creator_address, nft_id, metadata):
+        await self.db.create_nft(nft_id, metadata, creator_address)
+        self.nfts[nft_id] = {
+            'owner': creator_address,
+            'metadata': metadata
+        }
+        return nft_id
+
+    async def get_nft(self, nft_id):
+        nft = self.nfts.get(nft_id)
+        if not nft:
+            nft_data = await self.db.get_nft(nft_id)
+            if nft_data:
+                self.nfts[nft_id] = nft_data
+        return self.nfts.get(nft_id)
+    async def transfer_nft(self, from_address, to_address, nft_id):
+        nft = await self.get_nft(nft_id)
+        if nft and nft['owner'] == from_address:
+            nft['owner'] = to_address
+            await self.db.update_nft_owner(nft_id, to_address)
+            return True
+        return False
+
+    async def sync_state_with_db(self):
+        # Sync contracts
+        db_contracts = await self.db.get_all_contracts()
+        for contract_data in db_contracts:
+            if contract_data['address'] not in self.contracts:
+                contract_class = globals()[contract_data['code']]
+                contract = contract_class(self)
+                contract.__dict__.update(contract_data['state'])
+                self.contracts[contract_data['address']] = contract
+
+        # Sync users
+        db_users = await self.db.get_all_users()
+        for user_data in db_users:
+            self.users[user_data['user_id']] = {
+                "permissions": set(user_data['permissions']),
+                "roles": set(user_data['roles'])
+            }
+
+        # Sync tokens
+        db_tokens = await self.db.get_all_tokens()
+        for token_data in db_tokens:
+            self.token_balances[token_data['address']] = token_data
+
+        # Sync NFTs
+        db_nfts = await self.db.get_all_nfts()
+        for nft_data in db_nfts:
+            self.nfts[nft_data['nft_id']] = nft_data
+
+    async def execute_contract(self, contract_address, function_name, *args, **kwargs):
+        contract = await self.get_contract(contract_address)
+        if not contract:
+            raise ValueError(f"Contract at address {contract_address} not found.")
+
+        if not hasattr(contract, function_name):
+            raise ValueError(f"Function {function_name} not found in contract at address {contract_address}.")
+
+        result = getattr(contract, function_name)(*args, **kwargs)
+        
+        # Update contract state in the database
+        await self.update_contract_state(contract_address, contract.__dict__)
+
+        return result
+
+    async def process_transaction(self, transaction):
+        # Implement transaction processing logic
+        # This method should update the state of the VM and the database
+        pass
+
+    async def get_balance(self, address):
+        # Implement balance retrieval logic
+        pass
+
+    async def transfer(self, from_address, to_address, amount):
+        # Implement transfer logic
+        pass
 
 
 class ZKContract:

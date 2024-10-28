@@ -5673,30 +5673,57 @@ from cryptography.hazmat.primitives import padding
 class Wallet(BaseModel):
     private_key: Optional[ec.EllipticCurvePrivateKey] = None
     public_key: Optional[str] = None
-    mnemonic: Optional[Mnemonic] = None
+    mnemonic_phrase: Optional[str] = None  # Store the actual mnemonic phrase
+    mnemonic_generator: Optional[Mnemonic] = None  # Store the generator
     address: Optional[str] = None
     salt: Optional[bytes] = None
     hashed_pincode: Optional[str] = None
 
     def __init__(self, private_key=None, mnemonic=None, pincode=None, **data):
         super().__init__(**data)
-        self.mnemonic = Mnemonic("english")
+        
+        # Initialize mnemonic generator
+        self.mnemonic_generator = Mnemonic("english")
 
-        if mnemonic:
-            seed = self.mnemonic.to_seed(mnemonic)
-            self.private_key = ec.derive_private_key(int.from_bytes(seed[:32], byteorder="big"), ec.SECP256R1(), default_backend())
-        elif private_key:
-            self.private_key = serialization.load_pem_private_key(private_key.encode(), password=None, backend=default_backend())
-        else:
-            self.private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        try:
+            # Handle mnemonic initialization
+            if mnemonic:
+                # Store the mnemonic phrase
+                self.mnemonic_phrase = str(mnemonic)
+                # Generate seed from mnemonic
+                seed = self.mnemonic_generator.to_seed(self.mnemonic_phrase)
+                self.private_key = ec.derive_private_key(
+                    int.from_bytes(seed[:32], byteorder="big"), 
+                    ec.SECP256R1(), 
+                    default_backend()
+                )
+            elif private_key:
+                self.private_key = serialization.load_pem_private_key(
+                    private_key.encode(), 
+                    password=None, 
+                    backend=default_backend()
+                )
+            else:
+                # Generate new wallet
+                self.private_key = ec.generate_private_key(
+                    ec.SECP256R1(), 
+                    default_backend()
+                )
+                # Generate and store new mnemonic
+                self.mnemonic_phrase = self.mnemonic_generator.generate(strength=128)
 
-        # Generate public key and address after private key is initialized
-        self.public_key = self.get_public_key()
-        self.address = self.get_address()
+            # Generate public key and address
+            self.public_key = self.get_public_key()
+            self.address = self.get_address()
 
-        if pincode:
-            self.salt = self.generate_salt()
-            self.hashed_pincode = self.hash_pincode(pincode)
+            # Handle pincode if provided
+            if pincode:
+                self.salt = self.generate_salt()
+                self.hashed_pincode = self.hash_pincode(pincode)
+
+        except Exception as e:
+            logger.error(f"Wallet initialization failed: {str(e)}")
+            raise ValueError(f"Failed to initialize wallet: {str(e)}")
 
     def generate_salt(self) -> bytes:
         """Generate a new salt for hashing the pincode."""
@@ -5714,6 +5741,7 @@ class Wallet(BaseModel):
             raise ValueError("Hashed pincode or salt is not set. Cannot verify pincode.")
         return bcrypt.checkpw(pincode.encode('utf-8'), self.hashed_pincode.encode('utf-8'))
 
+
     def private_key_pem(self) -> str:
         return self.private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -5722,10 +5750,21 @@ class Wallet(BaseModel):
         ).decode('utf-8')
 
     def get_public_key(self) -> str:
+        """Get the public key in PEM format."""
+        if not self.private_key:
+            raise ValueError("Private key not initialized")
         return self.private_key.public_key().public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         ).decode('utf-8')
+
+    def get_address(self) -> str:
+        """Generate wallet address from public key."""
+        public_key_bytes = self.get_public_key().encode()
+        address = "plata" + hashlib.sha256(public_key_bytes).hexdigest()[:16]
+        if not re.match(r'^plata[a-f0-9]{16}$', address):
+            raise ValueError(f"Generated address {address} does not match the expected format.")
+        return address
 
     def generate_mnemonic(self):
         return self.mnemonic.generate(strength=128)
@@ -5736,21 +5775,19 @@ class Wallet(BaseModel):
             if not self.private_key:
                 raise ValueError("Private key not available")
                 
-            # Ensure message is in bytes
             if isinstance(message, str):
                 message = message.encode('utf-8')
                 
-            # Create signature
             signature = self.private_key.sign(
                 message,
                 ec.ECDSA(hashes.SHA256())
             )
             
-            # Properly pad the base64 encoding
             return base64.b64encode(signature).decode('utf-8')
             
         except Exception as e:
             raise ValueError(f"Failed to sign message: {str(e)}")
+
 
 
     def verify_signature(self, message_b64: str, signature_b64: str, public_key: str) -> bool:
@@ -5940,15 +5977,56 @@ class Wallet(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    def to_dict(self):
-        """Convert the Wallet object to a dictionary for easy serialization."""
-        return {
-            "address": self.address,
-            "public_key": self.public_key,
-            "mnemonic": self.mnemonic.generate() if self.mnemonic else None,
-            "hashed_pincode": self.hashed_pincode,
-            # You can add more fields as needed, but avoid exposing private keys.
-        }
+    def to_dict(self) -> dict:
+        """Convert wallet to dictionary for serialization."""
+        try:
+            return {
+                "address": self.address,
+                "public_key": self.public_key,
+                "mnemonic": self.mnemonic_phrase,  # Store the actual phrase
+                "hashed_pincode": self.hashed_pincode,
+                "salt": base64.b64encode(self.salt).decode('utf-8') if self.salt else None
+            }
+        except Exception as e:
+            logger.error(f"Failed to convert wallet to dict: {str(e)}")
+            raise
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Wallet':
+        """Create wallet instance from dictionary."""
+        try:
+            # Extract mnemonic if present
+            mnemonic = data.get('mnemonic')
+            if isinstance(mnemonic, (list, tuple)):
+                mnemonic = " ".join(map(str, mnemonic))
+            elif mnemonic is None:
+                mnemonic = Mnemonic("english").generate(strength=128)
+
+            # Extract salt if present
+            salt = None
+            if data.get('salt'):
+                salt = base64.b64decode(data['salt'])
+
+            # Create new instance
+            wallet = cls(
+                mnemonic=str(mnemonic),
+                pincode=None  # Don't initialize with pincode from dict for security
+            )
+
+            # Restore additional data
+            wallet.address = data.get('address')
+            wallet.public_key = data.get('public_key')
+            wallet.hashed_pincode = data.get('hashed_pincode')
+            wallet.salt = salt
+
+            return wallet
+
+        except Exception as e:
+            logger.error(f"Failed to create wallet from dict: {str(e)}")
+            raise ValueError(f"Failed to create wallet from dictionary: {str(e)}")
+
+    class Config:
+        arbitrary_types_allowed = True
+
 
 class PQWallet(Wallet):
     def __init__(self):
@@ -10111,7 +10189,6 @@ from oqs import KeyEncapsulation
 import logging
 
 logger = logging.getLogger(__name__)
-
 class CryptoProvider:
     def __init__(self):
         self.stark = SecureHybridZKStark(security_level=20)
@@ -10120,16 +10197,60 @@ class CryptoProvider:
         self.he_public_key = self._generate_he_keys()
         # Initialize Ring Signature parameters
         self.ring_size = 11  # Must be prime
+        self.ring_keys = self._initialize_ring_keys()  # Fixed method name
         # Initialize Post-Quantum components
+        self._initialize_pq_crypto()
+
+
+
+    def _initialize_ring_keys(self) -> List[Dict[str, Any]]:
+        """Initialize ring signature keys with proper format."""
+        try:
+            keys = []
+            for _ in range(self.ring_size):
+                private_key = ec.generate_private_key(ec.SECP256R1())
+                public_key = private_key.public_key()
+                
+                keys.append({
+                    'private_bytes': private_key.private_bytes(
+                        encoding=serialization.Encoding.DER,  # Alternative to Raw
+                        format=serialization.PrivateFormat.TraditionalOpenSSL,
+                        encryption_algorithm=serialization.NoEncryption()
+                    ),
+                    'public_pem': public_key.public_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PublicFormat.SubjectPublicKeyInfo
+                    ).decode()
+                })
+            logger.info(f"Ring signature key pool initialized with {len(keys)} keys")
+            return keys
+        except Exception as e:
+            logger.error(f"Failed to initialize ring keys: {str(e)}")
+            return []
+
+
+
+
+    def _initialize_pq_crypto(self):
+        """Initialize post-quantum crypto with fallback options"""
         try:
             self.kem = KeyEncapsulation("Kyber768")
-            self.pq_public_key, self.pq_secret_key = self.kem.generate_keypair()
+            # Try different initialization methods
+            try:
+                self.pq_public_key, self.pq_secret_key = self.kem.generate_keypair()
+            except:
+                # Alternative initialization
+                self.kem.keypair()
+                self.pq_public_key = self.kem.public_key
+                self.pq_secret_key = self.kem.secret_key
             logger.info("Post-quantum encryption initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize post-quantum encryption: {str(e)}")
             self.kem = None
             self.pq_public_key = None
             self.pq_secret_key = None
+
+
 
     def _generate_he_keys(self) -> Tuple[int, int]:
         """Generate keys for simple homomorphic encryption"""
@@ -10156,6 +10277,7 @@ class CryptoProvider:
         except Exception as e:
             logger.error(f"Homomorphic encryption failed: {str(e)}")
             raise
+
 
     async def decrypt_homomorphic(self, cipher: bytes) -> int:
         """Decrypt a homomorphic encrypted value"""
@@ -10186,43 +10308,67 @@ class CryptoProvider:
             logger.error(f"Homomorphic decryption failed: {str(e)}")
             raise
 
-    def create_ring_signature(self, message: bytes, private_key: Any, public_keys: List[str]) -> bytes:
-        """Create a ring signature"""
+    def create_ring_signature(self, message: bytes, private_key: Any, public_key: str) -> Optional[bytes]:
+        """Create ring signature with proper key handling"""
         try:
-            ring_size = len(public_keys)
-            if ring_size < 2:
+            # Get ring members
+            ring_members = [key['public_pem'] for key in self.ring_keys]
+            if public_key not in ring_members and ring_members:
+                ring_members[0] = public_key
+
+            if len(ring_members) < 2:
                 raise ValueError("Ring size must be at least 2")
 
+            # Get private key bytes
+            if isinstance(private_key, bytes):
+                private_bytes = private_key
+            else:
+                try:
+                    private_bytes = private_key.private_bytes(
+                        encoding=serialization.Encoding.Raw,
+                        format=serialization.PrivateFormat.Raw,
+                        encryption_algorithm=serialization.NoEncryption()
+                    )
+                except AttributeError:
+                    # Handle case where private_key might be in a different format
+                    private_bytes = str(private_key).encode()
+
+            # Create signature components
             v = int.from_bytes(hashlib.sha256(message).digest(), byteorder='big')
-            s = [0] * ring_size
-            e = [0] * ring_size
-            
-            signer_idx = public_keys.index(private_key.public_key().public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            ).decode())
-            
-            key_image = hashlib.sha256(str(private_key.private_numbers().x).encode()).digest()
-            
-            for i in range(ring_size):
+            s = [0] * len(ring_members)
+            e = [b''] * len(ring_members)
+
+            # Find signer's position
+            signer_idx = ring_members.index(public_key)
+
+            # Generate key image
+            key_image = hashlib.sha256(private_bytes).digest()
+
+            # Create ring signature
+            for i in range(len(ring_members)):
                 if i != signer_idx:
                     s[i] = random.getrandbits(self.security_bits)
                     e[i] = hashlib.sha256(str(v ^ s[i]).encode()).digest()
-            
-            s[signer_idx] = v ^ int.from_bytes(hashlib.sha256(
-                b''.join(e)
-            ).digest(), byteorder='big')
-            
-            signature = key_image + b''.join(
-                x.to_bytes((x.bit_length() + 7) // 8, byteorder='big')
-                for x in s
-            )
-            
-            return signature
-            
+
+            # Complete the ring
+            e_concat = b''.join(e)
+            s[signer_idx] = v ^ int.from_bytes(hashlib.sha256(e_concat).digest(), byteorder='big')
+
+            # Create final signature
+            ring_sig = key_image
+            for s_val in s:
+                s_bytes = s_val.to_bytes((s_val.bit_length() + 7) // 8, byteorder='big')
+                ring_sig += s_bytes
+
+            logger.debug("Ring signature created successfully")
+            return ring_sig
+
         except Exception as e:
             logger.error(f"Ring signature creation failed: {str(e)}")
-            raise
+            return None
+
+
+
 
     def verify_ring_signature(self, message: bytes, signature: bytes, public_keys: List[str]) -> bool:
         """Verify a ring signature"""
@@ -10230,6 +10376,7 @@ class CryptoProvider:
             ring_size = len(public_keys)
             key_image_size = 32  # SHA256 digest size
             
+            # Extract signature components
             key_image = signature[:key_image_size]
             s = []
             sig_remainder = signature[key_image_size:]
@@ -10240,6 +10387,7 @@ class CryptoProvider:
                 end = start + chunk_size
                 s.append(int.from_bytes(sig_remainder[start:end], byteorder='big'))
             
+            # Verify signature
             v = int.from_bytes(hashlib.sha256(message).digest(), byteorder='big')
             e = [0] * ring_size
             
@@ -10255,39 +10403,53 @@ class CryptoProvider:
             logger.error(f"Ring signature verification failed: {str(e)}")
             return False
 
-    def pq_encrypt(self, message: bytes) -> bytes:
-        """Encrypt using post-quantum Kyber768 via liboqs"""
+    def pq_encrypt(self, message: bytes) -> Optional[bytes]:
+        """Post-quantum encryption with proper error handling"""
         try:
-            if not self.kem:
-                raise ValueError("Post-quantum encryption not initialized")
+            if not self.kem or not self.pq_public_key:
+                logger.error("Post-quantum encryption not initialized")
+                return None
 
-            # Generate shared secret and encapsulation
-            ciphertext, shared_secret = self.kem.encap_secret(self.pq_public_key)
-            
-            # Use shared secret to encrypt message with AES
-            key = hashlib.sha256(shared_secret).digest()
-            iv = os.urandom(16)
-            cipher = Cipher(algorithms.AES(key), modes.GCM(iv))
-            encryptor = cipher.encryptor()
-            
-            # Pad message if needed
-            padder = padding.PKCS7(128).padder()
-            padded_data = padder.update(message) + padder.finalize()
-            
-            # Encrypt
-            ciphertext_data = encryptor.update(padded_data) + encryptor.finalize()
-            
-            # Combine all components
-            return iv + encryptor.tag + ciphertext + ciphertext_data
-            
+            try:
+                # Try different encapsulation methods
+                try:
+                    ciphertext, shared_secret = self.kem.encap_secret(self.pq_public_key)
+                except AttributeError:
+                    # Fallback to alternative API
+                    encap_result = self.kem.encapsulate(self.pq_public_key)
+                    ciphertext = encap_result.ciphertext
+                    shared_secret = encap_result.shared_secret
+
+                # Use shared secret for encryption
+                key = hashlib.sha256(shared_secret).digest()
+                iv = os.urandom(16)
+                cipher = Cipher(algorithms.AES(key), modes.GCM(iv))
+                encryptor = cipher.encryptor()
+
+                # Pad and encrypt message
+                padder = padding.PKCS7(128).padder()
+                padded_data = padder.update(message) + padder.finalize()
+                ciphertext_data = encryptor.update(padded_data) + encryptor.finalize()
+
+                # Combine components
+                result = iv + encryptor.tag + ciphertext + ciphertext_data
+                logger.debug("Post-quantum encryption successful")
+                return result
+
+            except Exception as e:
+                logger.error(f"Post-quantum encryption operation failed: {str(e)}")
+                return None
+
         except Exception as e:
             logger.error(f"Post-quantum encryption failed: {str(e)}")
-            raise
+            return None
 
-    def pq_decrypt(self, cipher: bytes) -> bytes:
-        """Decrypt using post-quantum Kyber768 via liboqs"""
+
+
+    def pq_decrypt(self, cipher: bytes) -> Optional[bytes]:
+        """Decrypt using post-quantum Kyber768"""
         try:
-            if not self.kem:
+            if not self.kem or not self.pq_secret_key:
                 raise ValueError("Post-quantum encryption not initialized")
 
             # Extract components
@@ -10297,75 +10459,214 @@ class CryptoProvider:
             kyber_ciphertext = cipher[32:32+kyber_ciphertext_len]
             encrypted_data = cipher[32+kyber_ciphertext_len:]
             
-            # Decrypt shared secret using Kyber
+            # Decrypt shared secret
             shared_secret = self.kem.decap_secret(kyber_ciphertext, self.pq_secret_key)
             
-            # Derive AES key from shared secret
+            # Decrypt data
             key = hashlib.sha256(shared_secret).digest()
-            
-            # Create cipher
             cipher = Cipher(algorithms.AES(key), modes.GCM(iv, tag))
             decryptor = cipher.decryptor()
-            
-            # Decrypt
             padded_data = decryptor.update(encrypted_data) + decryptor.finalize()
             
             # Remove padding
             unpadder = padding.PKCS7(128).unpadder()
             data = unpadder.update(padded_data) + unpadder.finalize()
             
+            logger.debug("Post-quantum decryption successful")
             return data
             
         except Exception as e:
             logger.error(f"Post-quantum decryption failed: {str(e)}")
-            raise
+            return None
 class SessionManager:
     def __init__(self):
         self.sessions: Dict[str, dict] = {}  # Dictionary to store session data
         self.locks: Dict[str, asyncio.Lock] = {}  # Per-session locks
 
     async def initialize_session(self, session_id: str):
-        """Initialize a new session with required components, including wallet creation."""
+        """Initialize a new session with required components"""
         if session_id not in self.sessions:
-            async with asyncio.Lock():  # Ensure only one init at a time
-                if session_id not in self.sessions:  # Double-check after acquiring the lock
+            async with asyncio.Lock():  # Global lock for initialization
+                if session_id not in self.sessions:  # Double-check pattern
                     self.sessions[session_id] = {
-                        'wallet': Wallet(),  # Initialize wallet directly here
+                        'wallet': Wallet(),  # Initialize wallet
                         'crypto_provider': None,
                         'transactions': {},
                         'mining_state': None,
                         'last_activity': time.time()
                     }
-                    self.locks[session_id] = asyncio.Lock()  # Create a lock for this session
-                    logger.debug(f"[{session_id}] Session and wallet initialized successfully.")
+                    self.locks[session_id] = asyncio.Lock()
+                    logger.debug(f"[{session_id}] Session initialized successfully")
 
+    def _serialize_wallet(self, wallet: Any) -> dict:
+        """Safely serialize wallet data"""
+        if not wallet:
+            return None
+        try:
+            # Extract only serializable wallet data
+            serialized = {
+                'address': getattr(wallet, 'address', None),
+                'public_key': getattr(wallet, 'public_key', None),
+                'mnemonic': getattr(wallet, 'mnemonic', None),
+            }
+            # Add any additional public keys or addresses
+            if hasattr(wallet, 'addresses'):
+                serialized['addresses'] = wallet.addresses
+            if hasattr(wallet, 'public_keys'):
+                serialized['public_keys'] = wallet.public_keys
+            return serialized
+        except Exception as e:
+            logger.error(f"Wallet serialization error: {str(e)}")
+            return None
+
+    def _serialize_crypto_provider(self, provider: Any) -> dict:
+        """Safely serialize crypto provider data"""
+        if not provider:
+            return None
+        try:
+            return {
+                'security_bits': getattr(provider, 'security_bits', 256),
+                'ring_size': getattr(provider, 'ring_size', 11),
+                'initialized': bool(provider)
+            }
+        except Exception as e:
+            logger.error(f"Crypto provider serialization error: {str(e)}")
+            return None
+
+    def _serialize_transaction(self, tx: Any) -> dict:
+        """Safely serialize transaction data"""
+        try:
+            if hasattr(tx, 'to_dict'):
+                tx_dict = tx.to_dict()
+                # Handle special fields
+                if 'zk_proof' in tx_dict and isinstance(tx_dict['zk_proof'], tuple):
+                    tx_dict['zk_proof'] = b64encode(
+                        json.dumps(tx_dict['zk_proof'], default=str).encode()
+                    ).decode()
+                return tx_dict
+            return tx
+        except Exception as e:
+            logger.error(f"Transaction serialization error: {str(e)}")
+            return None
 
     async def get_session(self, session_id: str) -> dict:
-        """Get or create session, returning a deep copy without non-pickleable objects like ECPrivateKey"""
+        """Get or create session with properly serialized data"""
         await self.initialize_session(session_id)
         async with self.locks[session_id]:
-            session_copy = copy.deepcopy({
-                k: (v.to_dict() if hasattr(v, "to_dict") else v)  # Convert to dict if object has a to_dict method
-                for k, v in self.sessions[session_id].items()
-            })
-            return session_copy
+            try:
+                session_data = {}
+                raw_session = self.sessions[session_id]
 
+                # Serialize wallet
+                session_data['wallet'] = self._serialize_wallet(raw_session.get('wallet'))
 
+                # Serialize crypto provider
+                session_data['crypto_provider'] = self._serialize_crypto_provider(
+                    raw_session.get('crypto_provider')
+                )
+
+                # Serialize transactions
+                session_data['transactions'] = {
+                    tx_id: self._serialize_transaction(tx)
+                    for tx_id, tx in raw_session.get('transactions', {}).items()
+                }
+
+                # Copy simple values
+                session_data['mining_state'] = raw_session.get('mining_state')
+                session_data['last_activity'] = raw_session.get('last_activity', time.time())
+
+                return session_data
+
+            except Exception as e:
+                logger.error(f"Session serialization error: {str(e)}")
+                return {
+                    'error': str(e),
+                    'last_activity': time.time()
+                }
 
     async def update_session(self, session_id: str, key: str, value: Any):
-        """Update specific session data"""
+        """Update specific session data with validation"""
         await self.initialize_session(session_id)
         async with self.locks[session_id]:
-            self.sessions[session_id][key] = value
-            self.sessions[session_id]['last_activity'] = time.time()
+            try:
+                # Handle special cases
+                if key == 'wallet':
+                    self.sessions[session_id][key] = value
+                elif key == 'crypto_provider':
+                    self.sessions[session_id][key] = value
+                elif key == 'transactions':
+                    if not isinstance(value, dict):
+                        raise ValueError("Transactions must be stored as a dictionary")
+                    self.sessions[session_id][key] = value
+                else:
+                    self.sessions[session_id][key] = value
 
-    async def store_transaction(self, session_id: str, transaction: Any):
-        """Store transaction in session"""
-        await self.initialize_session(session_id)
-        async with self.locks[session_id]:
-            if 'transactions' not in self.sessions[session_id]:
-                self.sessions[session_id]['transactions'] = {}
-            self.sessions[session_id]['transactions'][transaction.id] = transaction
+                self.sessions[session_id]['last_activity'] = time.time()
+                logger.debug(f"[{session_id}] Updated {key} successfully")
+
+            except Exception as e:
+                logger.error(f"Session update error for {key}: {str(e)}")
+                raise
+
+    async def store_transaction(self, session_id: str, transaction: Any) -> bool:
+        """Store transaction with proper type handling"""
+        try:
+            await self.initialize_session(session_id)
+            async with self.locks[session_id]:
+                # Initialize transactions dict if needed
+                if 'transactions' not in self.sessions[session_id]:
+                    self.sessions[session_id]['transactions'] = {}
+
+                # Convert transaction to dict for storage
+                if hasattr(transaction, 'to_dict'):
+                    tx_data = transaction.to_dict()
+                else:
+                    tx_data = transaction
+
+                # Store transaction
+                self.sessions[session_id]['transactions'][transaction.id] = tx_data
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to store transaction: {str(e)}")
+            return False
+
+
+
+    async def get_transaction(self, session_id: str, tx_id: str) -> Optional[Transaction]:
+        """Retrieve transaction with proper type conversion"""
+        try:
+            await self.initialize_session(session_id)
+            async with self.locks[session_id]:
+                transactions = self.sessions[session_id].get('transactions', {})
+                tx_data = transactions.get(tx_id)
+                
+                if tx_data:
+                    try:
+                        # Convert dictionary to Transaction object
+                        if isinstance(tx_data, dict):
+                            return Transaction(**tx_data)
+                        return tx_data
+                    except Exception as e:
+                        logger.error(f"Failed to convert transaction: {str(e)}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error retrieving transaction: {str(e)}")
+            return None
+
+
+    async def cleanup_session(self, session_id: str):
+        """Clean up session data"""
+        if session_id in self.sessions:
+            async with self.locks[session_id]:
+                try:
+                    del self.sessions[session_id]
+                    del self.locks[session_id]
+                    logger.debug(f"[{session_id}] Session cleaned up")
+                except Exception as e:
+                    logger.error(f"Session cleanup error: {str(e)}")
+
 
 import asyncio
 import websockets
@@ -10493,22 +10794,29 @@ class QuantumBlockchainWebSocketServer:
 
 
     def create_session(self, session_id: str):
-        """Initialize a new session with all required components"""
-        self.sessions[session_id] = {
-            'wallet': Wallet(),
-            'miner': DAGKnightMiner(difficulty=2, security_level=20),
-            'transactions': [],
-            'zk_system': SecureHybridZKStark(security_level=20),
-            'crypto_provider': CryptoProvider(),  # Add crypto provider
-            'mining_task': None,
-            'performance_data': {
-                'blocks_mined': [],
-                'mining_times': [],
-                'hash_rates': [],
-                'start_time': time.time()
+        """Create a new session with proper initialization"""
+        try:
+            # Initialize crypto provider first
+            crypto_provider = CryptoProvider()
+            
+            # Create session with initialized components
+            session = {
+                'wallet': None,  # Will be initialized when needed
+                'crypto_provider': crypto_provider,
+                'transactions': {},
+                'mining_state': None,
+                'last_activity': time.time()
             }
-        }
-        logger.info(f"New session created: {session_id}")
+            
+            # Store session
+            self.sessions[session_id] = session
+            
+            logger.debug(f"Session {session_id} created with crypto provider")
+            
+        except Exception as e:
+            logger.error(f"Failed to create session: {str(e)}")
+            raise
+
 
     async def cleanup_session(self, session_id: str):
         """Clean up session resources"""
@@ -10676,124 +10984,155 @@ class QuantumBlockchainWebSocketServer:
         }
         # Transaction Handlers
     async def handle_create_transaction(self, session_id: str, websocket, data: dict) -> dict:
-        """Handle transaction creation with enhanced security, with retry on wallet initialization"""
+        """Handle transaction creation with enhanced security and proper wallet handling"""
+        start_time = time.time()
         try:
-            start_time = time.time()
-
-            # Step 1: Retrieve session data
-            logger.debug(f"[{session_id}] Retrieving session data for transaction creation.")
-            session = await self.session_manager.get_session(session_id)
-            logger.debug(f"[{session_id}] Retrieved session data in {time.time() - start_time:.4f} seconds.")
-
-            # Step 2: Retrieve or Reconstruct Wallet from Session
-            wallet = session.get('wallet')
-            if isinstance(wallet, dict):  # Reconstruct the wallet if it’s in dictionary form
-                logger.warning(f"[{session_id}] Wallet is in dictionary form; reconstructing Wallet object.")
-                wallet = Wallet(**wallet)
-                await self.session_manager.update_session(session_id, 'wallet', wallet)
-
-            if not wallet or not isinstance(wallet, Wallet):
-                logger.error(f"[{session_id}] Wallet not initialized for this session.")
-                return {
-                    "status": "error",
-                    "message": "Wallet not initialized for this session"
-                }
-            
-            logger.debug(f"[{session_id}] Wallet retrieved: {wallet.to_dict()}")
-
-            # Step 3: Validate required fields
-            required_fields = ['sender', 'receiver', 'amount', 'price', 'buyer_id', 'seller_id']
-            missing_fields = [field for field in required_fields if field not in data]
-            if missing_fields:
-                logger.error(f"[{session_id}] Missing required fields: {missing_fields}")
-                return {
-                    "status": "error",
-                    "message": f"Missing required fields: {', '.join(missing_fields)}"
-                }
-            logger.debug(f"[{session_id}] Required fields validated in {time.time() - start_time:.4f} seconds.")
-
-            # Step 4: Create the transaction
+            # Step 1: Session Initialization and Data Retrieval
+            logger.debug(f"[{session_id}] Initializing session and retrieving data")
+            session_start = time.time()
             try:
-                transaction_start = time.time()
-                logger.debug(f"[{session_id}] Creating transaction with data: {data}")
+                session = await self.session_manager.get_session(session_id)
+                if not session:
+                    raise ValueError("Failed to initialize session")
+                logger.debug(f"[{session_id}] Session retrieved in {time.time() - session_start:.4f} seconds")
+            except Exception as e:
+                logger.error(f"[{session_id}] Session initialization failed: {str(e)}")
+                return {"status": "error", "message": f"Session initialization failed: {str(e)}"}
+
+            # Step 2: Wallet Management
+            wallet_start = time.time()
+            try:
+                wallet_data = session.get('wallet')
+                if not wallet_data:
+                    logger.debug(f"[{session_id}] Creating new wallet")
+                    wallet = Wallet()  # Creates new wallet with generated mnemonic
+                elif isinstance(wallet_data, dict):
+                    logger.debug(f"[{session_id}] Reconstructing wallet from dictionary")
+                    wallet = Wallet.from_dict(wallet_data)  # Use from_dict method
+                else:
+                    wallet = wallet_data
+
+                # Update session with wallet
+                await self.session_manager.update_session(session_id, 'wallet', wallet)
+                logger.debug(f"[{session_id}] Wallet prepared in {time.time() - wallet_start:.4f} seconds")
+            except Exception as e:
+                logger.error(f"[{session_id}] Wallet initialization failed: {str(e)}")
+                return {"status": "error", "message": f"Wallet initialization failed: {str(e)}"}
+
+            # Step 3: Input Validation
+            validation_start = time.time()
+            try:
+                # Validate required fields
+                required_fields = ['sender', 'receiver', 'amount', 'price', 'buyer_id', 'seller_id']
+                missing_fields = [field for field in required_fields if field not in data]
+                if missing_fields:
+                    raise ValueError(f"Missing required fields: {', '.join(missing_fields)}")
+
+                # Validate numeric fields
+                amount = Decimal(str(data['amount']))
+                price = Decimal(str(data['price']))
+                if amount <= 0:
+                    raise ValueError("Amount must be positive")
+                if price < 0:
+                    raise ValueError("Price cannot be negative")
+
+                # Validate addresses
+                if not isinstance(data['sender'], str) or not isinstance(data['receiver'], str):
+                    raise ValueError("Sender and receiver must be valid addresses")
+
+                logger.debug(f"[{session_id}] Input validation completed in {time.time() - validation_start:.4f} seconds")
+            except Exception as e:
+                logger.error(f"[{session_id}] Validation failed: {str(e)}")
+                return {"status": "error", "message": str(e)}
+
+            # Step 4: Transaction Creation
+            tx_start = time.time()
+            try:
                 transaction = Transaction(
                     sender=data['sender'],
                     receiver=data['receiver'],
-                    amount=Decimal(str(data['amount'])),
-                    price=Decimal(str(data['price'])),
+                    amount=amount,
+                    price=price,
                     buyer_id=data['buyer_id'],
                     seller_id=data['seller_id'],
                     wallet=wallet,
                     timestamp=data.get('timestamp', time.time())
                 )
-                logger.debug(f"[{session_id}] Transaction created with ID: {transaction.id} in {time.time() - transaction_start:.4f} seconds.")
+                logger.debug(f"[{session_id}] Transaction created with ID: {transaction.id}")
+                logger.debug(f"[{session_id}] Transaction created in {time.time() - tx_start:.4f} seconds")
             except Exception as e:
-                logger.error(f"[{session_id}] Transaction creation error: {str(e)} - Data: {data}")
-                return {
-                    "status": "error",
-                    "message": f"Invalid transaction data: {str(e)}"
-                }
+                logger.error(f"[{session_id}] Transaction creation failed: {str(e)}")
+                return {"status": "error", "message": f"Failed to create transaction: {str(e)}"}
 
-            # Step 5: Initialize or retrieve crypto provider
-            crypto_provider = session.get('crypto_provider')
-            if not crypto_provider:
-                logger.debug(f"[{session_id}] Initializing new CryptoProvider.")
-                crypto_provider = CryptoProvider()
-                await self.session_manager.update_session(session_id, 'crypto_provider', crypto_provider)
-            logger.debug(f"[{session_id}] CryptoProvider initialized or retrieved in {time.time() - start_time:.4f} seconds.")
-
-            # Step 6: Apply enhanced security to the transaction
+            # Step 5: Security Provider Management
+            security_start = time.time()
             try:
-                security_start = time.time()
-                logger.debug(f"[{session_id}] Applying enhanced security to transaction.")
-                if not await transaction.apply_enhanced_security(crypto_provider):
-                    logger.error(f"[{session_id}] Failed to apply enhanced security features.")
-                    return {
-                        "status": "error",
-                        "message": "Failed to apply enhanced security features"
-                    }
-                logger.debug(f"[{session_id}] Enhanced security applied in {time.time() - security_start:.4f} seconds.")
+                crypto_provider = CryptoProvider()  # Create new instance for each transaction
+                security_success = await transaction.apply_enhanced_security(crypto_provider)
+                if not security_success:
+                    raise ValueError("Failed to apply enhanced security features")
+                logger.debug(f"[{session_id}] Security features applied in {time.time() - security_start:.4f} seconds")
             except Exception as e:
-                logger.error(f"[{session_id}] Error applying enhanced security: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error in enhanced security application: {str(e)}"
-                }
+                logger.error(f"[{session_id}] Security application failed: {str(e)}")
+                return {"status": "error", "message": f"Security application failed: {str(e)}"}
 
-            # Step 7: Store transaction in session
+            # Step 6: Transaction Storage
+            storage_start = time.time()
             try:
-                store_start = time.time()
-                logger.debug(f"[{session_id}] Storing transaction in session.")
                 await self.session_manager.store_transaction(session_id, transaction)
-                logger.debug(f"[{session_id}] Transaction stored in {time.time() - store_start:.4f} seconds.")
+                logger.debug(f"[{session_id}] Transaction stored in {time.time() - storage_start:.4f} seconds")
             except Exception as e:
-                logger.error(f"[{session_id}] Error storing transaction: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Failed to store transaction: {str(e)}"
+                logger.error(f"[{session_id}] Transaction storage failed: {str(e)}")
+                return {"status": "error", "message": f"Failed to store transaction: {str(e)}"}
+
+            # Step 7: Response Preparation
+            try:
+                tx_dict = transaction.to_dict()
+                
+                # Verify transaction data before returning
+                if not tx_dict.get('tx_hash'):
+                    raise ValueError("Transaction hash missing from final transaction")
+                
+                security_features = {
+                    "zk_proof_applied": bool(transaction.zk_proof),
+                    "homomorphic_encryption": bool(transaction.homomorphic_amount),
+                    "ring_signature": bool(transaction.ring_signature),
+                    "quantum_signature": bool(transaction.quantum_signature),
+                    "post_quantum_encryption": bool(transaction.pq_cipher),
+                    "base_signature": bool(transaction.signature)
                 }
 
-            # Step 8: Return success response
-            logger.info(f"[{session_id}] Transaction created successfully with ID {transaction.id} in {time.time() - start_time:.4f} seconds.")
-            return {
-                "status": "success",
-                "message": "Transaction created successfully",
-                "transaction": transaction.to_dict(),
-                "security_features": {
-                    "zk_proof_applied": transaction.zk_proof is not None,
-                    "homomorphic_encryption": transaction.homomorphic_amount is not None,
-                    "ring_signature": transaction.ring_signature is not None,
-                    "quantum_signature": transaction.quantum_signature is not None,
-                    "post_quantum_encryption": transaction.pq_cipher is not None
+                # Prepare performance metrics
+                total_time = time.time() - start_time
+                performance_metrics = {
+                    "total_time": round(total_time, 4),
+                    "transaction_id": transaction.id,
+                    "security_features_applied": sum(security_features.values()),
+                    "timestamp": time.time()
                 }
-            }
+
+                logger.info(f"[{session_id}] Transaction {transaction.id} created successfully in {total_time:.4f} seconds")
+                
+                return {
+                    "status": "success",
+                    "message": "Transaction created successfully",
+                    "transaction": tx_dict,
+                    "security_features": security_features,
+                    "performance": performance_metrics,
+                    "wallet_address": wallet.address
+                }
+
+            except Exception as e:
+                logger.error(f"[{session_id}] Response preparation failed: {str(e)}")
+                return {"status": "error", "message": f"Failed to prepare response: {str(e)}"}
 
         except Exception as e:
             logger.error(f"[{session_id}] Transaction creation failed: {str(e)}")
             logger.error(traceback.format_exc())
             return {
                 "status": "error",
-                "message": f"Failed to create transaction: {str(e)}"
+                "message": f"Transaction creation failed: {str(e)}",
+                "error_type": type(e).__name__
             }
 
 
@@ -11072,59 +11411,86 @@ class QuantumBlockchainWebSocketServer:
         }
         # Remaining Transaction Handlers
     async def handle_sign_transaction(self, session_id: str, websocket, data: dict) -> dict:
-        """Handle transaction signing with enhanced security and validation"""
+        """Handle transaction signing with proper object conversion"""
         try:
-            # Get wallet and transaction
-            session_data = self.sessions.get(session_id, {})
-            wallet = session_data.get('wallet')
-            if not wallet:
-                return {"status": "error", "message": "No wallet found for session"}
+            logger.debug(f"[{session_id}] Starting transaction signing")
 
-            # Get transaction ID and validate
+            # Get the transaction ID
             tx_id = data.get("transaction_id")
             if not tx_id:
                 return {"status": "error", "message": "No transaction ID provided"}
 
-            # Find transaction in session
-            transactions = session_data.get('transactions', {})
-            transaction = transactions.get(tx_id)
-            if not transaction:
+            # Get the session and transaction
+            session = await self.session_manager.get_session(session_id)
+            transactions = session.get('transactions', {})
+            tx_data = transactions.get(tx_id)
+            
+            if not tx_data:
                 return {"status": "error", "message": "Transaction not found"}
 
-            # Initialize crypto provider if needed
-            crypto_provider = session_data.get('crypto_provider')
-            if not crypto_provider:
-                crypto_provider = CryptoProvider()
-                self.sessions[session_id]['crypto_provider'] = crypto_provider
+            # Convert dictionary to Transaction object if needed
+            try:
+                if isinstance(tx_data, dict):
+                    transaction = Transaction(**tx_data)
+                else:
+                    transaction = tx_data
 
-            # Sign the transaction
+                if not isinstance(transaction, Transaction):
+                    raise ValueError(f"Invalid transaction type: {type(transaction)}")
+            except Exception as e:
+                logger.error(f"[{session_id}] Transaction conversion error: {str(e)}")
+                return {"status": "error", "message": f"Transaction conversion failed: {str(e)}"}
+
+            # Get wallet and reconstruct if needed
+            try:
+                wallet_data = session.get('wallet')
+                if isinstance(wallet_data, dict):
+                    wallet = Wallet(**wallet_data)
+                else:
+                    wallet = wallet_data
+
+                if not wallet:
+                    return {"status": "error", "message": "No wallet available for signing"}
+            except Exception as e:
+                logger.error(f"[{session_id}] Wallet reconstruction error: {str(e)}")
+                return {"status": "error", "message": f"Wallet reconstruction failed: {str(e)}"}
+
             try:
                 # Create canonical message
                 message = transaction._create_message()
                 
-                # Generate ECDSA signature
+                # Generate fresh key pair for this transaction
                 private_key = ec.generate_private_key(ec.SECP256R1())
+                public_key = private_key.public_key()
+
+                # Sign the message
                 signature = private_key.sign(
                     message,
                     ec.ECDSA(hashes.SHA256())
                 )
-                
-                # Store signature and public key
+
+                # Store signature and public key in proper format
                 transaction.signature = base64.b64encode(signature).decode('utf-8')
                 transaction.public_key = base64.b64encode(
-                    private_key.public_key().public_bytes(
-                        encoding=serialization.Encoding.X962,
-                        format=serialization.PublicFormat.UncompressedPoint
+                    public_key.public_bytes(
+                        encoding=serialization.Encoding.DER,
+                        format=serialization.PublicFormat.SubjectPublicKeyInfo
                     )
                 ).decode('utf-8')
-                
-                # Apply enhanced security features
-                if not await transaction.apply_enhanced_security(crypto_provider):
-                    return {"status": "error", "message": "Failed to apply enhanced security features"}
 
-                # Update transaction in session
-                transactions[tx_id] = transaction
-                
+                # Update transaction hash
+                security_data = message + signature
+                if transaction.zk_proof:
+                    if isinstance(transaction.zk_proof, str):
+                        security_data += transaction.zk_proof.encode()
+                    else:
+                        security_data += str(transaction.zk_proof).encode()
+                transaction.tx_hash = hashlib.sha256(security_data).hexdigest()
+
+                # Store updated transaction
+                await self.session_manager.store_transaction(session_id, transaction)
+
+                logger.info(f"[{session_id}] Transaction {tx_id} signed successfully")
                 return {
                     "status": "success",
                     "message": "Transaction signed successfully",
@@ -11139,31 +11505,63 @@ class QuantumBlockchainWebSocketServer:
                         "quantum_signature": bool(transaction.quantum_signature)
                     }
                 }
+
             except Exception as e:
-                logger.error(f"Transaction signing failed: {str(e)}")
+                logger.error(f"[{session_id}] Transaction signing error: {str(e)}")
                 return {"status": "error", "message": f"Signing failed: {str(e)}"}
 
         except Exception as e:
-            logger.error(f"Error in handle_sign_transaction: {str(e)}")
+            logger.error(f"[{session_id}] Error in handle_sign_transaction: {str(e)}")
             logger.error(traceback.format_exc())
             return {"status": "error", "message": str(e)}
 
 
 
     async def handle_verify_transaction(self, session_id: str, websocket, data: dict) -> dict:
-        """Handle transaction verification with comprehensive validation"""
+        """Handle transaction verification with proper object conversion"""
         try:
-            # Get transaction data
+            logger.debug(f"[{session_id}] Starting transaction verification")
+
+            # Get transaction ID
             tx_id = data.get("transaction_id")
             if not tx_id:
-                return {"status": "error", "message": "No transaction ID provided"}
+                return {
+                    "status": "error",
+                    "message": "No transaction ID provided"
+                }
 
-            # Find transaction
-            session_data = self.sessions.get(session_id, {})
-            transactions = session_data.get('transactions', {})
-            transaction = transactions.get(tx_id)
-            if not transaction:
-                return {"status": "error", "message": "Transaction not found"}
+            # Get transaction data
+            try:
+                session = await self.session_manager.get_session(session_id)
+                transactions = session.get('transactions', {})
+                tx_data = transactions.get(tx_id)
+                
+                if not tx_data:
+                    logger.error(f"[{session_id}] Transaction {tx_id} not found")
+                    return {
+                        "status": "error",
+                        "message": "Transaction not found"
+                    }
+
+                # Convert to Transaction object
+                if isinstance(tx_data, dict):
+                    try:
+                        transaction = Transaction.from_dict(tx_data)
+                    except Exception as e:
+                        logger.error(f"[{session_id}] Failed to convert transaction data: {str(e)}")
+                        return {
+                            "status": "error",
+                            "message": f"Transaction conversion failed: {str(e)}"
+                        }
+                else:
+                    transaction = tx_data
+
+            except Exception as e:
+                logger.error(f"[{session_id}] Transaction retrieval error: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Failed to retrieve transaction: {str(e)}"
+                }
 
             # Initialize validation result
             validation_result = {
@@ -11173,20 +11571,26 @@ class QuantumBlockchainWebSocketServer:
                     'hash_valid': False,
                     'amount_valid': False,
                     'timestamp_valid': False,
-                    'signature_valid': False
+                    'signature_valid': False,
+                    'security_features_valid': False
                 }
             }
 
             try:
                 # 1. Verify hash
                 message = transaction._create_message()
-                security_data = message
-                if transaction.signature:
-                    security_data += base64.b64decode(transaction.signature)
+                signature = base64.b64decode(transaction.signature)
+                security_data = message + signature
                 if transaction.zk_proof:
-                    security_data += str(transaction.zk_proof).encode()
+                    if isinstance(transaction.zk_proof, str):
+                        security_data += transaction.zk_proof.encode()
+                    else:
+                        security_data += str(transaction.zk_proof).encode()
+
                 computed_hash = hashlib.sha256(security_data).hexdigest()
-                validation_result['validation_details']['hash_valid'] = (computed_hash == transaction.tx_hash)
+                validation_result['validation_details']['hash_valid'] = (
+                    computed_hash == transaction.tx_hash
+                )
 
                 # 2. Verify amount
                 validation_result['validation_details']['amount_valid'] = (
@@ -11202,41 +11606,59 @@ class QuantumBlockchainWebSocketServer:
                 )
 
                 # 4. Verify signature
-                if transaction.signature and transaction.public_key:
+                try:
+                    public_key_bytes = base64.b64decode(transaction.public_key)
                     try:
-                        public_key = ec.EllipticCurvePublicKey.from_encoded_point(
-                            ec.SECP256R1(),
-                            base64.b64decode(transaction.public_key)
+                        # Try DER format first
+                        public_key = serialization.load_der_public_key(
+                            public_key_bytes,
+                            backend=default_backend()
                         )
-                        public_key.verify(
-                            base64.b64decode(transaction.signature),
-                            message,
-                            ec.ECDSA(hashes.SHA256())
+                    except:
+                        # Fall back to PEM format
+                        public_key = serialization.load_pem_public_key(
+                            f"-----BEGIN PUBLIC KEY-----\n{transaction.public_key}\n-----END PUBLIC KEY-----\n".encode(),
+                            backend=default_backend()
                         )
-                        validation_result['validation_details']['signature_valid'] = True
-                    except Exception as e:
-                        logger.error(f"Signature verification failed: {str(e)}")
-                        validation_result['validation_details']['signature_valid'] = False
 
-                # Check if all validations passed
+                    public_key.verify(
+                        signature,
+                        message,
+                        ec.ECDSA(hashes.SHA256())
+                    )
+                    validation_result['validation_details']['signature_valid'] = True
+                except Exception as e:
+                    logger.error(f"[{session_id}] Signature verification failed: {str(e)}")
+                    validation_result['validation_details']['signature_valid'] = False
+
+                # 5. Verify security features
+                security_features = {
+                    "zk_proof": bool(transaction.zk_proof),
+                    "homomorphic": bool(transaction.homomorphic_amount),
+                    "ring_signature": bool(transaction.ring_signature),
+                    "quantum_signature": bool(transaction.quantum_signature),
+                    "post_quantum": bool(getattr(transaction, 'pq_cipher', None))
+                }
+                validation_result['validation_details']['security_features_valid'] = (
+                    security_features["zk_proof"] and 
+                    security_features["homomorphic"]
+                )
+
+                # Overall validation
                 validation_result['valid'] = all(validation_result['validation_details'].values())
                 if not validation_result['valid']:
                     validation_result['status'] = 'error'
                     validation_result['message'] = 'Transaction verification failed'
 
-                # Add enhanced security verification details
-                validation_result['security_features'] = {
-                    "signature_valid": validation_result['validation_details']['signature_valid'],
-                    "zk_proof": bool(transaction.zk_proof),
-                    "homomorphic": bool(transaction.homomorphic_amount),
-                    "ring_signature": bool(transaction.ring_signature),
-                    "quantum_signature": bool(transaction.quantum_signature)
+                logger.info(f"[{session_id}] Transaction verification completed: {validation_result['valid']}")
+                return {
+                    **validation_result,
+                    'security_features': security_features,
+                    'transaction_id': tx_id
                 }
 
-                return validation_result
-
             except Exception as e:
-                logger.error(f"Verification error: {str(e)}")
+                logger.error(f"[{session_id}] Verification error: {str(e)}")
                 return {
                     'status': 'error',
                     'valid': False,
@@ -11245,9 +11667,12 @@ class QuantumBlockchainWebSocketServer:
                 }
 
         except Exception as e:
-            logger.error(f"Error in handle_verify_transaction: {str(e)}")
+            logger.error(f"[{session_id}] Transaction verification failed: {str(e)}")
             logger.error(traceback.format_exc())
-            return {"status": "error", "message": str(e)}
+            return {
+                "status": "error",
+                "message": str(e)
+            }
 
 
 

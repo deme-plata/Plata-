@@ -37,6 +37,7 @@ from cryptography.exceptions import InvalidSignature
 from ecdsa import SigningKey, SECP256k1
 import base64
 import traceback
+from typing import Optional, Union, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class Transaction(BaseModel):
     seller_id: str
     public_key: Optional[str] = None
     signature: Optional[str] = None
-    zk_proof: Optional[Tuple[Tuple, Tuple]] = None
+    zk_proof: Optional[Union[Tuple, str]] = None  # Can be either tuple or string
     homomorphic_amount: Optional[bytes] = None
     ring_signature: Optional[bytes] = None
     quantum_signature: Optional[bytes] = None
@@ -247,7 +248,7 @@ class Transaction(BaseModel):
 
 
     def _create_message(self) -> bytes:
-        """Create standardized message for signing/verification"""
+        """Create standardized message for signing"""
         message = (
             f"{self.id}{self.sender}{self.receiver}"
             f"{str(self.amount)}{str(self.price)}"
@@ -255,6 +256,7 @@ class Transaction(BaseModel):
             f"{str(self.timestamp)}"
         ).encode('utf-8')
         return message
+
 
 
 
@@ -274,9 +276,23 @@ class Transaction(BaseModel):
 
     def generate_hash(self) -> str:
         """Generate transaction hash"""
-        message = (f"{self.id}{self.sender}{self.receiver}{self.amount}"
-                   f"{self.price}{self.buyer_id}{self.seller_id}{self.timestamp}")
-        return hashlib.sha256(message.encode()).hexdigest()
+        message = self._create_message()
+        security_data = message
+        
+        if self.signature:
+            try:
+                security_data += base64.b64decode(self.signature)
+            except:
+                security_data += self.signature.encode()
+
+        if self.zk_proof:
+            if isinstance(self.zk_proof, str):
+                security_data += self.zk_proof.encode()
+            else:
+                security_data += str(self.zk_proof).encode()
+
+        return hashlib.sha256(security_data).hexdigest()
+
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -293,6 +309,16 @@ class Transaction(BaseModel):
     def validate_price(cls, v):
         if v < 0:
             raise ValueError("Price cannot be negative")
+        return v
+    @validator('zk_proof', pre=True)
+    def validate_zk_proof(cls, v):
+        if isinstance(v, str):
+            try:
+                # If it's a base64 string, decode it to tuple
+                decoded = base64.b64decode(v).decode()
+                return eval(decoded)  # Convert string representation of tuple to actual tuple
+            except:
+                return v  # Keep as string if can't decode
         return v
 
     async def apply_enhanced_security(self, crypto_provider: Any) -> bool:
@@ -486,49 +512,134 @@ class Transaction(BaseModel):
 
     def to_dict(self) -> dict:
         """Convert transaction to dictionary with proper encoding"""
-        data = {
-            "id": self.id,
-            "sender": self.sender,
-            "receiver": self.receiver,
-            "amount": str(self.amount),
-            "price": str(self.price),
-            "buyer_id": self.buyer_id,
-            "seller_id": self.seller_id,
-            "public_key": self.public_key,
-            "signature": self.signature,
-            "tx_hash": self.tx_hash,
-            "timestamp": self.timestamp
+        try:
+            data = {
+                "id": self.id,
+                "sender": self.sender,
+                "receiver": self.receiver,
+                "amount": str(self.amount),
+                "price": str(self.price),
+                "buyer_id": self.buyer_id,
+                "seller_id": self.seller_id,
+                "public_key": self.public_key,
+                "signature": self.signature,
+                "tx_hash": self.tx_hash,
+                "timestamp": self.timestamp
+            }
+
+            # Handle ZK proof
+            if self.zk_proof is not None:
+                if isinstance(self.zk_proof, str):
+                    data["zk_proof"] = self.zk_proof
+                else:
+                    data["zk_proof"] = base64.b64encode(
+                        str(self.zk_proof).encode()
+                    ).decode()
+
+            # Handle binary data
+            if self.homomorphic_amount is not None:
+                data["homomorphic_amount"] = base64.b64encode(
+                    self.homomorphic_amount
+                ).decode()
+
+            if self.ring_signature is not None:
+                data["ring_signature"] = base64.b64encode(
+                    self.ring_signature
+                ).decode()
+
+            if self.quantum_signature is not None:
+                data["quantum_signature"] = base64.b64encode(
+                    self.quantum_signature
+                ).decode()
+
+            if self.pq_cipher is not None:
+                data["pq_cipher"] = base64.b64encode(
+                    self.pq_cipher
+                ).decode()
+
+            return data
+
+        except Exception as e:
+            logger.error(f"Error converting transaction to dict: {str(e)}")
+            raise ValueError(f"Failed to convert transaction to dictionary: {str(e)}")
+    def get_security_features(self) -> dict:
+        """Get the status of all security features"""
+        return {
+            "base_signature": bool(self.signature),
+            "zk_proof": bool(self.zk_proof),
+            "homomorphic": bool(self.homomorphic_amount),
+            "ring_signature": bool(self.ring_signature),
+            "quantum_signature": bool(self.quantum_signature),
+            "post_quantum": bool(self.pq_cipher)
         }
 
-        # Encode binary data
-        if self.zk_proof:
-            data["zk_proof"] = base64.b64encode(self.zk_proof).decode()
-        if self.homomorphic_amount:
-            data["homomorphic_amount"] = base64.b64encode(self.homomorphic_amount).decode()
-        if self.ring_signature:
-            data["ring_signature"] = base64.b64encode(self.ring_signature).decode()
-        if self.quantum_signature:
-            data["quantum_signature"] = base64.b64encode(self.quantum_signature).decode()
-        if self.pq_cipher:
-            data["pq_cipher"] = base64.b64encode(self.pq_cipher).decode()
-
-        return data
+    def _create_message(self) -> bytes:
+        """Create standardized message for signing"""
+        message = (
+            f"{self.id}{self.sender}{self.receiver}"
+            f"{str(self.amount)}{str(self.price)}"
+            f"{self.buyer_id}{self.seller_id}"
+            f"{str(self.timestamp)}"
+        ).encode('utf-8')
+        return message
 
     @classmethod
     def from_dict(cls, data: dict) -> 'Transaction':
-        """Create transaction from dictionary with decoded security fields"""
-        decoded_data = data.copy()
-        for field in ["zk_proof", "homomorphic_amount", "ring_signature", "quantum_signature", "pq_cipher"]:
-            if field in decoded_data:
-                decoded_data[field] = base64.b64decode(decoded_data[field])
+        """Create a Transaction instance from a dictionary with proper type conversion"""
+        try:
+            decoded_data = data.copy()
 
-        # Handle Decimal conversion
-        if 'amount' in decoded_data:
-            decoded_data['amount'] = Decimal(decoded_data['amount'])
-        if 'price' in decoded_data:
-            decoded_data['price'] = Decimal(decoded_data['price'])
-            
-        return cls(**decoded_data)
+            # Convert decimal strings
+            if 'amount' in decoded_data:
+                decoded_data['amount'] = Decimal(str(decoded_data['amount']))
+            if 'price' in decoded_data:
+                decoded_data['price'] = Decimal(str(decoded_data['price']))
+
+            # Handle binary data
+            if 'homomorphic_amount' in decoded_data and decoded_data['homomorphic_amount']:
+                if isinstance(decoded_data['homomorphic_amount'], str):
+                    decoded_data['homomorphic_amount'] = base64.b64decode(
+                        decoded_data['homomorphic_amount']
+                    )
+
+            # Handle ring signature
+            if 'ring_signature' in decoded_data and decoded_data['ring_signature']:
+                if isinstance(decoded_data['ring_signature'], str):
+                    decoded_data['ring_signature'] = base64.b64decode(
+                        decoded_data['ring_signature']
+                    )
+
+            # Handle quantum signature
+            if 'quantum_signature' in decoded_data and decoded_data['quantum_signature']:
+                if isinstance(decoded_data['quantum_signature'], str):
+                    decoded_data['quantum_signature'] = base64.b64decode(
+                        decoded_data['quantum_signature']
+                    )
+
+            # Handle pq cipher
+            if 'pq_cipher' in decoded_data and decoded_data['pq_cipher']:
+                if isinstance(decoded_data['pq_cipher'], str):
+                    decoded_data['pq_cipher'] = base64.b64decode(
+                        decoded_data['pq_cipher']
+                    )
+
+            # Handle ZK proof
+            if 'zk_proof' in decoded_data and decoded_data['zk_proof']:
+                if isinstance(decoded_data['zk_proof'], str):
+                    try:
+                        decoded = base64.b64decode(decoded_data['zk_proof']).decode()
+                        decoded_data['zk_proof'] = eval(decoded)  # Convert to tuple
+                    except:
+                        # Keep as string if conversion fails
+                        pass
+
+            return cls(**decoded_data)
+
+        except Exception as e:
+            logger.error(f"Error creating transaction from dict: {str(e)}")
+            raise ValueError(f"Failed to create transaction from dictionary: {str(e)}")
+
+
 
     class Config:
         arbitrary_types_allowed = True

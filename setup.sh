@@ -21,6 +21,26 @@ python3 setup.py build
 python3 setup.py install
 cd ..
 
+# Install PostgreSQL
+sudo apt-get install -y postgresql postgresql-contrib
+
+# Start PostgreSQL and enable it to start on boot
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Set up PostgreSQL user and database (adjust username and password as needed)
+sudo -u postgres psql -c "CREATE USER your_postgresql_username WITH PASSWORD 'your_postgresql_password';"
+sudo -u postgres psql -c "ALTER ROLE your_postgresql_username SET client_encoding TO 'utf8';"
+sudo -u postgres psql -c "ALTER ROLE your_postgresql_username SET default_transaction_isolation TO 'read committed';"
+sudo -u postgres psql -c "ALTER ROLE your_postgresql_username SET timezone TO 'UTC';"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE postgres TO your_postgresql_username;"
+
+# Update environment variables
+echo "DB_USER=your_postgresql_username" >> ~/.bashrc
+echo "DB_PASSWORD=your_postgresql_password" >> ~/.bashrc
+echo "DB_HOST=localhost" >> ~/.bashrc
+source ~/.bashrc
+
 # Install Python dependencies from requirements.txt
 pip install -r requirements.txt
 
