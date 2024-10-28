@@ -73,6 +73,28 @@ import time
 import traceback
 import concurrent.futures
 from decimal import Decimal 
+import types 
+from typing import TYPE_CHECKING
+import types
+import asyncio
+import websockets
+import json
+import time
+import hashlib
+from typing import Dict, Set, List, Tuple, Optional
+from asyncio import Lock
+from dataclasses import dataclass, asdict, field
+from enum import Enum
+from collections import deque, OrderedDict
+import traceback
+import logging
+import random
+import base64
+import urllib.parse
+import os
+from dotenv import load_dotenv
+import aiohttp
+
 load_dotenv()
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -258,7 +280,26 @@ class MessageType(Enum):
     NEW_WALLET = "new_wallet"  
     GET_ALL_DATA = "get_all_data"
     ALL_DATA = "all_data"
+    SYNC_REQUEST = "sync_request"
+    SYNC_RESPONSE = "sync_response"
+    SYNC_DATA = "sync_data"
+    SYNC_STATUS = "sync_status"
 
+class SyncComponent:
+    """Represents a component that can be synced"""
+    WALLETS = "wallets"
+    TRANSACTIONS = "transactions"
+    BLOCKS = "blocks"
+    MEMPOOL = "mempool"
+
+class SyncStatus:
+    """Track sync status of a component"""
+    def __init__(self):
+        self.last_sync = time.time()
+        self.current_hash = None
+        self.is_syncing = False
+        self.sync_progress = 0
+        self.last_validated = time.time()
 
 from dataclasses import dataclass, field, asdict
 import json
@@ -292,6 +333,226 @@ class Message:
             receiver=data.get('receiver', None),  # Handle receiver
             challenge_id=data.get('challenge_id', str(uuid.uuid4()))
         )
+class SyncState:
+    """Helper class to track sync state"""
+    def __init__(self):
+        self.last_update = time.time()
+        self.status = "initialized"
+        self.hash = None
+        self.in_progress = False
+        self.last_attempt = None
+        self.retry_count = 0
+        self.peers_synced = set()
+
+def extend_p2p_node():
+    """Extend P2PNode with enhanced sync functionality"""
+    
+    # Add new attributes to P2PNode.__init__
+    original_init = P2PNode.__init__
+    
+    def enhanced_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        
+        # Initialize sync tracking
+        self.sync_states = {
+            'wallets': SyncState(),
+            'transactions': SyncState(),
+            'blocks': SyncState()
+        }
+        
+        # Enhanced heartbeat tracking
+        self.last_heartbeat_data = {}
+        self.sync_queue = asyncio.Queue()
+        self.sync_in_progress = False
+        
+    P2PNode.__init__ = enhanced_init
+
+    # Add enhanced heartbeat methods
+    async def send_enhanced_heartbeat(self, peer: str):
+        """Send enhanced heartbeat with sync information"""
+        try:
+            heartbeat_data = {
+                'timestamp': time.time(),
+                'node_state': await self.get_node_state_data(),
+                'sync_status': await self.get_sync_status(),
+                'chain_height': len(self.blockchain.chain) if self.blockchain else 0,
+                'mempool_size': len(self.blockchain.mempool) if self.blockchain else 0
+            }
+
+            message = Message(
+                type=MessageType.HEARTBEAT.value,
+                payload={
+                    'heartbeat': heartbeat_data,
+                    'sync_request': await self.check_sync_needs()
+                }
+            )
+            await self.send_message(peer, message)
+            self.logger.debug(f"Enhanced heartbeat sent to {peer}")
+
+        except Exception as e:
+            self.logger.error(f"Error sending enhanced heartbeat to {peer}: {str(e)}")
+
+    P2PNode.send_enhanced_heartbeat = send_enhanced_heartbeat
+
+    async def handle_enhanced_heartbeat(self, peer: str, data: dict):
+        """Handle incoming enhanced heartbeat messages"""
+        try:
+            # Update peer's last seen time
+            self.last_heartbeat_data[peer] = data
+            
+            # Check for sync needs
+            if 'sync_request' in data:
+                await self.handle_sync_request(peer, data['sync_request'])
+            
+            # Compare states and trigger sync if needed
+            peer_state = data['node_state']
+            await self.check_and_trigger_sync(peer, peer_state)
+            
+        except Exception as e:
+            self.logger.error(f"Error handling enhanced heartbeat from {peer}: {str(e)}")
+
+    P2PNode.handle_enhanced_heartbeat = handle_enhanced_heartbeat
+
+    # Add sync management methods
+    async def check_sync_needs(self):
+        """Check what data needs to be synced"""
+        try:
+            sync_needs = {
+                'wallets': False,
+                'transactions': False,
+                'blocks': False
+            }
+            
+            for component, state in self.sync_states.items():
+                if time.time() - state.last_update > 60:  # Check every minute
+                    sync_needs[component] = True
+                    
+            return sync_needs
+            
+        except Exception as e:
+            self.logger.error(f"Error checking sync needs: {str(e)}")
+            return {}
+
+    P2PNode.check_sync_needs = check_sync_needs
+
+    async def check_and_trigger_sync(self, peer: str, peer_state: dict):
+        """Compare states and trigger sync if needed"""
+        try:
+            # Check blockchain height
+            local_height = len(self.blockchain.chain) if self.blockchain else 0
+            peer_height = peer_state.get('blockchain_height', 0)
+            
+            if peer_height > local_height:
+                await self.queue_sync_operation(peer, 'blocks')
+            
+            # Check wallet differences
+            local_wallet_hash = await self.calculate_wallet_hash()
+            peer_wallet_hash = peer_state.get('wallet_hash')
+            
+            if peer_wallet_hash and peer_wallet_hash != local_wallet_hash:
+                await self.queue_sync_operation(peer, 'wallets')
+            
+            # Check transaction differences
+            local_tx_hash = await self.calculate_transaction_hash()
+            peer_tx_hash = peer_state.get('transaction_hash')
+            
+            if peer_tx_hash and peer_tx_hash != local_tx_hash:
+                await self.queue_sync_operation(peer, 'transactions')
+                
+        except Exception as e:
+            self.logger.error(f"Error checking and triggering sync with {peer}: {str(e)}")
+
+    P2PNode.check_and_trigger_sync = check_and_trigger_sync
+
+    async def queue_sync_operation(self, peer: str, component: str):
+        """Queue a sync operation"""
+        try:
+            if not self.sync_states[component].in_progress:
+                await self.sync_queue.put({
+                    'peer': peer,
+                    'component': component,
+                    'timestamp': time.time()
+                })
+                self.sync_states[component].in_progress = True
+                self.sync_states[component].last_attempt = time.time()
+                
+        except Exception as e:
+            self.logger.error(f"Error queuing sync operation: {str(e)}")
+
+    P2PNode.queue_sync_operation = queue_sync_operation
+
+    # Add main sync processing loop
+    async def process_sync_queue(self):
+        """Process queued sync operations"""
+        while True:
+            try:
+                if not self.sync_queue.empty():
+                    sync_op = await self.sync_queue.get()
+                    await self.perform_sync_operation(sync_op)
+                await asyncio.sleep(1)
+            except Exception as e:
+                self.logger.error(f"Error processing sync queue: {str(e)}")
+                await asyncio.sleep(5)
+
+    P2PNode.process_sync_queue = process_sync_queue
+
+    async def perform_sync_operation(self, sync_op: dict):
+        """Perform a specific sync operation"""
+        peer = sync_op['peer']
+        component = sync_op['component']
+        
+        try:
+            self.logger.info(f"Starting sync operation: {component} with peer {peer}")
+            
+            if component == 'blocks':
+                await self.sync_blocks_with_peer(peer)
+            elif component == 'wallets':
+                await self.sync_wallets_with_peer(peer)
+            elif component == 'transactions':
+                await self.sync_transactions_with_peer(peer)
+                
+            # Update sync state
+            self.sync_states[component].status = "synced"
+            self.sync_states[component].last_update = time.time()
+            self.sync_states[component].in_progress = False
+            self.sync_states[component].peers_synced.add(peer)
+            
+        except Exception as e:
+            self.logger.error(f"Error performing sync operation {component} with {peer}: {str(e)}")
+            self.sync_states[component].status = "failed"
+            self.sync_states[component].in_progress = False
+            self.sync_states[component].retry_count += 1
+
+    P2PNode.perform_sync_operation = perform_sync_operation
+
+    # Modify existing heartbeat method to use enhanced version
+    async def send_heartbeats(self):
+        """Send enhanced heartbeats to all peers"""
+        while True:
+            try:
+                peers = list(self.connected_peers)
+                for peer in peers:
+                    await self.send_enhanced_heartbeat(peer)
+                await asyncio.sleep(self.heartbeat_interval)
+            except Exception as e:
+                self.logger.error(f"Error in send_heartbeats: {str(e)}")
+                await asyncio.sleep(5)
+
+    P2PNode.send_heartbeats = send_heartbeats
+
+    # Start the sync processing when the node starts
+    original_start = P2PNode.start
+    
+    async def enhanced_start(self):
+        """Start the node with enhanced sync functionality"""
+        await original_start(self)
+        asyncio.create_task(self.process_sync_queue())
+        self.logger.info("Enhanced sync system started")
+
+    P2PNode.start = enhanced_start
+
+    return P2PNode
+    
 
 class P2PNode:
     def __init__(self, blockchain, host='localhost', port=8000, security_level=10, k: int = 20):
@@ -4331,6 +4592,187 @@ class P2PNode:
         except Exception as e:
             logger.error(f"Failed to handle transaction: {str(e)}")
             logger.error(traceback.format_exc())
+            
+
+def enhance_p2p_node(node: P2PNode) -> 'P2PNode':
+    """
+    Enhance a P2PNode instance with additional sync functionality.
+    Should be called after P2PNode instantiation.
+    """
+    # Add sync states
+    node.sync_states = {
+        SyncComponent.WALLETS: SyncStatus(),
+        SyncComponent.TRANSACTIONS: SyncStatus(),
+        SyncComponent.BLOCKS: SyncStatus(),
+        SyncComponent.MEMPOOL: SyncStatus()
+    }
+    
+    # Define the state hash calculation method
+    async def calculate_state_hash(self, component: SyncComponent) -> str:
+        """Calculate hash of current state for a component."""
+        try:
+            if component == SyncComponent.WALLETS:
+                wallets = await self.blockchain.get_wallets()
+                data = sorted([w.to_dict() for w in wallets], key=lambda x: x['address'])
+            elif component == SyncComponent.TRANSACTIONS:
+                txs = self.blockchain.get_recent_transactions()
+                data = sorted([tx.to_dict() for tx in txs], key=lambda x: x['id'])
+            elif component == SyncComponent.BLOCKS:
+                block = self.blockchain.get_latest_block()
+                return block.hash if block else '0' * 64
+            elif component == SyncComponent.MEMPOOL:
+                data = sorted([tx.to_dict() for tx in self.blockchain.mempool], key=lambda x: x['id'])
+            
+            return hashlib.sha256(json.dumps(data).encode()).hexdigest()
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating state hash for {component}: {str(e)}")
+            return None
+
+    # Bind the calculation method to the node instance
+    node.calculate_state_hash = types.MethodType(calculate_state_hash, node)
+
+    # Enhance the heartbeat functionality
+    original_send_heartbeat = node.send_heartbeat
+
+    async def enhanced_send_heartbeat(self, peer: str):
+        """Enhanced heartbeat with sync information."""
+        try:
+            # Get current state hashes
+            sync_status = {component.value: await self.calculate_state_hash(component) for component in SyncComponent}
+
+            # Create enhanced heartbeat data
+            heartbeat_data = {
+                "type": "heartbeat",
+                "timestamp": time.time(),
+                "sync_status": sync_status,
+                "blockchain_height": len(self.blockchain.chain) if self.blockchain else 0
+            }
+
+            # Call original heartbeat method and send sync status
+            await original_send_heartbeat(peer)
+            await self.send_message(peer, Message(
+                type=MessageType.SYNC_STATUS.value,
+                payload=heartbeat_data
+            ))
+            
+        except Exception as e:
+            self.logger.error(f"Error sending enhanced heartbeat to {peer}: {str(e)}")
+
+    # Replace the send_heartbeat method with enhanced version
+    node.send_heartbeat = types.MethodType(enhanced_send_heartbeat, node)
+
+    # Define sync status handling method
+    async def handle_sync_status(self, peer: str, data: dict):
+        """Handle incoming sync status."""
+        try:
+            peer_sync_status = data.get('sync_status', {})
+            peer_height = data.get('blockchain_height', 0)
+
+            for component in SyncComponent:
+                our_hash = await self.calculate_state_hash(component)
+                peer_hash = peer_sync_status.get(component.value)
+
+                if peer_hash and peer_hash != our_hash:
+                    if not self.sync_states[component].is_syncing:
+                        self.logger.info(f"State mismatch detected for {component.value} with {peer}")
+                        await self.start_sync(peer, component)
+
+            # Special handling for blockchain height
+            our_height = len(self.blockchain.chain) if self.blockchain else 0
+            if peer_height > our_height:
+                if not self.sync_states[SyncComponent.BLOCKS].is_syncing:
+                    self.logger.info(f"Chain height mismatch detected with {peer}")
+                    await self.start_sync(peer, SyncComponent.BLOCKS)
+
+        except Exception as e:
+            self.logger.error(f"Error handling sync status from {peer}: {str(e)}")
+
+    node.handle_sync_status = types.MethodType(handle_sync_status, node)
+
+    # Update message handling to include sync status
+    original_handle_message = node.handle_message
+
+    async def enhanced_handle_message(self, message: Message, sender: str):
+        """Enhanced message handler with sync support."""
+        if message.type == MessageType.SYNC_STATUS.value:
+            await self.handle_sync_status(sender, message.payload)
+        else:
+            await original_handle_message(message, sender)
+
+    node.handle_message = types.MethodType(enhanced_handle_message, node)
+
+    # Define sync operation method
+    async def start_sync(self, peer: str, component: SyncComponent):
+        """Start synchronization of a component with a peer."""
+        try:
+            self.sync_states[component].is_syncing = True
+            self.logger.info(f"Starting sync of {component.value} with {peer}")
+
+            if component == SyncComponent.BLOCKS:
+                await self.sync_blocks_with_peer(peer)
+            elif component == SyncComponent.WALLETS:
+                await self.sync_wallets_with_peer(peer)
+            elif component == SyncComponent.TRANSACTIONS:
+                await self.sync_transactions_with_peer(peer)
+            elif component == SyncComponent.MEMPOOL:
+                await self.sync_mempool_with_peer(peer)
+
+            # Update sync status
+            self.sync_states[component].last_sync = time.time()
+            self.sync_states[component].is_syncing = False
+            self.sync_states[component].current_hash = await self.calculate_state_hash(component)
+
+            self.logger.info(f"Completed sync of {component.value} with {peer}")
+
+        except Exception as e:
+            self.logger.error(f"Error during sync of {component.value} with {peer}: {str(e)}")
+            self.sync_states[component].is_syncing = False
+
+    node.start_sync = types.MethodType(start_sync, node)
+
+    # Update periodic tasks for sync monitoring
+    original_periodic_tasks = node.periodic_tasks
+
+    async def enhanced_periodic_tasks(self):
+        await original_periodic_tasks(self)
+        while True:
+            for component, state in self.sync_states.items():
+                if time.time() - state.last_sync > 300:  # 5 minutes
+                    self.logger.info(f"Component {component.value} hasn't been synced recently")
+                    # Trigger sync with a random peer
+                    if self.connected_peers:
+                        peer = random.choice(list(self.connected_peers))
+                        await self.start_sync(peer, component)
+            await asyncio.sleep(60)
+
+    node.periodic_tasks = types.MethodType(enhanced_periodic_tasks, node)
+
+    return node
+async def create_enhanced_p2p_node(ip_address: str, p2p_port: int) -> P2PNode:
+    """
+    Create and initialize an enhanced P2P node.
+    """
+    try:
+        logger.info(f"Initializing enhanced P2P node at {ip_address}:{p2p_port}")
+        
+        # Create base node
+        node = P2PNode(blockchain=None, host=ip_address, port=p2p_port)
+        
+        # Enhance node with sync capabilities
+        enhanced_node = enhance_p2p_node(node)
+        
+        # Start the enhanced node
+        await enhanced_node.start()
+        
+        logger.info("Enhanced P2P node started successfully")
+        return enhanced_node
+        
+    except Exception as e:
+        logger.error(f"Error initializing enhanced P2P node: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
 # Usage example
 async def main():
     blockchain = ...  # Initialize your blockchain object here

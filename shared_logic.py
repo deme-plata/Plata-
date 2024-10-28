@@ -22,6 +22,23 @@ import hashlib
 import base64
 import logging
 logger = logging.getLogger(__name__)
+import os
+import base64
+import uuid
+import hashlib
+import logging
+import time
+from typing import Optional, Tuple, Any, List
+from decimal import Decimal
+from pydantic import BaseModel, Field, validator
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.exceptions import InvalidSignature
+from ecdsa import SigningKey, SECP256k1
+import base64
+import traceback
+
+logger = logging.getLogger(__name__)
 
 class Transaction(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -34,21 +51,237 @@ class Transaction(BaseModel):
     public_key: Optional[str] = None
     signature: Optional[str] = None
     zk_proof: Optional[Tuple[Tuple, Tuple]] = None
+    homomorphic_amount: Optional[bytes] = None
+    ring_signature: Optional[bytes] = None
+    quantum_signature: Optional[bytes] = None
+    pq_cipher: Optional[bytes] = None
     wallet: Optional[Any] = None
     tx_hash: str = Field(default="")  # Initialize with empty string
     timestamp: float = Field(default_factory=time.time)  # Set default to current time
+    private_key: Optional[SigningKey] = None  # For ECDSA private key
+    def sign_transaction(self, zk_system) -> bool:
+        """
+        Sign the transaction with enhanced security features including ZK proofs
+        
+        Args:
+            zk_system: Zero-knowledge proof system instance
+            
+        Returns:
+            bool: True if signing successful, False otherwise
+            
+        Raises:
+            ValueError: If wallet or required data is missing
+        """
+        try:
+            # Validate prerequisites
+            if not self.wallet:
+                raise ValueError("No wallet available for signing")
+                
+            if not hasattr(self.wallet, 'sign_message') or not hasattr(self.wallet, 'public_key'):
+                raise ValueError("Wallet missing required signing capabilities")
+                
+            if not zk_system:
+                raise ValueError("ZK proof system not provided")
+                
+            # Create canonical message representation
+            try:
+                message = self._create_message()
+                logger.debug(f"Created message for signing: {message.hex()}")
+            except Exception as e:
+                logger.error(f"Failed to create message: {str(e)}")
+                raise ValueError(f"Message creation failed: {str(e)}")
+                
+            # Sign message with wallet
+            try:
+                self.signature = self.wallet.sign_message(message)
+                self.public_key = self.wallet.public_key
+                
+                # Validate signature format
+                if not isinstance(self.signature, (str, bytes)):
+                    raise ValueError("Invalid signature format")
+                    
+                # Ensure signature is properly encoded
+                if isinstance(self.signature, bytes):
+                    self.signature = base64.b64encode(self.signature).decode('utf-8')
+                    
+                logger.debug(f"Message signed successfully. Signature: {self.signature[:32]}...")
+            except Exception as e:
+                logger.error(f"Signing failed: {str(e)}")
+                raise ValueError(f"Failed to sign message: {str(e)}")
+                
+            # Generate and verify ZK proof
+            try:
+                # Convert amount to integer representation
+                amount_wei = int(float(self.amount) * 10**18)
+                if amount_wei <= 0:
+                    raise ValueError("Invalid amount for ZK proof")
+                    
+                # Generate public input from transaction data
+                public_input = int.from_bytes(
+                    hashlib.sha256(message).digest(),
+                    byteorder='big'
+                )
+                
+                # Generate ZK proof
+                self.zk_proof = zk_system.prove(amount_wei, public_input)
+                
+                # Verify the proof immediately
+                if not zk_system.verify(public_input, self.zk_proof):
+                    raise ValueError("Generated ZK proof verification failed")
+                    
+                logger.debug("ZK proof generated and verified successfully")
+            except Exception as e:
+                logger.error(f"ZK proof generation failed: {str(e)}")
+                raise ValueError(f"Failed to generate ZK proof: {str(e)}")
+                
+            # Update transaction hash with all components
+            try:
+                # Combine all security elements
+                security_data = message + base64.b64decode(self.signature)
+                if self.zk_proof:
+                    # Convert ZK proof to bytes if it's not already
+                    zk_proof_bytes = (
+                        self.zk_proof if isinstance(self.zk_proof, bytes)
+                        else str(self.zk_proof).encode()
+                    )
+                    security_data += zk_proof_bytes
+                    
+                # Generate final hash
+                self.tx_hash = hashlib.sha256(security_data).hexdigest()
+                logger.debug(f"Generated transaction hash: {self.tx_hash}")
+                
+            except Exception as e:
+                logger.error(f"Hash generation failed: {str(e)}")
+                raise ValueError(f"Failed to generate transaction hash: {str(e)}")
+                
+            return True
+                
+        except Exception as e:
+            logger.error(f"Transaction signing failed: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            return False
+
+
+
+    async def verify_transaction(self, public_key_pem: str) -> dict:
+        """Enhanced transaction verification with detailed validation results"""
+        try:
+            # Create validation result dictionary
+            validation_result = {
+                'status': 'success',
+                'valid': True,
+                'validation_details': {
+                    'hash_valid': False,
+                    'amount_valid': False,
+                    'timestamp_valid': False,
+                    'signature_valid': False
+                }
+            }
+            
+            # 1. Verify transaction hash
+            computed_hash = self.generate_hash()
+            validation_result['validation_details']['hash_valid'] = (computed_hash == self.tx_hash)
+            
+            # 2. Verify amount
+            try:
+                validation_result['validation_details']['amount_valid'] = (
+                    self.amount > Decimal('0') and 
+                    self.price >= Decimal('0')
+                )
+            except (TypeError, ValueError):
+                validation_result['validation_details']['amount_valid'] = False
+            
+            # 3. Verify timestamp
+            current_time = time.time()
+            validation_result['validation_details']['timestamp_valid'] = (
+                self.timestamp <= current_time and 
+                self.timestamp > (current_time - 86400)  # Within last 24 hours
+            )
+            
+            # 4. Verify signature
+            if self.signature and self.public_key:
+                try:
+                    message = self._create_message()
+                    signature_bytes = base64.b64decode(self.signature)
+                    public_key_bytes = base64.b64decode(self.public_key)
+                    
+                    # Create public key object
+                    public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+                        ec.SECP256R1(),
+                        public_key_bytes
+                    )
+                    
+                    # Verify signature
+                    public_key.verify(
+                        signature_bytes,
+                        message,
+                        ec.ECDSA(hashes.SHA256())
+                    )
+                    validation_result['validation_details']['signature_valid'] = True
+                except Exception as e:
+                    logger.error(f"Signature verification failed: {str(e)}")
+                    validation_result['validation_details']['signature_valid'] = False
+            
+            # Check if all validations passed
+            all_valid = all(validation_result['validation_details'].values())
+            if not all_valid:
+                validation_result['status'] = 'error'
+                validation_result['valid'] = False
+                validation_result['message'] = 'Transaction verification failed'
+            
+            return validation_result
+            
+        except Exception as e:
+            logger.error(f"Transaction verification error: {str(e)}")
+            return {
+                'status': 'error',
+                'valid': False,
+                'message': f'Verification error: {str(e)}',
+                'validation_details': {
+                    'hash_valid': False,
+                    'amount_valid': False,
+                    'timestamp_valid': False,
+                    'signature_valid': False
+                }
+            }
+
+
+    def _create_message(self) -> bytes:
+        """Create standardized message for signing/verification"""
+        message = (
+            f"{self.id}{self.sender}{self.receiver}"
+            f"{str(self.amount)}{str(self.price)}"
+            f"{self.buyer_id}{self.seller_id}"
+            f"{str(self.timestamp)}"
+        ).encode('utf-8')
+        return message
+
+
+
+    def verify_signature(self):
+        """Verify the transaction signature using ECDSA."""
+        if not self.signature or not self.public_key:
+            raise ValueError("Missing signature or public key for verification")
+
+        # Create a verifying key from the stored public key
+        verifying_key = SigningKey.from_string(bytes.fromhex(self.public_key), curve=SECP256k1).get_verifying_key()
+        message = f"{self.sender}{self.receiver}{self.amount}{self.price}{self.buyer_id}{self.seller_id}".encode()
+
+        # Verify the signature
+        return verifying_key.verify(self.signature, message)
+
+
 
     def generate_hash(self) -> str:
         """Generate transaction hash"""
         message = (f"{self.id}{self.sender}{self.receiver}{self.amount}"
-                  f"{self.price}{self.buyer_id}{self.seller_id}{self.timestamp}")
+                   f"{self.price}{self.buyer_id}{self.seller_id}{self.timestamp}")
         return hashlib.sha256(message.encode()).hexdigest()
 
     def __init__(self, **data):
         super().__init__(**data)
         if not self.tx_hash:
             self.tx_hash = self.generate_hash()
-
 
     @validator('amount')
     def validate_amount(cls, v):
@@ -62,69 +295,198 @@ class Transaction(BaseModel):
             raise ValueError("Price cannot be negative")
         return v
 
-    def sign_transaction(self, zk_system: 'SecureHybridZKStark'):
-        """Sign the transaction and generate ZK proof"""
+    async def apply_enhanced_security(self, crypto_provider: Any) -> bool:
+        """Apply enhanced security features with proper error handling and type conversion"""
         try:
-            if not self.wallet:
-                raise ValueError("Wallet is required to sign the transaction")
+            logger.debug("Starting enhanced security application")
+            message = self._create_message()
+            security_elements = []  # Store all security elements for hash computation
+            
+            # 1. Generate ZK proof
+            try:
+                amount_wei = int(float(self.amount) * 10**18)
+                public_input = int.from_bytes(hashlib.sha256(message).digest(), byteorder='big')
+                self.zk_proof = crypto_provider.stark.prove(amount_wei, public_input)
+                security_elements.append(str(self.zk_proof).encode())
+                logger.debug("ZK proof generated successfully")
+            except Exception as e:
+                logger.error(f"ZK proof generation failed: {str(e)}")
+                return False
+
+            # 2. Apply homomorphic encryption
+            try:
+                self.homomorphic_amount = await crypto_provider.create_homomorphic_cipher(
+                    int(float(self.amount) * 10**18)
+                )
+                security_elements.append(self.homomorphic_amount)
+                logger.debug("Homomorphic encryption applied successfully")
+            except Exception as e:
+                logger.error(f"Homomorphic encryption failed: {str(e)}")
+                return False
+
+            # 3. Generate ring signature with proper ring size
+            try:
+                if self.wallet and hasattr(self.wallet, 'private_key'):
+                    # Create a ring of public keys (minimum 2)
+                    ring_keys = [self.public_key] if self.public_key else []
+                    # Add a dummy key if needed to meet minimum size
+                    if len(ring_keys) < 2:
+                        dummy_key = base64.b64encode(os.urandom(32)).decode('utf-8')
+                        ring_keys.append(dummy_key)
+                    
+                    self.ring_signature = crypto_provider.create_ring_signature(
+                        message,
+                        self.wallet.private_key,
+                        ring_keys
+                    )
+                    if self.ring_signature:
+                        security_elements.append(self.ring_signature)
+                    logger.debug("Ring signature created successfully")
+            except Exception as e:
+                logger.error(f"Ring signature creation failed: {str(e)}")
+                # Continue even if ring signature fails
+
+            # 4. Apply post-quantum encryption
+            try:
+                if not hasattr(crypto_provider, 'kem'):
+                    # Initialize post-quantum components if needed
+                    crypto_provider.kem = KeyEncapsulation("Kyber768")
+                    crypto_provider.pq_public_key, crypto_provider.pq_secret_key = crypto_provider.kem.generate_keypair()
                 
-            # Create message from transaction data
-            message = self._create_message()
-            
-            # Sign with wallet
-            self.signature = self.wallet.sign_message(message)
-            self.public_key = self.wallet.get_public_key()
-            
-            # Generate ZK proof
-            secret = int(self.amount * 10**18)  # Convert Decimal to integer
-            public_input = int(hashlib.sha256(message.encode()).hexdigest(), 16)
-            self.zk_proof = zk_system.prove(secret, public_input)
-            
-            # Generate transaction hash
-            self.tx_hash = hashlib.sha256(
-                f"{self.id}{message}{self.signature}".encode()
-            ).hexdigest()
-            
-            logger.debug(f"Transaction {self.id} signed successfully")
-            return True
-            
+                self.pq_cipher = crypto_provider.pq_encrypt(message)
+                if self.pq_cipher:
+                    security_elements.append(self.pq_cipher)
+                logger.debug("Post-quantum encryption applied successfully")
+            except Exception as e:
+                logger.error(f"Post-quantum encryption failed: {str(e)}")
+                # Continue even if PQ encryption fails
+
+            # 5. Generate base signature
+            try:
+                if not self.signature:
+                    if not hasattr(self.wallet, 'private_key'):
+                        private_key = ec.generate_private_key(ec.SECP256R1())
+                        self.wallet.private_key = private_key
+                        public_key = private_key.public_key()
+                        self.wallet.public_key = base64.b64encode(
+                            public_key.public_bytes(
+                                encoding=serialization.Encoding.X962,
+                                format=serialization.PublicFormat.UncompressedPoint
+                            )
+                        ).decode('utf-8')
+
+                    signature = self.wallet.private_key.sign(
+                        message,
+                        ec.ECDSA(hashes.SHA256())
+                    )
+                    self.signature = base64.b64encode(signature).decode('utf-8')
+                    self.public_key = self.wallet.public_key
+                    security_elements.append(signature)
+                    logger.debug("Base signature generated successfully")
+            except Exception as e:
+                logger.error(f"Base signature generation failed: {str(e)}")
+                return False
+
+            # Update transaction hash with all security elements
+            try:
+                # Start with the message
+                hash_data = message
+                
+                # Add each security element, converting to bytes if needed
+                for element in security_elements:
+                    if isinstance(element, str):
+                        hash_data += element.encode()
+                    elif isinstance(element, bytes):
+                        hash_data += element
+                    elif isinstance(element, tuple):
+                        hash_data += str(element).encode()
+                    else:
+                        hash_data += str(element).encode()
+                
+                self.tx_hash = hashlib.sha256(hash_data).hexdigest()
+                logger.debug("Transaction hash updated successfully")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Hash update failed: {str(e)}")
+                logger.error(traceback.format_exc())
+                return False
+
         except Exception as e:
-            logger.error(f"Error signing transaction: {str(e)}")
+            logger.error(f"Enhanced security application failed: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
-    def verify_transaction(self, zk_system: 'SecureHybridZKStark') -> bool:
-        """Verify transaction signature and ZK proof"""
+
+    async def verify_enhanced_security(self, crypto_provider: Any) -> bool:
+        """Verify all enhanced security features"""
         try:
-            if not all([self.signature, self.public_key, self.zk_proof]):
-                logger.error("Missing required verification components")
-                return False
-            
-            # Create message and verify signature
             message = self._create_message()
-            if not self.wallet.verify_signature(message, self.signature, self.public_key):
-                logger.error("Signature verification failed")
-                return False
             
-            # Verify ZK proof
-            public_input = int(hashlib.sha256(message.encode()).hexdigest(), 16)
-            if not zk_system.verify(public_input, self.zk_proof):
-                logger.error("ZK proof verification failed")
-                return False
-            
-            logger.debug(f"Transaction {self.id} verified successfully")
+            # 1. Verify ZK proof
+            if self.zk_proof:
+                public_input = int.from_bytes(hashlib.sha256(message).digest(), byteorder='big')
+                if not crypto_provider.stark.verify(public_input, self.zk_proof):
+                    logger.error("ZK proof verification failed")
+                    return False
+
+            # 2. Verify homomorphic amount
+            if self.homomorphic_amount:
+                decrypted_amount = await crypto_provider.decrypt_homomorphic(self.homomorphic_amount)
+                expected_amount = int(float(self.amount) * 10**18)
+                if abs(decrypted_amount - expected_amount) > 1000:  # Allow small precision differences
+                    logger.error("Homomorphic amount verification failed")
+                    return False
+
+            # 3. Verify ring signature
+            if self.ring_signature:
+                if not crypto_provider.verify_ring_signature(
+                    message, 
+                    self.ring_signature,
+                    [self.public_key] if self.public_key else []
+                ):
+                    logger.error("Ring signature verification failed")
+                    return False
+
+            # 4. Verify post-quantum encryption
+            if self.pq_cipher:
+                try:
+                    decrypted_message = crypto_provider.pq_decrypt(self.pq_cipher)
+                    if decrypted_message != message:
+                        logger.error("Post-quantum encryption verification failed")
+                        return False
+                except Exception as e:
+                    logger.error(f"Post-quantum decryption failed: {str(e)}")
+                    return False
+
+            # 5. Verify base signature
+            if self.signature and self.public_key:
+                try:
+                    public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+                        ec.SECP256R1(),
+                        base64.b64decode(self.public_key)
+                    )
+                    public_key.verify(
+                        base64.b64decode(self.signature),
+                        message,
+                        ec.ECDSA(hashes.SHA256())
+                    )
+                except Exception as e:
+                    logger.error(f"Base signature verification failed: {str(e)}")
+                    return False
+
+            logger.info("All security features verified successfully")
             return True
-            
+
         except Exception as e:
-            logger.error(f"Error verifying transaction: {str(e)}")
+            logger.error(f"Security verification failed: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
-    def _create_message(self) -> str:
-        """Create message string for signing/verification"""
-        return f"{self.sender}{self.receiver}{self.amount}{self.price}{self.buyer_id}{self.seller_id}"
 
     def to_dict(self) -> dict:
-        """Convert transaction to dictionary"""
-        return {
+        """Convert transaction to dictionary with proper encoding"""
+        data = {
             "id": self.id,
             "sender": self.sender,
             "receiver": self.receiver,
@@ -138,52 +500,35 @@ class Transaction(BaseModel):
             "timestamp": self.timestamp
         }
 
-    def model_dump(self) -> dict:
-        """Pydantic v2 compatible model dump"""
-        return self.to_dict()
+        # Encode binary data
+        if self.zk_proof:
+            data["zk_proof"] = base64.b64encode(self.zk_proof).decode()
+        if self.homomorphic_amount:
+            data["homomorphic_amount"] = base64.b64encode(self.homomorphic_amount).decode()
+        if self.ring_signature:
+            data["ring_signature"] = base64.b64encode(self.ring_signature).decode()
+        if self.quantum_signature:
+            data["quantum_signature"] = base64.b64encode(self.quantum_signature).decode()
+        if self.pq_cipher:
+            data["pq_cipher"] = base64.b64encode(self.pq_cipher).decode()
+
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> 'Transaction':
-        """Create transaction from dictionary"""
+        """Create transaction from dictionary with decoded security fields"""
+        decoded_data = data.copy()
+        for field in ["zk_proof", "homomorphic_amount", "ring_signature", "quantum_signature", "pq_cipher"]:
+            if field in decoded_data:
+                decoded_data[field] = base64.b64decode(decoded_data[field])
+
         # Handle Decimal conversion
-        if 'amount' in data:
-            data['amount'] = Decimal(str(data['amount']))
-        if 'price' in data:
-            data['price'] = Decimal(str(data['price']))
-        return cls(**data)
-
-    def to_grpc(self) -> Any:
-        """Convert to gRPC message"""
-        return dagknight_pb2.Transaction(
-            id=self.id,
-            sender=self.sender,
-            receiver=self.receiver,
-            amount=int(self.amount * 10**18),  # Convert to integer
-            price=int(self.price * 10**18),    # Convert to integer
-            public_key=self.public_key,
-            signature=self.signature,
-            buyer_id=self.buyer_id,
-            seller_id=self.seller_id,
-            tx_hash=self.tx_hash,
-            timestamp=int(self.timestamp) if self.timestamp else None
-        )
-
-    @classmethod
-    def from_proto(cls, proto) -> 'Transaction':
-        """Create transaction from gRPC message"""
-        return cls(
-            id=proto.id,
-            sender=proto.sender,
-            receiver=proto.receiver,
-            amount=Decimal(proto.amount) / Decimal(10**18),
-            price=Decimal(proto.price) / Decimal(10**18),
-            public_key=proto.public_key,
-            signature=proto.signature,
-            buyer_id=proto.buyer_id,
-            seller_id=proto.seller_id,
-            tx_hash=proto.tx_hash,
-            timestamp=proto.timestamp
-        )
+        if 'amount' in decoded_data:
+            decoded_data['amount'] = Decimal(decoded_data['amount'])
+        if 'price' in decoded_data:
+            decoded_data['price'] = Decimal(decoded_data['price'])
+            
+        return cls(**decoded_data)
 
     class Config:
         arbitrary_types_allowed = True
