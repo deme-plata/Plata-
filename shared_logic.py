@@ -38,28 +38,312 @@ from ecdsa import SigningKey, SECP256k1
 import base64
 import traceback
 from typing import Optional, Union, Tuple
+from typing import Optional, Any
+from quantum_signer import QuantumSigner
+from DAGConfirmationSystem import * 
+from typing import List, Dict, Tuple, Optional, Set, Any, Union
+from decimal import Decimal
+import base64
+import json
+import time
+import logging
+import uuid
+import hashlib
+import traceback
+from pydantic import root_validator
+
+# Third-party imports
+from pydantic import BaseModel, Field
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.exceptions import InvalidSignature
+from ecdsa import SigningKey, SECP256k1
+from typing import Optional, Dict, Union, Tuple, Any
+from pydantic import BaseModel, Field, validator as model_validator
+from decimal import Decimal
+import time
+import uuid
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Dict, Any, Optional
+from decimal import Decimal
+import time
+import logging
+import traceback
+from pydantic import BaseModel, Field, ConfigDict, root_validator
+from typing import List, Set, Dict, Any, Optional, Union
+from decimal import Decimal
+import time
+import uuid
+from typing import Dict, List, Tuple, Optional, Set, Any, Union
+from decimal import Decimal
+import base64
+import json
+import time
+import logging
+import uuid
+import hashlib
+import traceback
+from pydantic import (
+    BaseModel,
+    Field,
+    ConfigDict,
+    validator,  # Use validator instead of field_validator
+    root_validator
+)
+from confirmation_models import ConfirmationStatus, ConfirmationMetrics, ConfirmationData
 
 logger = logging.getLogger(__name__)
 
+class ConfirmationPaths(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    confirmation_paths: List[str] = Field(default_factory=list)
+    confirming_blocks: Set[str] = Field(default_factory=set)
+    quantum_confirmations: Dict[str, Any] = Field(default_factory=dict)
+
+class CryptographicFeatures(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    zk_proof: bool = False
+    homomorphic: bool = False
+    ring_signature: bool = False
+    quantum_signature: bool = False
+    post_quantum: bool = False
+    base_signature: bool = False
+
+class SecurityFeatures(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    cryptographic: CryptographicFeatures = Field(default_factory=CryptographicFeatures)
+    confirmation: ConfirmationData = Field(default_factory=ConfirmationData)
+    # Ensure ValidationFeatures is defined or replace it with an appropriate class
+    validation: 'ValidationFeatures' = Field(default_factory='ValidationFeatures')
 class Transaction(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     sender: str
     receiver: str
     amount: Decimal
-    price: Decimal
-    buyer_id: str
-    seller_id: str
-    public_key: Optional[str] = None
+    price: Optional[Decimal] = Decimal('0')
+    buyer_id: Optional[str] = None
+    seller_id: Optional[str] = None
+    gas_limit: Optional[int] = None
+    gas_price: Optional[Decimal] = None
+    quantum_enabled: bool = False
+    timestamp: Optional[int] = None
+    gas_data: Optional[Dict] = None
+
+    # Fields related to cryptographic and confirmation features
+    zk_proof: Optional[bytes] = None
     signature: Optional[str] = None
-    zk_proof: Optional[Union[Tuple, str]] = None  # Can be either tuple or string
+    tx_hash: Optional[str] = None
+    public_key: Optional[str] = None
+    confirmations: int = Field(default=0)
+    confirmation_data: ConfirmationData = Field(default_factory=ConfirmationData)
     homomorphic_amount: Optional[bytes] = None
-    ring_signature: Optional[bytes] = None
     quantum_signature: Optional[bytes] = None
     pq_cipher: Optional[bytes] = None
-    wallet: Optional[Any] = None
-    tx_hash: str = Field(default="")  # Initialize with empty string
-    timestamp: float = Field(default_factory=time.time)  # Set default to current time
-    private_key: Optional[SigningKey] = None  # For ECDSA private key
+    ring_signature: Optional[bytes] = None
+    gas_used: int = Field(default=0)
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        validate_assignment=True,
+        populate_by_name=True,
+        json_encoders={
+            Decimal: str,
+            bytes: lambda v: base64.b64encode(v).decode('utf-8') if v else None
+        }
+    )
+
+    @validator('*', pre=True)  # Using validator instead of field_validator
+    def set_defaults(cls, v, values):
+        """Set default values for fields"""
+        # Set buyer_id and seller_id defaults
+        if not values.get('buyer_id') and 'receiver' in values:
+            values['buyer_id'] = values['receiver']
+        if not values.get('seller_id') and 'sender' in values:
+            values['seller_id'] = values['sender']
+            
+        # Set timestamp default
+        if not values.get('timestamp'):
+            values['timestamp'] = int(time.time() * 1000)
+            
+        # Initialize confirmation_data if not present
+        if not values.get('confirmation_data'):
+            values['confirmation_data'] = ConfirmationData(
+                status=ConfirmationStatus(
+                    score=0.0,
+                    security_level="LOW",
+                    confirmations=0,
+                    is_final=False
+                ),
+                metrics=ConfirmationMetrics(
+                    path_diversity=0.0,
+                    quantum_strength=0.85,
+                    consensus_weight=0.0,
+                    depth_score=0.0
+                )
+            )
+            
+        return v
+
+
+
+
+    @property
+    def confirmation_score(self) -> float:
+        """Get confirmation score from confirmation data"""
+        return self.confirmation_data.status.score if self.confirmation_data else 0.0
+    @property
+    def security_level(self) -> str:
+        """Get security level from confirmation data"""
+        return self.confirmation_data.status.security_level if self.confirmation_data else "LOW"
+
+    async def apply_quantum_signature(self, quantum_signer: Any) -> bool:
+        """Apply quantum signature to transaction"""
+        try:
+            message = self._create_message()
+            new_quantum_signature = quantum_signer.sign_message(message)
+            
+            if new_quantum_signature:
+                # Create new confirmation data objects
+                new_status = ConfirmationStatus(
+                    score=0.0,
+                    security_level="LOW",
+                    confirmations=0,
+                    is_final=False
+                )
+                
+                new_metrics = ConfirmationMetrics(
+                    path_diversity=0.0,
+                    quantum_strength=0.85,
+                    consensus_weight=0.0,
+                    depth_score=0.0
+                )
+                
+                # Create new confirmation data
+                new_confirmation_data = ConfirmationData(
+                    status=new_status,
+                    metrics=new_metrics,
+                    confirming_blocks=[],
+                    confirmation_paths=[],
+                    quantum_confirmations=[]
+                )
+                
+                # Update the model using model_copy and update
+                updated_transaction = self.model_copy(
+                    update={
+                        'quantum_signature': new_quantum_signature,
+                        'confirmation_data': new_confirmation_data,
+                        'confirmations': 0
+                    }
+                )
+                
+                # Copy updated values back to self
+                self.quantum_signature = updated_transaction.quantum_signature
+                self.confirmation_data = updated_transaction.confirmation_data
+                self.confirmations = updated_transaction.confirmations
+                
+                logger.debug(f"Applied quantum signature of size {len(new_quantum_signature)} bytes")
+                return True
+            return False
+            
+        except Exception as e:
+            logger.error(f"Failed to apply quantum signature: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+    def update_confirmation_status(self, security_info: Dict[str, Any]) -> None:
+        """Update transaction's confirmation status properly"""
+        try:
+            # Create new status with updated values
+            new_status = ConfirmationStatus(
+                score=security_info.get('confirmation_score', 0.0),
+                security_level=security_info.get('security_level', 'LOW'),
+                confirmations=security_info.get('num_confirmations', 0),
+                is_final=security_info.get('is_final', False)
+            )
+
+            # Create new metrics with updated values
+            new_metrics = ConfirmationMetrics(
+                path_diversity=security_info.get('path_diversity', 0.0),
+                quantum_strength=security_info.get('quantum_strength', 0.85),
+                consensus_weight=security_info.get('consensus_weight', 0.0),
+                depth_score=security_info.get('depth_score', 0.0),
+                last_updated=time.time()
+            )
+
+            # Create new confirmation data preserving existing paths data
+            new_confirmation_data = ConfirmationData(
+                status=new_status,
+                metrics=new_metrics,
+                confirming_blocks=self.confirmation_data.confirming_blocks,
+                confirmation_paths=self.confirmation_data.confirmation_paths,
+                quantum_confirmations=self.confirmation_data.quantum_confirmations
+            )
+
+            # Update using model_copy to ensure Pydantic validation
+            updated_transaction = self.model_copy(
+                update={
+                    'confirmation_data': new_confirmation_data,
+                    'confirmations': security_info.get('num_confirmations', 0)
+                }
+            )
+
+            # Copy updated values back to self
+            self.confirmation_data = updated_transaction.confirmation_data
+            self.confirmations = updated_transaction.confirmations
+
+        except Exception as e:
+            logger.error(f"Error updating confirmation status: {str(e)}")
+            logger.error(traceback.format_exc())
+
+    def get_confirmation_status(self) -> Dict[str, Any]:
+        """Get current confirmation status"""
+        try:
+            return {
+                'confirmation_score': self.confirmation_data.status.score,
+                'security_level': self.confirmation_data.status.security_level,
+                'confirmations': self.confirmations,
+                'is_final': self.confirmation_data.status.is_final,
+                'metrics': {
+                    'path_diversity': self.confirmation_data.metrics.path_diversity,
+                    'quantum_strength': self.confirmation_data.metrics.quantum_strength,
+                    'consensus_weight': self.confirmation_data.metrics.consensus_weight,
+                    'depth_score': self.confirmation_data.metrics.depth_score
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error getting confirmation status: {str(e)}")
+            return {
+                'confirmation_score': 0.0,
+                'security_level': 'LOW',
+                'confirmations': 0,
+                'is_final': False,
+                'metrics': {
+                    'path_diversity': 0.0,
+                    'quantum_strength': 0.85,
+                    'consensus_weight': 0.0,
+                    'depth_score': 0.0
+                }
+            }
+
+
+    def is_securely_confirmed(self) -> bool:
+        """Check if transaction has reached a secure confirmation state"""
+        return (
+            self.confirmation_data.status.security_level in ['MAXIMUM', 'VERY_HIGH', 'HIGH'] and
+            self.confirmations >= 6 and
+            self.confirmation_data.status.confirmation_score >= 0.95
+        )
+
+    def compute_hash(self) -> str:
+        """Compute transaction hash"""
+        data = f"{self.sender}{self.receiver}{self.amount}{self.timestamp}"
+        return hashlib.sha256(data.encode()).hexdigest()
+
+
+
     def sign_transaction(self, zk_system) -> bool:
         """
         Sign the transaction with enhanced security features including ZK proofs
@@ -162,6 +446,42 @@ class Transaction(BaseModel):
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return False
 
+    def apply_quantum_signature(self, quantum_signer: Any) -> bool:
+        """Apply quantum signature to transaction"""
+        try:
+            # Create message from transaction data
+            message = self._create_message()
+            
+            # Generate quantum signature
+            self.quantum_signature = quantum_signer.sign_message(message)
+            
+            if self.quantum_signature:
+                logger.debug(f"Applied quantum signature of size {len(self.quantum_signature)} bytes")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to apply quantum signature: {str(e)}")
+            return False
+
+
+    def verify_quantum_signature(self, quantum_signer: QuantumSigner) -> bool:
+        """Verify quantum signature on transaction"""
+        try:
+            if not self.quantum_signature:
+                logger.error("No quantum signature found")
+                return False
+                
+            message = self._create_message()
+            result = quantum_signer.verify_signature(message, self.quantum_signature)
+            
+            if result:
+                logger.debug("Quantum signature verified successfully")
+            else:
+                logger.error("Quantum signature verification failed")
+            return result
+        except Exception as e:
+            logger.error(f"Quantum signature verification error: {str(e)}")
+            return False
 
 
     async def verify_transaction(self, public_key_pem: str) -> dict:
@@ -247,15 +567,18 @@ class Transaction(BaseModel):
             }
 
 
-    def _create_message(self) -> bytes:
-        """Create standardized message for signing"""
-        message = (
-            f"{self.id}{self.sender}{self.receiver}"
-            f"{str(self.amount)}{str(self.price)}"
-            f"{self.buyer_id}{self.seller_id}"
-            f"{str(self.timestamp)}"
-        ).encode('utf-8')
-        return message
+    def get_security_level(self) -> str:
+        """Get current security level"""
+        try:
+            if hasattr(self, 'confirmation_data') and self.confirmation_data:
+                return self.confirmation_data.status.security_level
+            return "LOW"
+        except Exception as e:
+            logger.error(f"Error getting security level: {str(e)}")
+            return "LOW"
+
+
+
 
 
 
@@ -310,23 +633,37 @@ class Transaction(BaseModel):
         if v < 0:
             raise ValueError("Price cannot be negative")
         return v
-    @validator('zk_proof', pre=True)
+    @validator('zk_proof', check_fields=False)
     def validate_zk_proof(cls, v):
+        """
+        Validate zk_proof field to ensure it conforms to the expected encoding or structure.
+        """
         if isinstance(v, str):
             try:
-                # If it's a base64 string, decode it to tuple
-                decoded = base64.b64decode(v).decode()
-                return eval(decoded)  # Convert string representation of tuple to actual tuple
-            except:
-                return v  # Keep as string if can't decode
+                # If it's a base64 string, decode it
+                base64.b64decode(v)  # Just to check for valid base64 encoding
+            except Exception as e:
+                raise ValueError(f"zk_proof must be a valid base64 encoded string. Error: {e}")
+        elif isinstance(v, tuple):
+            # Additional tuple validation can go here if necessary
+            pass
         return v
 
+
     async def apply_enhanced_security(self, crypto_provider: Any) -> bool:
-        """Apply enhanced security features with proper error handling and type conversion"""
+        """Apply enhanced security features with comprehensive quantum support"""
         try:
             logger.debug("Starting enhanced security application")
             message = self._create_message()
             security_elements = []  # Store all security elements for hash computation
+            security_features_applied = {
+                "zk_proof": False,
+                "homomorphic": False,
+                "ring_signature": False,
+                "quantum_signature": False,
+                "post_quantum": False,
+                "base_signature": False
+            }
             
             # 1. Generate ZK proof
             try:
@@ -334,6 +671,7 @@ class Transaction(BaseModel):
                 public_input = int.from_bytes(hashlib.sha256(message).digest(), byteorder='big')
                 self.zk_proof = crypto_provider.stark.prove(amount_wei, public_input)
                 security_elements.append(str(self.zk_proof).encode())
+                security_features_applied["zk_proof"] = True
                 logger.debug("ZK proof generated successfully")
             except Exception as e:
                 logger.error(f"ZK proof generation failed: {str(e)}")
@@ -345,17 +683,16 @@ class Transaction(BaseModel):
                     int(float(self.amount) * 10**18)
                 )
                 security_elements.append(self.homomorphic_amount)
+                security_features_applied["homomorphic"] = True
                 logger.debug("Homomorphic encryption applied successfully")
             except Exception as e:
                 logger.error(f"Homomorphic encryption failed: {str(e)}")
                 return False
 
-            # 3. Generate ring signature with proper ring size
+            # 3. Generate ring signature
             try:
                 if self.wallet and hasattr(self.wallet, 'private_key'):
-                    # Create a ring of public keys (minimum 2)
                     ring_keys = [self.public_key] if self.public_key else []
-                    # Add a dummy key if needed to meet minimum size
                     if len(ring_keys) < 2:
                         dummy_key = base64.b64encode(os.urandom(32)).decode('utf-8')
                         ring_keys.append(dummy_key)
@@ -363,31 +700,44 @@ class Transaction(BaseModel):
                     self.ring_signature = crypto_provider.create_ring_signature(
                         message,
                         self.wallet.private_key,
-                        ring_keys
+                        ring_keys[0]  # Use first key as public key
                     )
                     if self.ring_signature:
                         security_elements.append(self.ring_signature)
-                    logger.debug("Ring signature created successfully")
+                        security_features_applied["ring_signature"] = True
+                        logger.debug("Ring signature created successfully")
             except Exception as e:
                 logger.error(f"Ring signature creation failed: {str(e)}")
                 # Continue even if ring signature fails
 
-            # 4. Apply post-quantum encryption
+            # 4. Apply quantum signature
+            try:
+                if hasattr(crypto_provider, 'quantum_signer'):
+                    self.quantum_signature = crypto_provider.quantum_signer.sign_message(message)
+                    if self.quantum_signature:
+                        security_elements.append(self.quantum_signature)
+                        security_features_applied["quantum_signature"] = True
+                        logger.debug("Quantum signature applied successfully")
+            except Exception as e:
+                logger.error(f"Quantum signature application failed: {str(e)}")
+                # Continue even if quantum signature fails
+
+            # 5. Apply post-quantum encryption
             try:
                 if not hasattr(crypto_provider, 'kem'):
-                    # Initialize post-quantum components if needed
                     crypto_provider.kem = KeyEncapsulation("Kyber768")
                     crypto_provider.pq_public_key, crypto_provider.pq_secret_key = crypto_provider.kem.generate_keypair()
                 
                 self.pq_cipher = crypto_provider.pq_encrypt(message)
                 if self.pq_cipher:
                     security_elements.append(self.pq_cipher)
-                logger.debug("Post-quantum encryption applied successfully")
+                    security_features_applied["post_quantum"] = True
+                    logger.debug("Post-quantum encryption applied successfully")
             except Exception as e:
                 logger.error(f"Post-quantum encryption failed: {str(e)}")
                 # Continue even if PQ encryption fails
 
-            # 5. Generate base signature
+            # 6. Generate base signature
             try:
                 if not self.signature:
                     if not hasattr(self.wallet, 'private_key'):
@@ -408,6 +758,7 @@ class Transaction(BaseModel):
                     self.signature = base64.b64encode(signature).decode('utf-8')
                     self.public_key = self.wallet.public_key
                     security_elements.append(signature)
+                    security_features_applied["base_signature"] = True
                     logger.debug("Base signature generated successfully")
             except Exception as e:
                 logger.error(f"Base signature generation failed: {str(e)}")
@@ -415,10 +766,7 @@ class Transaction(BaseModel):
 
             # Update transaction hash with all security elements
             try:
-                # Start with the message
                 hash_data = message
-                
-                # Add each security element, converting to bytes if needed
                 for element in security_elements:
                     if isinstance(element, str):
                         hash_data += element.encode()
@@ -430,6 +778,12 @@ class Transaction(BaseModel):
                         hash_data += str(element).encode()
                 
                 self.tx_hash = hashlib.sha256(hash_data).hexdigest()
+                
+                # Store security features status
+                self.security_features = security_features_applied
+                
+                # Log applied security features
+                logger.debug(f"Security features applied: {', '.join([k for k, v in security_features_applied.items() if v])}")
                 logger.debug("Transaction hash updated successfully")
                 return True
                 
@@ -443,49 +797,106 @@ class Transaction(BaseModel):
             logger.error(traceback.format_exc())
             return False
 
-
-    async def verify_enhanced_security(self, crypto_provider: Any) -> bool:
-        """Verify all enhanced security features"""
+    async def verify_enhanced_security(self, crypto_provider: Any, confirmation_system: Optional[DAGConfirmationSystem] = None) -> Dict[str, Any]:
+        """
+        Verify all enhanced security features including confirmation status
+        Returns detailed verification results
+        """
         try:
+            verification_results = {
+                'overall_status': False,
+                'features_verified': {
+                    'zk_proof': False,
+                    'homomorphic': False,
+                    'ring_signature': False,
+                    'quantum_signature': False,
+                    'post_quantum': False,
+                    'base_signature': False,
+                    'confirmation_status': False
+                },
+                'security_metrics': {
+                    'quantum_strength': 0.0,
+                    'confirmation_score': 0.0,
+                    'path_diversity': 0.0,
+                    'consensus_weight': 0.0
+                },
+                'timestamps': {
+                    'verification_time': time.time(),
+                    'last_confirmation': self.confirmation_data.get('last_confirmation_update')
+                }
+            }
+
             message = self._create_message()
             
-            # 1. Verify ZK proof
+            # 1. Enhanced ZK Proof Verification
             if self.zk_proof:
-                public_input = int.from_bytes(hashlib.sha256(message).digest(), byteorder='big')
-                if not crypto_provider.stark.verify(public_input, self.zk_proof):
-                    logger.error("ZK proof verification failed")
-                    return False
+                try:
+                    public_input = int.from_bytes(hashlib.sha256(message).digest(), byteorder='big')
+                    zk_valid = crypto_provider.stark.verify(public_input, self.zk_proof)
+                    verification_results['features_verified']['zk_proof'] = zk_valid
+                    
+                    if not zk_valid:
+                        logger.error("ZK proof verification failed")
+                        return verification_results
+                        
+                except Exception as e:
+                    logger.error(f"ZK proof verification error: {str(e)}")
+                    return verification_results
 
-            # 2. Verify homomorphic amount
+            # 2. Enhanced Homomorphic Amount Verification
             if self.homomorphic_amount:
-                decrypted_amount = await crypto_provider.decrypt_homomorphic(self.homomorphic_amount)
-                expected_amount = int(float(self.amount) * 10**18)
-                if abs(decrypted_amount - expected_amount) > 1000:  # Allow small precision differences
-                    logger.error("Homomorphic amount verification failed")
-                    return False
+                try:
+                    decrypted_amount = await crypto_provider.decrypt_homomorphic(self.homomorphic_amount)
+                    expected_amount = int(float(self.amount) * 10**18)
+                    
+                    # Use more sophisticated comparison with tolerance
+                    tolerance = min(1000, expected_amount * 0.001)  # 0.1% or 1000 wei, whichever is smaller
+                    amount_valid = abs(decrypted_amount - expected_amount) <= tolerance
+                    
+                    verification_results['features_verified']['homomorphic'] = amount_valid
+                    
+                    if not amount_valid:
+                        logger.error(f"Homomorphic amount verification failed. Expected: {expected_amount}, Got: {decrypted_amount}")
+                        return verification_results
+                        
+                except Exception as e:
+                    logger.error(f"Homomorphic verification error: {str(e)}")
+                    return verification_results
 
-            # 3. Verify ring signature
+            # 3. Enhanced Ring Signature Verification
             if self.ring_signature:
-                if not crypto_provider.verify_ring_signature(
-                    message, 
-                    self.ring_signature,
-                    [self.public_key] if self.public_key else []
-                ):
-                    logger.error("Ring signature verification failed")
-                    return False
+                try:
+                    ring_valid = crypto_provider.verify_ring_signature(
+                        message,
+                        self.ring_signature,
+                        [self.public_key] if self.public_key else []
+                    )
+                    verification_results['features_verified']['ring_signature'] = ring_valid
+                    
+                    if not ring_valid:
+                        logger.error("Ring signature verification failed")
+                        return verification_results
+                        
+                except Exception as e:
+                    logger.error(f"Ring signature verification error: {str(e)}")
+                    return verification_results
 
-            # 4. Verify post-quantum encryption
+            # 4. Enhanced Post-Quantum Verification
             if self.pq_cipher:
                 try:
                     decrypted_message = crypto_provider.pq_decrypt(self.pq_cipher)
-                    if decrypted_message != message:
+                    pq_valid = decrypted_message == message
+                    verification_results['features_verified']['post_quantum'] = pq_valid
+                    
+                    if not pq_valid:
                         logger.error("Post-quantum encryption verification failed")
-                        return False
+                        return verification_results
+                        
                 except Exception as e:
-                    logger.error(f"Post-quantum decryption failed: {str(e)}")
-                    return False
+                    logger.error(f"Post-quantum verification error: {str(e)}")
+                    return verification_results
 
-            # 5. Verify base signature
+            # 5. Enhanced Base Signature Verification
             if self.signature and self.public_key:
                 try:
                     public_key = ec.EllipticCurvePublicKey.from_encoded_point(
@@ -497,22 +908,103 @@ class Transaction(BaseModel):
                         message,
                         ec.ECDSA(hashes.SHA256())
                     )
+                    verification_results['features_verified']['base_signature'] = True
                 except Exception as e:
-                    logger.error(f"Base signature verification failed: {str(e)}")
-                    return False
+                    logger.error(f"Base signature verification error: {str(e)}")
+                    return verification_results
 
-            logger.info("All security features verified successfully")
-            return True
+            # 6. Enhanced Confirmation System Verification
+            if confirmation_system:
+                try:
+                    # Get latest block for confirmation checks
+                    latest_block = confirmation_system.get_latest_block()
+                    
+                    # Verify confirmation status
+                    security_info = confirmation_system.get_transaction_security(
+                        self.tx_hash,
+                        latest_block.hash if latest_block else None
+                    )
+                    
+                    # Update security metrics
+                    verification_results['security_metrics'].update({
+                        'confirmation_score': security_info['confirmation_score'],
+                        'quantum_strength': security_info.get('quantum_strength', 0.0),
+                        'path_diversity': security_info.get('path_diversity', 0.0),
+                        'consensus_weight': security_info.get('consensus_weight', 0.0)
+                    })
+                    
+                    # Verify confirmation requirements
+                    confirmation_valid = (
+                        security_info['security_level'] not in ['UNSAFE', 'LOW'] and
+                        security_info['confirmation_score'] >= 0.6 and
+                        security_info['num_confirmations'] >= 3
+                    )
+                    
+                    verification_results['features_verified']['confirmation_status'] = confirmation_valid
+                    
+                    if not confirmation_valid:
+                        logger.warning(
+                            f"Confirmation verification warning:"
+                            f"\n\tSecurity Level: {security_info['security_level']}"
+                            f"\n\tConfirmation Score: {security_info['confirmation_score']}"
+                            f"\n\tConfirmations: {security_info['num_confirmations']}"
+                        )
+                    
+                except Exception as e:
+                    logger.error(f"Confirmation system verification error: {str(e)}")
+                    return verification_results
+
+            # Calculate overall verification status
+            required_features = {
+                'zk_proof': True,
+                'base_signature': True,
+                'confirmation_status': bool(confirmation_system)
+            }
+            
+            optional_features = {
+                'homomorphic': bool(self.homomorphic_amount),
+                'ring_signature': bool(self.ring_signature),
+                'quantum_signature': bool(self.quantum_signature),
+                'post_quantum': bool(self.pq_cipher)
+            }
+            
+            # Check if all required features are verified
+            required_verified = all(
+                verification_results['features_verified'][feature]
+                for feature, required in required_features.items()
+                if required
+            )
+            
+            # Check if all present optional features are verified
+            optional_verified = all(
+                not required or verification_results['features_verified'][feature]
+                for feature, required in optional_features.items()
+            )
+            
+            verification_results['overall_status'] = required_verified and optional_verified
+            
+            if verification_results['overall_status']:
+                logger.info(
+                    f"Enhanced security verification successful for transaction {self.tx_hash}"
+                    f"\n\tConfirmation Score: {verification_results['security_metrics']['confirmation_score']:.4f}"
+                    f"\n\tQuantum Strength: {verification_results['security_metrics']['quantum_strength']:.4f}"
+                    f"\n\tFeatures Verified: {sum(verification_results['features_verified'].values())}"
+                )
+            else:
+                logger.error(f"Enhanced security verification failed for transaction {self.tx_hash}")
+                
+            return verification_results
 
         except Exception as e:
             logger.error(f"Security verification failed: {str(e)}")
             logger.error(traceback.format_exc())
-            return False
+            return verification_results
 
 
     def to_dict(self) -> dict:
-        """Convert transaction to dictionary with proper encoding"""
+        """Convert transaction to dictionary with enhanced security features and confirmation data"""
         try:
+            # Basic transaction data with validation
             data = {
                 "id": self.id,
                 "sender": self.sender,
@@ -524,44 +1016,151 @@ class Transaction(BaseModel):
                 "public_key": self.public_key,
                 "signature": self.signature,
                 "tx_hash": self.tx_hash,
-                "timestamp": self.timestamp
+                "timestamp": self.timestamp,
+                "confirmations": self.confirmations
             }
 
-            # Handle ZK proof
-            if self.zk_proof is not None:
-                if isinstance(self.zk_proof, str):
-                    data["zk_proof"] = self.zk_proof
-                else:
-                    data["zk_proof"] = base64.b64encode(
-                        str(self.zk_proof).encode()
-                    ).decode()
+            # Enhanced confirmation data - return actual collections instead of lengths
+            data["confirmation_data"] = {
+                "status": {
+                    "confirmation_score": float(self.confirmation_data.status.confirmation_score),
+                    "security_level": self.confirmation_data.status.security_level,
+                    "last_update": self.confirmation_data.status.last_update,
+                    "is_final": self.confirmation_data.status.is_final
+                },
+                "metrics": {
+                    "path_diversity": float(self.confirmation_data.metrics.path_diversity),
+                    "quantum_strength": float(self.confirmation_data.metrics.quantum_strength),
+                    "consensus_weight": float(self.confirmation_data.metrics.consensus_weight),
+                    "depth_score": float(self.confirmation_data.metrics.depth_score)
+                },
+                "paths": {
+                    "confirmation_paths": list(self.confirmation_data.paths.confirmation_paths),  # Return actual list
+                    "confirming_blocks": list(self.confirmation_data.paths.confirming_blocks),   # Convert set to list
+                    "quantum_confirmations": dict(self.confirmation_data.paths.quantum_confirmations)  # Return actual dict
+                }
+            }
 
-            # Handle binary data
-            if self.homomorphic_amount is not None:
-                data["homomorphic_amount"] = base64.b64encode(
-                    self.homomorphic_amount
-                ).decode()
+            # Handle binary fields
+            binary_fields = {
+                "zk_proof": self.zk_proof,
+                "homomorphic_amount": self.homomorphic_amount,
+                "ring_signature": self.ring_signature,
+                "quantum_signature": self.quantum_signature,
+                "pq_cipher": self.pq_cipher
+            }
 
-            if self.ring_signature is not None:
-                data["ring_signature"] = base64.b64encode(
-                    self.ring_signature
-                ).decode()
+            for field_name, field_value in binary_fields.items():
+                if field_value is not None:
+                    try:
+                        if isinstance(field_value, bytes):
+                            data[field_name] = base64.b64encode(field_value).decode()
+                        elif isinstance(field_value, str):
+                            try:
+                                base64.b64decode(field_value)
+                                data[field_name] = field_value
+                            except:
+                                data[field_name] = base64.b64encode(
+                                    field_value.encode()
+                                ).decode()
+                        else:
+                            data[field_name] = base64.b64encode(
+                                str(field_value).encode()
+                            ).decode()
+                    except Exception as e:
+                        logger.error(f"Error encoding {field_name}: {str(e)}")
+                        data[field_name] = None
 
-            if self.quantum_signature is not None:
-                data["quantum_signature"] = base64.b64encode(
-                    self.quantum_signature
-                ).decode()
+            # Add security features status
+            data["security_features"] = {
+                "cryptographic": {
+                    "zk_proof": bool(self.zk_proof),
+                    "homomorphic": bool(self.homomorphic_amount),
+                    "ring_signature": bool(self.ring_signature),
+                    "quantum_signature": bool(self.quantum_signature),
+                    "post_quantum": bool(self.pq_cipher),
+                    "base_signature": bool(self.signature)
+                },
+                "confirmation": {
+                    "has_confirmations": self.confirmations > 0,
+                    "meets_minimum_depth": self.confirmations >= 6,
+                    "is_quantum_verified": bool(self.confirmation_data.paths.quantum_confirmations),
+                    "has_multiple_paths": len(self.confirmation_data.paths.confirmation_paths) > 1
+                },
+                "validation": {
+                    "timestamp_valid": abs(time.time() - self.timestamp) < 86400,
+                    "amount_valid": float(self.amount) > 0,
+                    "signature_valid": bool(self.signature and self.public_key)
+                }
+            }
 
-            if self.pq_cipher is not None:
-                data["pq_cipher"] = base64.b64encode(
-                    self.pq_cipher
-                ).decode()
+            # Add metadata
+            data["metadata"] = {
+                "version": "2.0",
+                "serialization_timestamp": time.time(),
+                "features_version": {
+                    "confirmation": "1.0",
+                    "security": "2.0",
+                    "quantum": "1.0"
+                }
+            }
 
             return data
 
         except Exception as e:
             logger.error(f"Error converting transaction to dict: {str(e)}")
+            logger.error(traceback.format_exc())
             raise ValueError(f"Failed to convert transaction to dictionary: {str(e)}")
+
+
+    def initialize_confirmation_data(self) -> None:
+        """Initialize confirmation data with proper empty collections"""
+        if not hasattr(self, 'confirmation_data') or self.confirmation_data is None:
+            self.confirmation_data = ConfirmationData(
+                status=ConfirmationStatus(
+                    confirmation_score=0.0,
+                    security_level="UNSAFE",
+                    last_update=None,
+                    is_final=False
+                ),
+                metrics=ConfirmationMetrics(
+                    path_diversity=0.0,
+                    quantum_strength=0.0,
+                    consensus_weight=0.0,
+                    depth_score=0.0
+                ),
+                paths=ConfirmationPaths(
+                    confirmation_paths=[],
+                    confirming_blocks=set(),
+                    quantum_confirmations={}
+                )
+            )
+
+
+    def update_confirmation_metrics(self, 
+                                  path_diversity: Optional[float] = None,
+                                  quantum_strength: Optional[float] = None,
+                                  consensus_weight: Optional[float] = None,
+                                  depth_score: Optional[float] = None) -> None:
+        """Update confirmation metrics with new values"""
+        if path_diversity is not None:
+            self.confirmation_data.metrics.path_diversity = path_diversity
+        if quantum_strength is not None:
+            self.confirmation_data.metrics.quantum_strength = quantum_strength
+        if consensus_weight is not None:
+            self.confirmation_data.metrics.consensus_weight = consensus_weight
+        if depth_score is not None:
+            self.confirmation_data.metrics.depth_score = depth_score
+        
+        # Update status
+        self.confirmation_data.status.last_update = time.time()
+        self.confirmation_data.status.is_final = (
+            self.confirmation_data.metrics.quantum_strength >= 0.95 and
+            self.confirmation_data.metrics.path_diversity >= 0.8 and
+            self.confirmations >= 6
+        )
+
+
     def get_security_features(self) -> dict:
         """Get the status of all security features"""
         return {
@@ -585,64 +1184,156 @@ class Transaction(BaseModel):
 
     @classmethod
     def from_dict(cls, data: dict) -> 'Transaction':
-        """Create a Transaction instance from a dictionary with proper type conversion"""
+        """Create a Transaction instance from a dictionary"""
         try:
             decoded_data = data.copy()
+            
+            # Handle confirmation data
+            confirmation_data = decoded_data.pop('confirmation_data', {})
+            
+            # Process status data
+            status_data = confirmation_data.get('status', {})
+            status = ConfirmationStatus(
+                confirmation_score=float(status_data.get('confirmation_score', 0.0)),
+                security_level=status_data.get('security_level', 'UNSAFE'),
+                last_update=status_data.get('last_update'),
+                is_final=status_data.get('is_final', False)
+            )
 
-            # Convert decimal strings
-            if 'amount' in decoded_data:
-                decoded_data['amount'] = Decimal(str(decoded_data['amount']))
-            if 'price' in decoded_data:
-                decoded_data['price'] = Decimal(str(decoded_data['price']))
+            # Process metrics data
+            metrics_data = confirmation_data.get('metrics', {})
+            metrics = ConfirmationMetrics(
+                path_diversity=float(metrics_data.get('path_diversity', 0.0)),
+                quantum_strength=float(metrics_data.get('quantum_strength', 0.0)),
+                consensus_weight=float(metrics_data.get('consensus_weight', 0.0)),
+                depth_score=float(metrics_data.get('depth_score', 0.0))
+            )
 
-            # Handle binary data
-            if 'homomorphic_amount' in decoded_data and decoded_data['homomorphic_amount']:
-                if isinstance(decoded_data['homomorphic_amount'], str):
-                    decoded_data['homomorphic_amount'] = base64.b64decode(
-                        decoded_data['homomorphic_amount']
-                    )
+            # Process paths data - ensure proper collection types
+            paths_data = confirmation_data.get('paths', {})
+            paths = ConfirmationPaths(
+                confirmation_paths=list(paths_data.get('confirmation_paths', [])) if isinstance(paths_data.get('confirmation_paths'), (list, set, tuple)) else [],
+                confirming_blocks=set(paths_data.get('confirming_blocks', [])) if isinstance(paths_data.get('confirming_blocks'), (list, set, tuple)) else set(),
+                quantum_confirmations=dict(paths_data.get('quantum_confirmations', {})) if isinstance(paths_data.get('quantum_confirmations'), dict) else {}
+            )
 
-            # Handle ring signature
-            if 'ring_signature' in decoded_data and decoded_data['ring_signature']:
-                if isinstance(decoded_data['ring_signature'], str):
-                    decoded_data['ring_signature'] = base64.b64decode(
-                        decoded_data['ring_signature']
-                    )
+            # Create complete confirmation data
+            decoded_data['confirmation_data'] = ConfirmationData(
+                status=status,
+                metrics=metrics,
+                paths=paths
+            )
 
-            # Handle quantum signature
-            if 'quantum_signature' in decoded_data and decoded_data['quantum_signature']:
-                if isinstance(decoded_data['quantum_signature'], str):
-                    decoded_data['quantum_signature'] = base64.b64decode(
-                        decoded_data['quantum_signature']
-                    )
-
-            # Handle pq cipher
-            if 'pq_cipher' in decoded_data and decoded_data['pq_cipher']:
-                if isinstance(decoded_data['pq_cipher'], str):
-                    decoded_data['pq_cipher'] = base64.b64decode(
-                        decoded_data['pq_cipher']
-                    )
-
-            # Handle ZK proof
-            if 'zk_proof' in decoded_data and decoded_data['zk_proof']:
-                if isinstance(decoded_data['zk_proof'], str):
+            # Process decimal values
+            for decimal_field in ['amount', 'price']:
+                if decimal_field in decoded_data:
                     try:
-                        decoded = base64.b64decode(decoded_data['zk_proof']).decode()
-                        decoded_data['zk_proof'] = eval(decoded)  # Convert to tuple
-                    except:
-                        # Keep as string if conversion fails
-                        pass
+                        value = str(decoded_data[decimal_field])
+                        decoded_data[decimal_field] = Decimal(value)
+                    except Exception as e:
+                        logger.error(f"Error converting {decimal_field} to Decimal: {str(e)}")
+                        raise ValueError(f"Invalid {decimal_field} format")
 
-            return cls(**decoded_data)
+            # Process binary fields
+            binary_fields = {
+                'homomorphic_amount': {'required': False, 'max_size': 1024},
+                'ring_signature': {'required': False, 'max_size': 2048},
+                'quantum_signature': {'required': False, 'max_size': 1024},
+                'pq_cipher': {'required': False, 'max_size': 4096}
+            }
+
+            for field, constraints in binary_fields.items():
+                if field in decoded_data and decoded_data[field]:
+                    try:
+                        if isinstance(decoded_data[field], str):
+                            decoded_value = base64.b64decode(decoded_data[field])
+                        elif isinstance(decoded_data[field], bytes):
+                            decoded_value = decoded_data[field]
+                        else:
+                            decoded_value = base64.b64decode(
+                                base64.b64encode(str(decoded_data[field]).encode())
+                            )
+                        
+                        if len(decoded_value) > constraints['max_size']:
+                            raise ValueError(f"{field} exceeds maximum size of {constraints['max_size']} bytes")
+                        
+                        decoded_data[field] = decoded_value
+                        
+                    except Exception as e:
+                        logger.error(f"Error decoding {field}: {str(e)}")
+                        if constraints['required']:
+                            raise ValueError(f"Required field {field} failed to decode")
+                        decoded_data[field] = None
+
+            # Create instance with validated data
+            instance = cls(**decoded_data)
+            
+            # Validate the created instance
+            try:
+                instance.validate_transaction()
+            except Exception as e:
+                logger.error(f"Transaction validation failed: {str(e)}")
+                raise ValueError(f"Invalid transaction data: {str(e)}")
+
+            return instance
 
         except Exception as e:
             logger.error(f"Error creating transaction from dict: {str(e)}")
+            logger.error(traceback.format_exc())
             raise ValueError(f"Failed to create transaction from dictionary: {str(e)}")
 
 
+    def validate_transaction(self) -> bool:
+        """Validate transaction data"""
+        try:
+            # Validate basic fields
+            if not self.id or not self.sender or not self.receiver:
+                raise ValueError("Missing required fields")
 
-    class Config:
-        arbitrary_types_allowed = True
+            # Validate amounts
+            if self.amount <= 0 or self.price < 0:
+                raise ValueError("Invalid amount or price")
+
+            # Validate confirmation data
+            if not isinstance(self.confirmation_data, ConfirmationData):
+                raise ValueError("Invalid confirmation data type")
+
+            # Validate paths collections
+            if not isinstance(self.confirmation_data.paths.confirmation_paths, list):
+                self.confirmation_data.paths.confirmation_paths = []
+                
+            if not isinstance(self.confirmation_data.paths.confirming_blocks, set):
+                self.confirmation_data.paths.confirming_blocks = set()
+                
+            if not isinstance(self.confirmation_data.paths.quantum_confirmations, dict):
+                self.confirmation_data.paths.quantum_confirmations = {}
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Transaction validation error: {str(e)}")
+            raise ValueError(f"Transaction validation failed: {str(e)}")
+
+    @classmethod
+    def default_confirmation_data(cls) -> dict:
+        """Provide default confirmation data structure"""
+        return {
+            'confirmation_score': 0.0,
+            'security_level': 'UNSAFE',
+            'last_confirmation_update': None,
+            'confirmation_metrics': {
+                'path_diversity': 0.0,
+                'quantum_strength': 0.0,
+                'consensus_weight': 0.0,
+                'depth_score': 0.0
+            },
+            'confirmation_paths': [],
+            'confirming_blocks': set(),
+            'quantum_confirmations': {}
+        }
+
+
+    
 
 class QuantumBlock:
     def __init__(
@@ -668,7 +1359,6 @@ class QuantumBlock:
         self.dag_parents = parent_hashes[1:] if len(parent_hashes) > 1 else []
         self.timestamp = timestamp or time.time()
         self.hash = None  # Initialize the hash as None
-        logger.debug(f"Initialized QuantumBlock: {self.to_dict()}")
 
 
     def to_dict(self):
@@ -699,7 +1389,6 @@ class QuantumBlock:
             "nonce": self.nonce
         }
         block_string = json.dumps(block_data, sort_keys=True, default=decimal_default)
-        logger.debug(f"Computing hash for block data: {block_string}")
         return hashlib.sha256(block_string.encode()).hexdigest()
 
     def is_valid(self):

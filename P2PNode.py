@@ -94,7 +94,20 @@ import urllib.parse
 import os
 from dotenv import load_dotenv
 import aiohttp
-
+import socket
+import systemd.daemon
+import systemd.journal
+import socket
+import fcntl
+import struct
+import os
+import pwd
+import grp
+from typing import Dict, Optional
+import subprocess
+import asyncio
+import logging
+from typing import Optional
 load_dotenv()
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -128,6 +141,7 @@ class ComputationTask:
     kwargs: Dict[str, Any]
     result: Any = None
     status: str = "pending"
+
 
 class DistributedComputationSystem:
     def __init__(self, node: 'P2PNode'):
@@ -276,17 +290,40 @@ class MessageType(Enum):
     BLOCK_PROPOSAL = "block_proposal"
     FULL_BLOCK_REQUEST = "full_block_request"
     BLOCK_ACCEPTANCE = "block_acceptance"
-    FULL_BLOCK_RESPONSE = "full_block_response"  
-    NEW_WALLET = "new_wallet"  
+    FULL_BLOCK_RESPONSE = "full_block_response"
+    NEW_WALLET = "new_wallet"
     GET_ALL_DATA = "get_all_data"
     ALL_DATA = "all_data"
     SYNC_REQUEST = "sync_request"
     SYNC_RESPONSE = "sync_response"
     SYNC_DATA = "sync_data"
     SYNC_STATUS = "sync_status"
+    # Add quantum-related message types
+    QUANTUM_STATE_UPDATE = "quantum_state_update"
+    QUANTUM_STATE_VERIFICATION = "quantum_state_verification"
+    QUANTUM_ENTANGLEMENT_REQUEST = "quantum_entanglement_request"
+    QUANTUM_ENTANGLEMENT_RESPONSE = "quantum_entanglement_response"
+    QUANTUM_RESYNC_REQUEST = "quantum_resync_request"
+    QUANTUM_RESYNC_RESPONSE = "quantum_resync_response"
+    QUANTUM_HEARTBEAT = "quantum_heartbeat"
+    QUANTUM_HEARTBEAT_RESPONSE = "quantum_heartbeat_response"
+    QUANTUM_ALERT = "quantum_alert"
+    CONSENSUS_INITIALIZE = "consensus_initialize"
+    CONSENSUS_SUBMIT = "consensus_submit"
+    CONSENSUS_METRICS = "consensus_metrics"
+    CONSENSUS_STATUS = "consensus_status"
 
-class SyncComponent:
-    """Represents a component that can be synced"""
+
+    def __str__(self):
+        return self.value
+
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return self.value.lower() == other.lower()
+        return super().__eq__(other)
+
+
+class SyncComponent(Enum):
     WALLETS = "wallets"
     TRANSACTIONS = "transactions"
     BLOCKS = "blocks"
@@ -300,39 +337,116 @@ class SyncStatus:
         self.is_syncing = False
         self.sync_progress = 0
         self.last_validated = time.time()
-
+        self.retry_count = 0
+        self.peers_synced = set()
 from dataclasses import dataclass, field, asdict
 import json
 import time
 from typing import Optional
 import uuid
+
 @dataclass
 class Message:
     type: str
     payload: dict = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     sender: Optional[str] = None
-    receiver: Optional[str] = None  # Added receiver field
+    receiver: Optional[str] = None  
     challenge_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))  # Add this line
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def __post_init__(self):
+        """Normalize message type after initialization"""
+        if self.type:
+            self.type = str(self.type).lower().strip()
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self))
+        """Convert message to JSON string with normalized type"""
+        data = asdict(self)
+        # Ensure type is normalized
+        if data['type']:
+            data['type'] = str(data['type']).lower().strip()
+        return json.dumps(data)
     
     @classmethod
     def from_json(cls, json_str: str) -> 'Message':
-        data = json.loads(json_str)
-        # Ensure 'payload' is present in the data, otherwise provide a default value
-        if 'payload' not in data:
-            data['payload'] = {}
-        return cls(
-            type=data.get('type', ""),
-            payload=data.get('payload', {}),
-            timestamp=data.get('timestamp', time.time()),
-            sender=data.get('sender', None),
-            receiver=data.get('receiver', None),  # Handle receiver
-            challenge_id=data.get('challenge_id', str(uuid.uuid4()))
+        """Create message from JSON string with proper type handling"""
+        try:
+            data = json.loads(json_str)
+            
+            # Normalize message type
+            if 'type' in data:
+                data['type'] = str(data['type']).lower().strip()
+            
+            # Ensure required fields with defaults
+            processed_data = {
+                'type': data.get('type', "").lower().strip(),
+                'payload': data.get('payload', {}),
+                'timestamp': data.get('timestamp', time.time()),
+                'sender': data.get('sender', None),
+                'receiver': data.get('receiver', None),
+                'challenge_id': data.get('challenge_id', str(uuid.uuid4())),
+                'id': data.get('id', str(uuid.uuid4()))
+            }
+            
+            return cls(**processed_data)
+            
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON format: {str(e)}")
+        except Exception as e:
+            raise ValueError(f"Error creating message: {str(e)}")
+
+    @property
+    def message_type(self) -> str:
+        """Get normalized message type"""
+        return str(self.type).lower().strip()
+
+    def is_type(self, type_str: str) -> bool:
+        """Check if message is of specific type (case-insensitive)"""
+        return self.message_type == str(type_str).lower().strip()
+
+    def is_challenge(self) -> bool:
+        """Check if message is a challenge message"""
+        return self.is_type("challenge")
+
+    def is_challenge_response(self) -> bool:
+        """Check if message is a challenge response"""
+        return self.is_type("challenge_response")
+
+    def is_public_key_exchange(self) -> bool:
+        """Check if message is a public key exchange"""
+        return self.is_type("public_key_exchange")
+        
+@dataclass
+class TransactionState:
+    tx_hash: str
+    timestamp: float
+    status: str
+    propagation_count: int
+    received_by: Set[str]
+    confirmed_by: Set[str]
+
+class TransactionTracker:
+    def __init__(self):
+        self.transactions: Dict[str, TransactionState] = {}
+        
+    def add_transaction(self, tx_hash: str, sender: str):
+        self.transactions[tx_hash] = TransactionState(
+            tx_hash=tx_hash,
+            timestamp=time.time(),
+            status="pending",
+            propagation_count=0,
+            received_by={sender},
+            confirmed_by=set()
         )
+        
+    def update_transaction(self, tx_hash: str, peer: str, status: str = None):
+        if tx_hash in self.transactions:
+            tx_state = self.transactions[tx_hash]
+            tx_state.received_by.add(peer)
+            if status:
+                tx_state.status = status
+            tx_state.propagation_count += 1
 class SyncState:
     """Helper class to track sync state"""
     def __init__(self):
@@ -344,331 +458,1609 @@ class SyncState:
         self.retry_count = 0
         self.peers_synced = set()
 
-def extend_p2p_node():
-    """Extend P2PNode with enhanced sync functionality"""
-    
-    # Add new attributes to P2PNode.__init__
-    original_init = P2PNode.__init__
-    
-    def enhanced_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        
-        # Initialize sync tracking
-        self.sync_states = {
-            'wallets': SyncState(),
-            'transactions': SyncState(),
-            'blocks': SyncState()
+@dataclass
+class QuantumHeartbeat:
+    """Quantum heartbeat data structure"""
+    node_id: str
+    timestamp: float
+    quantum_states: Dict[str, complex]
+    fidelities: Dict[str, float]
+    bell_pair_id: str
+    nonce: str
+    signature: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            'node_id': self.node_id,
+            'timestamp': self.timestamp,
+            'quantum_states': {
+                k: {'real': v.real, 'imag': v.imag}
+                for k, v in self.quantum_states.items()
+            },
+            'fidelities': self.fidelities,
+            'bell_pair_id': self.bell_pair_id,
+            'nonce': self.nonce,
+            'signature': self.signature
         }
-        
-        # Enhanced heartbeat tracking
-        self.last_heartbeat_data = {}
-        self.sync_queue = asyncio.Queue()
-        self.sync_in_progress = False
-        
-    P2PNode.__init__ = enhanced_init
 
-    # Add enhanced heartbeat methods
-    async def send_enhanced_heartbeat(self, peer: str):
-        """Send enhanced heartbeat with sync information"""
+    @classmethod
+    def from_dict(cls, data: dict) -> 'QuantumHeartbeat':
+        quantum_states = {
+            k: complex(v['real'], v['imag'])
+            for k, v in data['quantum_states'].items()
+        }
+        return cls(
+            node_id=data['node_id'],
+            timestamp=data['timestamp'],
+            quantum_states=quantum_states,
+            fidelities=data['fidelities'],
+            bell_pair_id=data['bell_pair_id'],
+            nonce=data['nonce'],
+            signature=data.get('signature')
+        )
+from dataclasses import dataclass, field
+from typing import Dict, List, Set, Optional
+from enum import Enum
+import numpy as np
+import asyncio
+import hashlib
+import time
+import logging
+from collections import defaultdict
+
+class QuantumState(Enum):
+    """Quantum states for node synchronization"""
+    SUPERPOSITION = "SUPERPOSITION"  # Initial state while gathering data
+    ENTANGLED = "ENTANGLED"         # Synchronized with peers
+    COLLAPSED = "COLLAPSED"         # Local state verified
+    DECOHERENT = "DECOHERENT"      # Out of sync
+
+@dataclass
+class QubitState:
+    """Represents a quantum state for synchronization"""
+    value: complex
+    peers: Set[str] = field(default_factory=set)
+    timestamp: float = field(default_factory=time.time)
+    fidelity: float = 1.0
+
+@dataclass
+class QuantumRegister:
+    """Quantum register for storing entangled states"""
+    wallets: QubitState = field(default_factory=lambda: QubitState(complex(1, 0)))
+    transactions: QubitState = field(default_factory=lambda: QubitState(complex(1, 0)))
+    blocks: QubitState = field(default_factory=lambda: QubitState(complex(1, 0)))
+    mempool: QubitState = field(default_factory=lambda: QubitState(complex(1, 0)))
+
+class QuantumEntangledSync:
+    """
+    Implements quantum-inspired synchronization between P2P nodes
+    """
+    def __init__(self, node_id: str, decoherence_threshold: float = 0.8):
+        self.node_id = node_id
+        self.decoherence_threshold = decoherence_threshold
+        self.register = QuantumRegister()
+        self.state = QuantumState.SUPERPOSITION
+        self.entangled_peers: Dict[str, QuantumRegister] = {}
+        self.logger = logging.getLogger("QuantumEntangledSync")
+        self.bell_pairs: Dict[str, List[complex]] = defaultdict(list)
+
+    async def initialize_quantum_state(self, initial_data: dict):
+        """Initialize quantum state with node data"""
         try:
-            heartbeat_data = {
-                'timestamp': time.time(),
-                'node_state': await self.get_node_state_data(),
-                'sync_status': await self.get_sync_status(),
-                'chain_height': len(self.blockchain.chain) if self.blockchain else 0,
-                'mempool_size': len(self.blockchain.mempool) if self.blockchain else 0
-            }
-
-            message = Message(
-                type=MessageType.HEARTBEAT.value,
-                payload={
-                    'heartbeat': heartbeat_data,
-                    'sync_request': await self.check_sync_needs()
-                }
-            )
-            await self.send_message(peer, message)
-            self.logger.debug(f"Enhanced heartbeat sent to {peer}")
-
+            # Create quantum state from node data
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                data_hash = hashlib.sha256(str(initial_data.get(component, '')).encode()).digest()
+                # Convert hash to complex number for quantum state
+                real = int.from_bytes(data_hash[:16], 'big') / 2**128
+                imag = int.from_bytes(data_hash[16:], 'big') / 2**128
+                setattr(self.register, component, QubitState(complex(real, imag)))
+            
+            self.state = QuantumState.SUPERPOSITION
+            self.logger.info(f"Initialized quantum state for node {self.node_id}")
+            
         except Exception as e:
-            self.logger.error(f"Error sending enhanced heartbeat to {peer}: {str(e)}")
+            self.logger.error(f"Error initializing quantum state: {str(e)}")
+            raise
 
-    P2PNode.send_enhanced_heartbeat = send_enhanced_heartbeat
-
-    async def handle_enhanced_heartbeat(self, peer: str, data: dict):
-        """Handle incoming enhanced heartbeat messages"""
+    async def entangle_with_peer(self, peer_id: str, peer_data: dict):
+        """Create quantum entanglement with a peer node"""
         try:
-            # Update peer's last seen time
-            self.last_heartbeat_data[peer] = data
+            # Generate Bell pair for entanglement
+            bell_pair = self._generate_bell_pair()
+            self.bell_pairs[peer_id] = bell_pair
             
-            # Check for sync needs
-            if 'sync_request' in data:
-                await self.handle_sync_request(peer, data['sync_request'])
+            # Create entangled quantum register
+            peer_register = QuantumRegister()
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                qubit = getattr(self.register, component)
+                # Apply quantum entanglement operation
+                entangled_state = self._entangle_states(qubit.value, bell_pair)
+                peer_qubit = QubitState(entangled_state)
+                peer_qubit.peers.add(peer_id)
+                setattr(peer_register, component, peer_qubit)
             
-            # Compare states and trigger sync if needed
-            peer_state = data['node_state']
-            await self.check_and_trigger_sync(peer, peer_state)
+            self.entangled_peers[peer_id] = peer_register
+            self.state = QuantumState.ENTANGLED
+            
+            self.logger.info(f"Established quantum entanglement with peer {peer_id}")
+            return peer_register
             
         except Exception as e:
-            self.logger.error(f"Error handling enhanced heartbeat from {peer}: {str(e)}")
+            self.logger.error(f"Error entangling with peer {peer_id}: {str(e)}")
+            raise
 
-    P2PNode.handle_enhanced_heartbeat = handle_enhanced_heartbeat
+    def _generate_bell_pair(self) -> List[complex]:
+        """Generate a Bell pair for quantum entanglement"""
+        # Create maximally entangled Bell state |Φ+⟩ = (|00⟩ + |11⟩)/√2
+        return [complex(1/np.sqrt(2), 0), complex(0, 0), 
+                complex(0, 0), complex(1/np.sqrt(2), 0)]
 
-    # Add sync management methods
-    async def check_sync_needs(self):
-        """Check what data needs to be synced"""
+    def _entangle_states(self, state1: complex, bell_pair: List[complex]) -> complex:
+        """Entangle two quantum states using Bell pair"""
+        # Simulate quantum entanglement using Bell state
+        return (state1 * bell_pair[0] + state1.conjugate() * bell_pair[3]) / np.sqrt(2)
+
+    async def measure_sync_state(self, component: str) -> float:
+        """Measure the synchronization state of a component"""
         try:
-            sync_needs = {
-                'wallets': False,
-                'transactions': False,
-                'blocks': False
-            }
+            qubit = getattr(self.register, component)
+            if not qubit.peers:
+                return 1.0
+
+            fidelities = []
+            for peer_id in qubit.peers:
+                if peer_id in self.entangled_peers:
+                    peer_register = self.entangled_peers[peer_id]
+                    peer_qubit = getattr(peer_register, component)
+                    # Calculate quantum state fidelity
+                    fidelity = self._calculate_fidelity(qubit.value, peer_qubit.value)
+                    fidelities.append(fidelity)
+
+            avg_fidelity = np.mean(fidelities) if fidelities else 1.0
+            qubit.fidelity = avg_fidelity
+
+            if avg_fidelity < self.decoherence_threshold:
+                self.state = QuantumState.DECOHERENT
+                self.logger.warning(f"Decoherence detected in {component}")
             
-            for component, state in self.sync_states.items():
-                if time.time() - state.last_update > 60:  # Check every minute
-                    sync_needs[component] = True
+            return avg_fidelity
+            
+        except Exception as e:
+            self.logger.error(f"Error measuring sync state: {str(e)}")
+            return 0.0
+
+    def _calculate_fidelity(self, state1: complex, state2: complex) -> float:
+        """Calculate quantum state fidelity between two states"""
+        return abs(state1.conjugate() * state2)
+
+    async def update_component_state(self, component: str, new_data: dict):
+        """Update quantum state for a component with new data"""
+        try:
+            # Calculate new quantum state
+            data_hash = hashlib.sha256(str(new_data).encode()).digest()
+            real = int.from_bytes(data_hash[:16], 'big') / 2**128
+            imag = int.from_bytes(data_hash[16:], 'big') / 2**128
+            new_state = complex(real, imag)
+
+            # Update local register
+            qubit = getattr(self.register, component)
+            qubit.value = new_state
+            qubit.timestamp = time.time()
+
+            # Propagate change to entangled peers
+            update_tasks = []
+            for peer_id, peer_register in self.entangled_peers.items():
+                if peer_id in self.bell_pairs:
+                    bell_pair = self.bell_pairs[peer_id]
+                    entangled_state = self._entangle_states(new_state, bell_pair)
+                    peer_qubit = getattr(peer_register, component)
+                    peer_qubit.value = entangled_state
+                    update_tasks.append(self._notify_peer_update(peer_id, component))
+
+            if update_tasks:
+                await asyncio.gather(*update_tasks)
+                self.logger.info(f"Updated quantum state for {component} across {len(update_tasks)} peers")
+            
+        except Exception as e:
+            self.logger.error(f"Error updating component state: {str(e)}")
+            raise
+
+    async def _notify_peer_update(self, peer_id: str, component: str):
+        """Notify peer of state update"""
+        # This would be implemented to send actual network messages
+        pass
+
+    async def verify_global_consensus(self) -> bool:
+        """Verify quantum consensus across all components"""
+        try:
+            consensus = True
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                fidelity = await self.measure_sync_state(component)
+                if fidelity < self.decoherence_threshold:
+                    consensus = False
+                    break
+
+            if consensus:
+                self.state = QuantumState.COLLAPSED
+                self.logger.info("Global quantum consensus verified")
+            else:
+                self.state = QuantumState.DECOHERENT
+                self.logger.warning("Global quantum consensus failed")
+
+            return consensus
+            
+        except Exception as e:
+            self.logger.error(f"Error verifying global consensus: {str(e)}")
+            return False
+
+    async def monitor_quantum_state(self, interval: float = 1.0):
+        """Continuously monitor quantum state and trigger resync if needed"""
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                consensus = await self.verify_global_consensus()
+                
+                if not consensus:
+                    components_to_sync = []
+                    for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                        fidelity = await self.measure_sync_state(component)
+                        if fidelity < self.decoherence_threshold:
+                            components_to_sync.append(component)
                     
-            return sync_needs
-            
-        except Exception as e:
-            self.logger.error(f"Error checking sync needs: {str(e)}")
-            return {}
-
-    P2PNode.check_sync_needs = check_sync_needs
-
-    async def check_and_trigger_sync(self, peer: str, peer_state: dict):
-        """Compare states and trigger sync if needed"""
-        try:
-            # Check blockchain height
-            local_height = len(self.blockchain.chain) if self.blockchain else 0
-            peer_height = peer_state.get('blockchain_height', 0)
-            
-            if peer_height > local_height:
-                await self.queue_sync_operation(peer, 'blocks')
-            
-            # Check wallet differences
-            local_wallet_hash = await self.calculate_wallet_hash()
-            peer_wallet_hash = peer_state.get('wallet_hash')
-            
-            if peer_wallet_hash and peer_wallet_hash != local_wallet_hash:
-                await self.queue_sync_operation(peer, 'wallets')
-            
-            # Check transaction differences
-            local_tx_hash = await self.calculate_transaction_hash()
-            peer_tx_hash = peer_state.get('transaction_hash')
-            
-            if peer_tx_hash and peer_tx_hash != local_tx_hash:
-                await self.queue_sync_operation(peer, 'transactions')
-                
-        except Exception as e:
-            self.logger.error(f"Error checking and triggering sync with {peer}: {str(e)}")
-
-    P2PNode.check_and_trigger_sync = check_and_trigger_sync
-
-    async def queue_sync_operation(self, peer: str, component: str):
-        """Queue a sync operation"""
-        try:
-            if not self.sync_states[component].in_progress:
-                await self.sync_queue.put({
-                    'peer': peer,
-                    'component': component,
-                    'timestamp': time.time()
-                })
-                self.sync_states[component].in_progress = True
-                self.sync_states[component].last_attempt = time.time()
-                
-        except Exception as e:
-            self.logger.error(f"Error queuing sync operation: {str(e)}")
-
-    P2PNode.queue_sync_operation = queue_sync_operation
-
-    # Add main sync processing loop
-    async def process_sync_queue(self):
-        """Process queued sync operations"""
-        while True:
-            try:
-                if not self.sync_queue.empty():
-                    sync_op = await self.sync_queue.get()
-                    await self.perform_sync_operation(sync_op)
-                await asyncio.sleep(1)
+                    if components_to_sync:
+                        self.logger.warning(f"Quantum resync needed for: {components_to_sync}")
+                        # Trigger resync for decoherent components
+                        
             except Exception as e:
-                self.logger.error(f"Error processing sync queue: {str(e)}")
-                await asyncio.sleep(5)
+                self.logger.error(f"Error in quantum state monitoring: {str(e)}")
+                await asyncio.sleep(interval)
+from dataclasses import dataclass
+import asyncio
+import json
+from typing import Optional, Dict, Any
+import hashlib
+import base64
+import time
+import logging
 
-    P2PNode.process_sync_queue = process_sync_queue
+@dataclass
+class QuantumStateUpdate:
+    """Represents a quantum state update message"""
+    component: str
+    state_value: complex
+    timestamp: float
+    bell_pair_id: str
+    node_id: str
+    signature: Optional[str] = None
+    nonce: Optional[str] = None
 
-    async def perform_sync_operation(self, sync_op: dict):
-        """Perform a specific sync operation"""
-        peer = sync_op['peer']
-        component = sync_op['component']
-        
-        try:
-            self.logger.info(f"Starting sync operation: {component} with peer {peer}")
-            
-            if component == 'blocks':
-                await self.sync_blocks_with_peer(peer)
-            elif component == 'wallets':
-                await self.sync_wallets_with_peer(peer)
-            elif component == 'transactions':
-                await self.sync_transactions_with_peer(peer)
-                
-            # Update sync state
-            self.sync_states[component].status = "synced"
-            self.sync_states[component].last_update = time.time()
-            self.sync_states[component].in_progress = False
-            self.sync_states[component].peers_synced.add(peer)
-            
-        except Exception as e:
-            self.logger.error(f"Error performing sync operation {component} with {peer}: {str(e)}")
-            self.sync_states[component].status = "failed"
-            self.sync_states[component].in_progress = False
-            self.sync_states[component].retry_count += 1
-
-    P2PNode.perform_sync_operation = perform_sync_operation
-
-    # Modify existing heartbeat method to use enhanced version
-    async def send_heartbeats(self):
-        """Send enhanced heartbeats to all peers"""
-        while True:
-            try:
-                peers = list(self.connected_peers)
-                for peer in peers:
-                    await self.send_enhanced_heartbeat(peer)
-                await asyncio.sleep(self.heartbeat_interval)
-            except Exception as e:
-                self.logger.error(f"Error in send_heartbeats: {str(e)}")
-                await asyncio.sleep(5)
-
-    P2PNode.send_heartbeats = send_heartbeats
-
-    # Start the sync processing when the node starts
-    original_start = P2PNode.start
-    
-    async def enhanced_start(self):
-        """Start the node with enhanced sync functionality"""
-        await original_start(self)
-        asyncio.create_task(self.process_sync_queue())
-        self.logger.info("Enhanced sync system started")
-
-    P2PNode.start = enhanced_start
-
-    return P2PNode
-    
-
-class P2PNode:
-    def __init__(self, blockchain, host='localhost', port=8000, security_level=10, k: int = 20):
-        load_dotenv()  # Load environment variables from .env file
-
-        self.host = os.getenv('P2P_HOST', host)
-        self.port = int(os.getenv('P2P_PORT', port))
-        self.blockchain = blockchain
-        self.security_level = int(os.getenv('SECURITY_LEVEL', security_level))
-        self.max_peers = int(os.getenv('MAX_PEERS', '10'))
-        self.field_size = calculate_field_size(self.security_level)
-        self.zk_system = SecureHybridZKStark(self.security_level)
-        self.peers: Dict[str, websockets.WebSocketServerProtocol] = {}
-        self.peer_lock = asyncio.Lock()  # Change to asyncio.Lock()
-        self.peer_lock = Lock()
-        self.message_queue = asyncio.Queue()
-        self.last_broadcast: Dict[str, float] = {}
-        self.mempool: List[Transaction] = []
-        self.seen_messages: Set[str] = set()
-        self.message_expiry = int(os.getenv('MESSAGE_EXPIRY', '300'))
-        self.heartbeat_interval = int(os.getenv('HEARTBEAT_INTERVAL', '30'))
-        self.server = None
-        self.last_challenge = {}
-        self.pending_challenges = {}
-        self.peer_states = {}
-        self.peer_tasks = {}
-
-        # Initialize ws_host and ws_port before using them
-        ws_host = os.getenv('WS_HOST', 'localhost')
-        ws_port = int(os.getenv('WS_PORT', '8080'))
-
-        # WebSocket updates handler
-        self.ws_updates = ExchangeWebSocketUpdates(ws_host, ws_port)
-
-        # Kademlia-like DHT
-        self.node_id = self.generate_node_id()
-        self.k = k
-        self.buckets: List[List[KademliaNode]] = [[] for _ in range(160)]  # 160 bits for SHA-1
-        self.data_store: OrderedDict[str, str] = OrderedDict()
-        self.max_data_store_size = int(os.getenv('MAX_DATA_STORE_SIZE', '1000'))
-
-        # Magnet link
-        self.magnet_link = self.generate_magnet_link()
-
-        self.computation_system = DistributedComputationSystem(self)
-        self.encryption_key = self.generate_encryption_key()
-        self.access_control = {}  # Dictionary to store access rights
-        self.zkp_system = SecureHybridZKStark(self.security_level)
-        
-        # Parse bootstrap and seed nodes
-        self.bootstrap_nodes = [node for node in os.getenv('BOOTSTRAP_NODES', '').split(',') if node]
-        self.seed_nodes = [node for node in os.getenv('SEED_NODES', '').split(',') if node]
-
-        self.private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048
-        )
-        self.public_key = self.private_key.public_key()
-
-        self.peer_public_keys = {}
-        self.token_logos = {}  # Store token logos
-
-        # STUN and TURN server configuration
-        self.stun_server = os.getenv('STUN_SERVER')
-        self.turn_server = os.getenv('TURN_SERVER')
-        self.turn_username = os.getenv('TURN_USERNAME')
-        self.turn_password = os.getenv('TURN_PASSWORD')
-
-        # Initialize external IP and port (to be set later)
-        
-        self.external_port = None
-        self.external_ip = requests.get('https://api.ipify.org').text
-        self.challenges = {}
-        self.node_directory = NodeDirectory(self)  # Pass the current P2PNode instance
-        self.logger = logging.getLogger('P2PNode')
-        self.logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logs; adjust as needed
-
-        # Create console handler with a higher log level
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
-
-        # Create formatter and add it to the handlers
-        formatter = logging.Formatter('%(asctime)s - P2PNode - %(levelname)s - %(message)s')
-        ch.setFormatter(formatter)
-        self.private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048
-        )
-        self.public_key = self.private_key.public_key()
-        
-        self.blockchain = blockchain
-        self.heartbeat_interval = 15  # seconds
-        self.reconnect_interval = 30  # seconds
-        self.max_reconnect_attempts = 5
-
-        self.is_running = False
-        self.peer_locks = {}  # Add this line
-        self.last_activity_time = time.time()  # Track last activity (ping/pong or message)
-        self.pending_block_proposals: Dict[str, Any] = {}
-        self.ws_server = None
-        self.ws_clients = set()
-        self.subscription_topics = {
-            'new_wallet': set(),
-            'private_transaction': set()
+    def to_dict(self) -> dict:
+        return {
+            'component': self.component,
+            'state_value': {
+                'real': self.state_value.real,
+                'imag': self.state_value.imag
+            },
+            'timestamp': self.timestamp,
+            'bell_pair_id': self.bell_pair_id,
+            'node_id': self.node_id,
+            'signature': self.signature,
+            'nonce': self.nonce
         }
-        self.encryption_key = Fernet.generate_key()
-        self.fernet = Fernet(self.encryption_key)
-        self.peers = {}  # Dictionary to store active peer connections
-        self.last_peer_check = time.time()
-        self.connected_peers = set()  # Use a set to store unique connected peers
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'QuantumStateUpdate':
+        state_value = complex(
+            data['state_value']['real'],
+            data['state_value']['imag']
+        )
+        return cls(
+            component=data['component'],
+            state_value=state_value,
+            timestamp=data['timestamp'],
+            bell_pair_id=data['bell_pair_id'],
+            node_id=data['node_id'],
+            signature=data.get('signature'),
+            nonce=data.get('nonce')
+        )
 
 
-        logger.info(f"P2PNode initialized with host: {self.host}, port: {self.port}")
-        logger.info(f"Bootstrap nodes: {self.bootstrap_nodes}")
-        logger.info(f"Seed nodes: {self.seed_nodes}")
+class QuantumStateNotifier:
+    """Handles network communication for quantum state updates"""
+    
+    def __init__(self, node, max_retries: int = 3, retry_delay: float = 1.0):
+        self.node = node  # Reference to the P2PNode instance
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.pending_updates: Dict[str, asyncio.Event] = {}
+        self.logger = logging.getLogger("QuantumStateNotifier")
+        self.verification_cache: Dict[str, float] = {}
+        self.cache_expiry = 60  # seconds
+
+    async def notify_peer_update(self, peer_id: str, component: str, quantum_state: complex,
+                               bell_pair_id: str) -> bool:
+        """Send quantum state update to peer with retry logic and verification"""
+        try:
+            # Create quantum state update message
+            update = QuantumStateUpdate(
+                component=component,
+                state_value=quantum_state,
+                timestamp=time.time(),
+                bell_pair_id=bell_pair_id,
+                node_id=self.node.node_id,
+                nonce=self._generate_nonce()
+            )
+
+            # Sign the update
+            update.signature = self._sign_update(update)
+            
+            # Create verification tracker
+            update_id = f"{update.node_id}:{update.nonce}"
+            verification_event = asyncio.Event()
+            self.pending_updates[update_id] = verification_event
+
+            success = False
+            retries = 0
+            last_error = None
+
+            while retries < self.max_retries and not success:
+                try:
+                    # Send update to peer
+                    await self._send_update_to_peer(peer_id, update)
+                    
+                    # Wait for verification with timeout
+                    verification_timeout = 5.0  # 5 seconds timeout
+                    success = await asyncio.wait_for(
+                        verification_event.wait(),
+                        timeout=verification_timeout
+                    )
+                    
+                    if success:
+                        self.logger.info(
+                            f"Quantum state update verified by peer {peer_id} "
+                            f"for component {component}"
+                        )
+                        break
+                    
+                except asyncio.TimeoutError:
+                    self.logger.warning(
+                        f"Verification timeout for peer {peer_id} "
+                        f"(attempt {retries + 1}/{self.max_retries})"
+                    )
+                except Exception as e:
+                    last_error = e
+                    self.logger.error(
+                        f"Error sending update to peer {peer_id}: {str(e)}"
+                    )
+
+                retries += 1
+                if retries < self.max_retries:
+                    # Exponential backoff
+                    await asyncio.sleep(self.retry_delay * (2 ** retries))
+
+            # Cleanup
+            del self.pending_updates[update_id]
+
+            if not success:
+                error_msg = f"Failed to notify peer {peer_id} after {self.max_retries} attempts"
+                if last_error:
+                    error_msg += f": {str(last_error)}"
+                self.logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
+            return success
+
+        except Exception as e:
+            self.logger.error(f"Error in notify_peer_update: {str(e)}")
+            raise
+
+    async def _send_update_to_peer(self, peer_id: str, update: QuantumStateUpdate):
+        """Send quantum state update message to peer"""
+        try:
+            # Convert update to network message
+            message = {
+                'type': 'quantum_state_update',
+                'payload': update.to_dict()
+            }
+
+            # Send via P2P node's message system
+            await self.node.send_message(
+                peer_id,
+                Message(
+                    type=MessageType.QUANTUM_STATE_UPDATE.value,
+                    payload=message
+                )
+            )
+
+            self.logger.debug(
+                f"Sent quantum state update to peer {peer_id} "
+                f"for component {update.component}"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error sending update to peer {peer_id}: {str(e)}")
+            raise
+
+    async def handle_update_message(self, message: Dict[str, Any], sender: str) -> bool:
+        """Handle incoming quantum state update message"""
+        try:
+            # Parse update message
+            update = QuantumStateUpdate.from_dict(message)
+            
+            # Verify signature
+            if not self._verify_signature(update, sender):
+                self.logger.warning(f"Invalid signature for update from {sender}")
+                return False
+
+            # Check for replay attacks
+            if self._is_replay(update):
+                self.logger.warning(f"Detected replay attack from {sender}")
+                return False
+
+            # Cache the nonce to prevent replay attacks
+            self._cache_nonce(update.nonce, update.timestamp)
+
+            # Verify quantum state using Bell pair
+            if not await self._verify_quantum_state(update, sender):
+                self.logger.warning(
+                    f"Quantum state verification failed for update from {sender}"
+                )
+                return False
+
+            # Apply the quantum state update locally
+            await self._apply_quantum_update(update, sender)
+
+            # Send verification acknowledgment
+            await self._send_verification(update, sender)
+
+            self.logger.info(
+                f"Successfully processed quantum state update from {sender} "
+                f"for component {update.component}"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(
+                f"Error handling update message from {sender}: {str(e)}"
+            )
+            return False
+
+    async def _verify_quantum_state(self, update: QuantumStateUpdate, sender: str) -> bool:
+        """Verify quantum state using Bell pair"""
+        try:
+            # Get Bell pair for this peer
+            bell_pair = self.node.quantum_sync.bell_pairs.get(sender)
+            if not bell_pair:
+                self.logger.warning(f"No Bell pair found for peer {sender}")
+                return False
+
+            # Verify Bell pair ID matches
+            if update.bell_pair_id != self._get_bell_pair_id(bell_pair):
+                self.logger.warning(f"Bell pair ID mismatch for peer {sender}")
+                return False
+
+            # Calculate expected quantum state
+            local_state = getattr(
+                self.node.quantum_sync.register,
+                update.component
+            ).value
+            expected_state = self.node.quantum_sync._entangle_states(
+                local_state,
+                bell_pair
+            )
+
+            # Calculate fidelity between expected and received states
+            fidelity = abs(
+                expected_state.conjugate() * update.state_value
+            )
+
+            # Check if fidelity is above threshold
+            return fidelity >= self.node.quantum_sync.decoherence_threshold
+
+        except Exception as e:
+            self.logger.error(f"Error verifying quantum state: {str(e)}")
+            return False
+
+    async def _apply_quantum_update(self, update: QuantumStateUpdate, sender: str):
+        """Apply verified quantum state update"""
+        try:
+            # Get peer's quantum register
+            peer_register = self.node.quantum_sync.entangled_peers[sender]
+            
+            # Update the quantum state
+            qubit = getattr(peer_register, update.component)
+            qubit.value = update.state_value
+            qubit.timestamp = update.timestamp
+
+            self.logger.debug(
+                f"Applied quantum state update for {update.component} "
+                f"from peer {sender}"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error applying quantum update: {str(e)}")
+            raise
+
+    async def _send_verification(self, update: QuantumStateUpdate, sender: str):
+        """Send verification acknowledgment to peer"""
+        try:
+            verification = {
+                'type': 'quantum_state_verification',
+                'update_id': f"{update.node_id}:{update.nonce}",
+                'timestamp': time.time(),
+                'verified': True
+            }
+
+            await self.node.send_message(
+                sender,
+                Message(
+                    type=MessageType.QUANTUM_STATE_VERIFICATION.value,
+                    payload=verification
+                )
+            )
+
+        except Exception as e:
+            self.logger.error(
+                f"Error sending verification to {sender}: {str(e)}"
+            )
+            raise
+
+    async def handle_verification_message(self, message: Dict[str, Any], sender: str):
+        """Handle incoming verification acknowledgment"""
+        try:
+            update_id = message['update_id']
+            if update_id in self.pending_updates:
+                verification_event = self.pending_updates[update_id]
+                verification_event.set()
+
+        except Exception as e:
+            self.logger.error(
+                f"Error handling verification message from {sender}: {str(e)}"
+            )
+
+    def _generate_nonce(self) -> str:
+        """Generate unique nonce for update message"""
+        return base64.b64encode(os.urandom(16)).decode()
+
+    def _sign_update(self, update: QuantumStateUpdate) -> str:
+        """Sign update message using node's private key"""
+        message = (
+            f"{update.component}:{update.state_value}:{update.timestamp}:"
+            f"{update.bell_pair_id}:{update.nonce}"
+        ).encode()
         
+        signature = self.node.private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return base64.b64encode(signature).decode()
+
+    def _verify_signature(self, update: QuantumStateUpdate, sender: str) -> bool:
+        """Verify update signature using sender's public key"""
+        try:
+            public_key = self.node.peer_public_keys.get(sender)
+            if not public_key:
+                return False
+
+            message = (
+                f"{update.component}:{update.state_value}:{update.timestamp}:"
+                f"{update.bell_pair_id}:{update.nonce}"
+            ).encode()
+            
+            signature = base64.b64decode(update.signature)
+            
+            public_key.verify(
+                signature,
+                message,
+                padding.PSS(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            return True
+
+        except Exception:
+            return False
+
+    def _is_replay(self, update: QuantumStateUpdate) -> bool:
+        """Check if update is a replay attack"""
+        return update.nonce in self.verification_cache
+
+    def _cache_nonce(self, nonce: str, timestamp: float):
+        """Cache nonce and cleanup expired entries"""
+class BootstrapManager:
+    """Manages bootstrap node connections with retry logic"""
+    
+    def __init__(self, node: 'P2PNode', max_retries: int = 5, retry_delay: float = 2.0):
+        self.node = node
+        self.max_retries = max_retries
+        self.base_retry_delay = retry_delay
+        self.bootstrap_nodes = self.node.bootstrap_nodes
+        self.connected_bootstrap_nodes = set()
+        self.logger = logging.getLogger("BootstrapManager")
+
+    async def connect_to_bootstrap_nodes(self):
+        """Connect to bootstrap nodes with enhanced retry logic and connection recovery."""
+        if not self.bootstrap_nodes:
+            self.logger.warning("No bootstrap nodes configured")
+            return False
+
+        self.logger.info("\n=== Connecting to Bootstrap Nodes ===")
+        self.logger.info(f"Bootstrap nodes: {self.bootstrap_nodes}")
+        
+        connected = False
+        retry_count = 0
+        max_retries = 5
+        base_delay = 2.0  # Base delay for exponential backoff
+        
+        while not connected and retry_count < max_retries:
+            try:
+                for bootstrap_node in self.bootstrap_nodes:
+                    try:
+                        # Parse bootstrap node address
+                        host, port = self.parse_bootstrap_address(bootstrap_node)
+                        if not host or not port:
+                            continue
+
+                        self.logger.info(f"Attempting connection to bootstrap node {host}:{port}")
+                        
+                        # Create connection with timeout and keep-alive
+                        websocket = await asyncio.wait_for(
+                            websockets.connect(
+                                f"ws://{host}:{port}",
+                                timeout=30,
+                                ping_interval=20,  # Enable periodic ping
+                                ping_timeout=10,    # Timeout for ping responses
+                                close_timeout=5,
+                                extra_headers={     # Add version and capabilities
+                                    'X-Node-Version': '1.0',
+                                    'X-Node-Capabilities': 'quantum,dagknight,zkp'
+                                }
+                            ),
+                            timeout=30
+                        )
+
+                        # Add to peers and initialize connection state
+                        peer_id = f"{host}:{port}"
+                        async with self.peer_lock:
+                            self.peers[peer_id] = websocket
+                            self.peer_states[peer_id] = "connecting"
+                            # Initialize connection tracking
+                            self.peer_info[peer_id] = {
+                                'connection_attempts': 0,
+                                'last_attempt': time.time(),
+                                'connected_since': time.time(),
+                                'failures': 0
+                            }
+
+                        # Perform key exchange with retry logic
+                        key_exchange_success = False
+                        for key_attempt in range(3):  # Try key exchange up to 3 times
+                            try:
+                                if await self.exchange_public_keys(peer_id):
+                                    key_exchange_success = True
+                                    break
+                                await asyncio.sleep(1)  # Brief pause between attempts
+                            except Exception as ke:
+                                self.logger.warning(f"Key exchange attempt {key_attempt + 1} failed: {str(ke)}")
+                                continue
+
+                        if key_exchange_success:
+                            self.logger.info(f"✓ Connected to bootstrap node {peer_id}")
+                            self.connected_peers.add(peer_id)
+                            connected = True
+                            
+                            # Start handlers for the new connection
+                            asyncio.create_task(self.handle_messages(websocket, peer_id))
+                            asyncio.create_task(self.keep_connection_alive(websocket, peer_id))
+                            
+                            # Request peer list after successful connection
+                            await self.request_peer_list(peer_id)
+                            break
+                        else:
+                            self.logger.warning(f"Failed to exchange keys with {peer_id}")
+                            await self.cleanup_failed_connection(peer_id)
+
+                    except asyncio.TimeoutError:
+                        self.logger.warning(f"Connection attempt to {bootstrap_node} timed out")
+                        continue
+                    except Exception as e:
+                        self.logger.error(f"Error connecting to {bootstrap_node}: {str(e)}")
+                        continue
+
+                if not connected:
+                    retry_count += 1
+                    retry_delay = base_delay * (2 ** retry_count)  # Exponential backoff
+                    self.logger.warning(
+                        f"Failed to connect to any bootstrap nodes. "
+                        f"Retrying in {retry_delay:.1f}s ({retry_count}/{max_retries})"
+                    )
+                    await asyncio.sleep(retry_delay)
+
+            except Exception as e:
+                self.logger.error(f"Error in bootstrap connection loop: {str(e)}")
+                retry_count += 1
+                await asyncio.sleep(base_delay * (2 ** retry_count))
+
+        if connected:
+            self.logger.info("✓ Successfully connected to bootstrap network")
+        else:
+            self.logger.warning("Failed to connect to any bootstrap nodes")
+
+        return connected
+
+    async def cleanup_failed_connection(self, peer_id: str):
+        """Clean up resources for a failed connection."""
+        try:
+            async with self.peer_lock:
+                if peer_id in self.peers:
+                    websocket = self.peers[peer_id]
+                    if not websocket.closed:
+                        await websocket.close()
+                    self.peers.pop(peer_id)
+                    self.peer_states.pop(peer_id, None)
+                    self.peer_public_keys.pop(peer_id, None)
+                    self.connected_peers.discard(peer_id)
+                    self.challenges.pop(peer_id, None)
+                    if hasattr(self, 'quantum_sync'):
+                        self.quantum_sync.entangled_peers.pop(peer_id, None)
+                        self.quantum_sync.bell_pairs.pop(peer_id, None)
+        except Exception as e:
+            self.logger.error(f"Error cleaning up failed connection to {peer_id}: {str(e)}")
+
+    async def request_peer_list(self):
+        """Request peer list from connected bootstrap nodes"""
+        try:
+            if not self.connected_bootstrap_nodes:
+                return
+                
+            self.logger.info("Requesting peer list from bootstrap nodes...")
+            
+            for bootstrap_node in self.connected_bootstrap_nodes:
+                try:
+                    message = Message(
+                        type=MessageType.PEER_EXCHANGE.value,
+                        payload={"request": "peer_list"}
+                    )
+                    
+                    response = await self.node.send_and_wait_for_response(
+                        bootstrap_node,
+                        message,
+                        timeout=10.0
+                    )
+                    
+                    if response and response.type == MessageType.PEER_EXCHANGE.value:
+                        peers = response.payload.get('peers', [])
+                        self.logger.info(f"Received {len(peers)} peers from {bootstrap_node}")
+                        
+                        # Connect to received peers
+                        for peer in peers:
+                            if peer not in self.node.peers:
+                                asyncio.create_task(self.connect_to_peer(peer))
+                                
+                except Exception as e:
+                    self.logger.error(f"Error getting peers from {bootstrap_node}: {str(e)}")
+                    continue
+                    
+        except Exception as e:
+            self.logger.error(f"Error requesting peer list: {str(e)}")
+
+    def parse_bootstrap_address(self, address: str) -> Tuple[Optional[str], Optional[int]]:
+        """Parse bootstrap node address"""
+        try:
+            if ':' not in address:
+                self.logger.error(f"Invalid bootstrap address format: {address}")
+                return None, None
+                
+            host, port = address.split(':')
+            return host.strip(), int(port)
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing bootstrap address {address}: {str(e)}")
+            return None, None
+
+    async def connect_to_peer(self, peer_address: str):
+        """Connect to a new peer"""
+        try:
+            host, port = self.parse_bootstrap_address(peer_address)
+            if not host or not port:
+                return
+
+            websocket = await websockets.connect(
+                f"ws://{host}:{port}",
+                timeout=10,
+                ping_interval=None,
+                close_timeout=5
+            )
+            
+            peer_id = f"{host}:{port}"
+            self.node.peers[peer_id] = websocket
+            self.node.peer_states[peer_id] = "connecting"
+            
+            if await self.node.exchange_public_keys(peer_id):
+                self.logger.info(f"✓ Connected to peer {peer_id}")
+                asyncio.create_task(self.node.handle_messages(websocket, peer_id))
+            else:
+                await self.node.remove_peer(peer_id)
+                
+        except Exception as e:
+            self.logger.error(f"Error connecting to peer {peer_address}: {str(e)}")
+
+import logging
+
+logger = logging.getLogger(__name__)
+class P2PNode:
+    _instance = None
+    _initialized = False
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self, blockchain, host='localhost', port=8000, security_level=10, k: int = 20):
+        try:
+            # Load environment variables first
+            load_dotenv()
+
+            # Basic node configuration
+            self.host = os.getenv('P2P_HOST', host)
+            self.port = int(os.getenv('P2P_PORT', port))
+            self.blockchain = blockchain
+            self.security_level = int(os.getenv('SECURITY_LEVEL', security_level))
+            self.max_peers = int(os.getenv('MAX_PEERS', '10'))
+
+            # Generate node_id BEFORE quantum components
+            self.node_id = self.generate_node_id()
+            
+            # Initialize core components
+            self.field_size = calculate_field_size(self.security_level)
+            self.zk_system = SecureHybridZKStark(self.security_level)
+            self.peers = {}
+            self.peer_lock = asyncio.Lock()
+            self.message_queue = asyncio.Queue()
+            self.last_broadcast = {}
+            self.mempool = []
+            self.seen_messages = set()
+            self.message_expiry = int(os.getenv('MESSAGE_EXPIRY', '300'))
+            self.heartbeat_interval = int(os.getenv('HEARTBEAT_INTERVAL', '30'))
+            
+            # Initialize sync states
+            self.sync_queue = asyncio.Queue()
+            self.sync_states = {
+                SyncComponent.WALLETS: SyncStatus(),
+                SyncComponent.TRANSACTIONS: SyncStatus(),
+                SyncComponent.BLOCKS: SyncStatus(),
+                SyncComponent.MEMPOOL: SyncStatus()
+            }
+            self.sync_retry_count = {}
+            self.pending_sync_operations = {}
+
+
+            # Now initialize quantum components
+            self.quantum_sync = QuantumEntangledSync(self.node_id)
+            self.quantum_notifier = QuantumStateNotifier(self)
+            self.quantum_state = QuantumState.SUPERPOSITION
+            self.quantum_register = QuantumRegister()
+            self.quantum_initialized = False
+            self.quantum_consensus = QuantumConsensusManager(self)
+            self.quantum_monitor = QuantumNetworkMonitor(self)
+            self.quantum_heartbeats = {}
+            self.last_quantum_heartbeat = {}
+            self.quantum_heartbeat_interval = 5.0  # seconds
+            self.quantum_heartbeat_timeout = 15.0  # seconds
+
+            # Initialize other components
+            self.server = None
+            self.last_challenge = {}
+            self.pending_challenges = {}
+            self.peer_states = {}
+            self.peer_tasks = {}
+            self.connected_peers = set()
+            self.peer_locks = {}
+            self.last_activity_time = time.time()
+
+            # Initialize Kademlia DHT components
+            self.k = k
+            self.buckets = [[] for _ in range(160)]
+            self.data_store = OrderedDict()
+            self.max_data_store_size = int(os.getenv('MAX_DATA_STORE_SIZE', '1000'))
+
+            # Initialize magnet link
+            self.magnet_link = self.generate_magnet_link()
+
+            # Initialize cryptographic components
+            self.private_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=2048
+            )
+            self.public_key = self.private_key.public_key()
+            self.peer_public_keys = {}
+            
+            # Initialize networking components
+            self.ws_updates = ExchangeWebSocketUpdates(
+                os.getenv('WS_HOST', 'localhost'),
+                int(os.getenv('WS_PORT', '8080'))
+            )
+            
+            # Parse bootstrap and seed nodes
+            self.bootstrap_nodes = [node for node in os.getenv('BOOTSTRAP_NODES', '').split(',') if node]
+            self.seed_nodes = [node for node in os.getenv('SEED_NODES', '').split(',') if node]
+
+            # Initialize logging
+            self.logger = logging.getLogger('P2PNode')
+            self.logger.setLevel(logging.DEBUG)
+            
+            # Initialize transaction tracking
+            self.transaction_tracker = TransactionTracker()
+            self.is_running = False
+            self.target_peer_count = int(os.getenv('TARGET_PEER_COUNT', 5))  # Default to 5 peers
+            self.external_ip = os.getenv('EXTERNAL_IP', 'your.node.ip.address')  # Replace with actual IP retrieval logic if needed
+            self.challenges = {}
+            self.peer_info = {}  # Initialize peer_info dictionary
+            self.peer_states = {}
+            self.handshake_timeouts = {}
+            self.max_handshake_attempts = 3
+            self.handshake_timeout = 30  # seconds
+
+            P2PNode._initialized = True
+
+            self.consensus_handler = ConsensusMessageHandler(self)
+            self.message_handlers = {
+                'mining': self.handle_mining_message,
+                'transaction': self.handle_transaction_message,
+                'wallet': self.handle_wallet_message,
+                'consensus': self.handle_consensus_message  # Add this line
+            }
+
+            self.logger.info("P2P Node initialized successfully")
+            self.test_handler = QuantumP2PTestHandler(self)
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.error(f"Error initializing P2P Node: {str(e)}")
+                self.logger.error(traceback.format_exc())
+            else:
+                print(f"Error initializing P2P Node: {str(e)}")
+                print(traceback.format_exc())
+            raise
+                    
+    async def handle_consensus_message(self, message: dict) -> dict:
+        """Handle consensus-related messages"""
+        try:
+            action = message.get('action')
+            if action == 'initialize':
+                return await self.initialize_consensus(message.get('params', {}))
+            elif action == 'test_consensus':
+                return await self.run_consensus_test(message.get('params', {}))
+            else:
+                return {
+                    'status': 'error',
+                    'message': f'Unknown consensus action: {action}'
+                }
+        except Exception as e:
+            logger.error(f"Error handling consensus message: {str(e)}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+    async def handle_mining_message(self, data: dict) -> dict:
+        """
+        Handle incoming mining-related messages.
+        
+        Args:
+            data (dict): Mining message data containing action and parameters
+            
+        Returns:
+            dict: Response with status and any relevant data
+        """
+        try:
+            action = data.get('action')
+            if not action:
+                return {'status': 'error', 'message': 'No mining action specified'}
+
+            if action == 'submit_block':
+                # Handle new block submission
+                block_data = data.get('block')
+                if not block_data:
+                    return {'status': 'error', 'message': 'No block data provided'}
+                
+                # Convert block data to QuantumBlock object
+                block = QuantumBlock.from_dict(block_data)
+                
+                # Add block to blockchain
+                result = await self.blockchain.handle_new_block(block_data, sender=None)
+                
+                if result:
+                    return {
+                        'status': 'success',
+                        'message': f'Block {block.hash} accepted',
+                        'block_hash': block.hash
+                    }
+                else:
+                    return {
+                        'status': 'error',
+                        'message': f'Block {block.hash} rejected'
+                    }
+
+            elif action == 'get_mining_metrics':
+                # Return current mining metrics
+                metrics = self.get_mining_metrics()
+                return {
+                    'status': 'success',
+                    'metrics': metrics
+                }
+
+            elif action == 'get_difficulty':
+                # Return current mining difficulty
+                if hasattr(self.blockchain, 'difficulty'):
+                    return {
+                        'status': 'success',
+                        'difficulty': self.blockchain.difficulty
+                    }
+                return {
+                    'status': 'error',
+                    'message': 'Difficulty not available'
+                }
+
+            else:
+                return {
+                    'status': 'error',
+                    'message': f'Unknown mining action: {action}'
+                }
+
+        except Exception as e:
+            self.logger.error(f"Error handling mining message: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return {
+                'status': 'error',
+                'message': f'Internal error: {str(e)}'
+            }
+            
+            
+            
+            
+            
+    async def handle_transaction_message(self, data: dict) -> dict:
+        """
+        Handle incoming transaction-related messages with enhanced security and validation.
+        
+        Args:
+            data (dict): Transaction message data containing transaction details
+            
+        Returns:
+            dict: Response with status and transaction processing results
+        """
+        try:
+            self.logger.info("[TRANSACTION] Processing transaction message")
+            self.logger.debug(f"[TRANSACTION] Data: {data}")
+
+            if not data:
+                return {
+                    'status': 'error',
+                    'message': 'No transaction data provided'
+                }
+
+            action = data.get('action', 'process')  # Default action is process
+            
+            if action == 'process':
+                # Check required fields
+                required_fields = ['sender', 'receiver', 'amount']
+                if not all(field in data for field in required_fields):
+                    missing_fields = [field for field in required_fields if field not in data]
+                    return {
+                        'status': 'error',
+                        'message': f'Missing required fields: {missing_fields}'
+                    }
+
+                try:
+                    # Convert amount to Decimal for precise handling
+                    amount = Decimal(str(data['amount']))
+                except (InvalidOperation, TypeError):
+                    return {
+                        'status': 'error',
+                        'message': 'Invalid amount format'
+                    }
+
+                # Create transaction object
+                transaction = Transaction(
+                    sender=data['sender'],
+                    receiver=data['receiver'],
+                    amount=amount,
+                    timestamp=data.get('timestamp', int(time.time())),
+                    signature=data.get('signature'),
+                    public_key=data.get('public_key'),
+                    quantum_enabled=data.get('quantum_enabled', False)
+                )
+
+                # Add additional data if present
+                if 'gas_price' in data:
+                    transaction.gas_price = Decimal(str(data['gas_price']))
+                if 'gas_limit' in data:
+                    transaction.gas_limit = int(data['gas_limit'])
+                if 'nonce' in data:
+                    transaction.nonce = int(data['nonce'])
+
+                # Validate transaction
+                if not await self.blockchain.validate_transaction(transaction):
+                    return {
+                        'status': 'error',
+                        'message': 'Transaction validation failed'
+                    }
+
+                # Process transaction
+                try:
+                    success = await self.blockchain.add_transaction(transaction)
+                    if success:
+                        # Add to transaction tracker
+                        self.transaction_tracker.add_transaction(
+                            transaction.hash(),
+                            data.get('origin_peer', 'unknown')
+                        )
+
+                        # Propagate to other peers if not already propagated
+                        if not data.get('propagated'):
+                            data['propagated'] = True
+                            await self.propagate_transaction(transaction)
+
+                        return {
+                            'status': 'success',
+                            'message': 'Transaction processed successfully',
+                            'tx_hash': transaction.hash(),
+                            'timestamp': transaction.timestamp
+                        }
+                    else:
+                        return {
+                            'status': 'error',
+                            'message': 'Failed to process transaction'
+                        }
+
+                except Exception as process_error:
+                    self.logger.error(f"Transaction processing error: {str(process_error)}")
+                    return {
+                        'status': 'error',
+                        'message': f'Transaction processing error: {str(process_error)}'
+                    }
+
+            elif action == 'get_status':
+                # Check for transaction hash
+                tx_hash = data.get('tx_hash')
+                if not tx_hash:
+                    return {
+                        'status': 'error',
+                        'message': 'Transaction hash not provided'
+                    }
+
+                # Get transaction status
+                tx_status = await self.blockchain.get_transaction_status(tx_hash)
+                return {
+                    'status': 'success',
+                    'tx_status': tx_status
+                }
+
+            elif action == 'get_recent':
+                # Get recent transactions
+                limit = data.get('limit', 100)  # Default to 100 transactions
+                recent_txs = await self.blockchain.get_recent_transactions(limit)
+                return {
+                    'status': 'success',
+                    'transactions': [tx.to_dict() for tx in recent_txs]
+                }
+
+            else:
+                return {
+                    'status': 'error',
+                    'message': f'Unknown transaction action: {action}'
+                }
+
+        except Exception as e:
+            self.logger.error(f"Error handling transaction message: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return {
+                'status': 'error',
+                'message': f'Internal error: {str(e)}'
+            }
+            
+    async def handle_wallet_message(self, data: dict) -> dict:
+        """
+        Handle wallet-related messages including creation, updates, and queries.
+        
+        Args:
+            data (dict): Wallet message data containing action and parameters
+            
+        Returns:
+            dict: Response with status and wallet operation results
+        """
+        try:
+            self.logger.info("[WALLET] Processing wallet message")
+            self.logger.debug(f"[WALLET] Data: {data}")
+
+            if not data:
+                return {
+                    'status': 'error',
+                    'message': 'No wallet data provided'
+                }
+
+            action = data.get('action')
+            if not action:
+                return {
+                    'status': 'error',
+                    'message': 'No wallet action specified'
+                }
+
+            # Handle different wallet actions
+            if action == 'create':
+                # Create new wallet
+                try:
+                    user_id = data.get('user_id')
+                    if not user_id:
+                        return {
+                            'status': 'error',
+                            'message': 'User ID required for wallet creation'
+                        }
+
+                    wallet_info = await self.blockchain.create_wallet(user_id)
+                    
+                    # Propagate new wallet to network if successful
+                    if wallet_info:
+                        await self.broadcast_event('new_wallet', wallet_info)
+                        
+                        return {
+                            'status': 'success',
+                            'message': 'Wallet created successfully',
+                            'wallet': wallet_info
+                        }
+                    else:
+                        return {
+                            'status': 'error',
+                            'message': 'Failed to create wallet'
+                        }
+
+                except ValueError as ve:
+                    return {
+                        'status': 'error',
+                        'message': str(ve)
+                    }
+
+            elif action == 'get_balance':
+                # Get wallet balance
+                try:
+                    address = data.get('address')
+                    if not address:
+                        return {
+                            'status': 'error',
+                            'message': 'Wallet address required'
+                        }
+
+                    balances = await self.blockchain.get_balances(address)
+                    return {
+                        'status': 'success',
+                        'balances': balances
+                    }
+
+                except Exception as e:
+                    return {
+                        'status': 'error',
+                        'message': f'Error getting balance: {str(e)}'
+                    }
+
+            elif action == 'get_transactions':
+                # Get wallet transactions
+                try:
+                    address = data.get('address')
+                    limit = data.get('limit', 100)  # Default to 100 transactions
+                    
+                    if not address:
+                        return {
+                            'status': 'error',
+                            'message': 'Wallet address required'
+                        }
+
+                    transactions = await self.blockchain.get_transaction_history(address, limit)
+                    return {
+                        'status': 'success',
+                        'transactions': transactions
+                    }
+
+                except Exception as e:
+                    return {
+                        'status': 'error',
+                        'message': f'Error getting transactions: {str(e)}'
+                    }
+
+            elif action == 'get_wallets':
+                # Get all wallets
+                try:
+                    wallets = self.blockchain.get_wallets()
+                    return {
+                        'status': 'success',
+                        'wallets': [w.to_dict() for w in wallets]
+                    }
+                except Exception as e:
+                    return {
+                        'status': 'error',
+                        'message': f'Error getting wallets: {str(e)}'
+                    }
+
+            elif action == 'update_wallet':
+                # Update wallet information
+                try:
+                    wallet_data = data.get('wallet')
+                    if not wallet_data:
+                        return {
+                            'status': 'error',
+                            'message': 'No wallet data provided for update'
+                        }
+
+                    wallet = Wallet.from_dict(wallet_data)
+                    success = self.blockchain.update_wallet(wallet)
+                    
+                    if success:
+                        # Propagate wallet update
+                        await self.broadcast_event('wallet_update', wallet_data)
+                        
+                        return {
+                            'status': 'success',
+                            'message': 'Wallet updated successfully'
+                        }
+                    else:
+                        return {
+                            'status': 'error',
+                            'message': 'Failed to update wallet'
+                        }
+
+                except Exception as e:
+                    return {
+                        'status': 'error',
+                        'message': f'Error updating wallet: {str(e)}'
+                    }
+
+            elif action == 'validate_address':
+                # Validate wallet address
+                try:
+                    address = data.get('address')
+                    if not address:
+                        return {
+                            'status': 'error',
+                            'message': 'No address provided for validation'
+                        }
+
+                    is_valid = self.blockchain.validate_wallet_address(address)
+                    return {
+                        'status': 'success',
+                        'is_valid': is_valid
+                    }
+
+                except Exception as e:
+                    return {
+                        'status': 'error',
+                        'message': f'Error validating address: {str(e)}'
+                    }
+
+            else:
+                return {
+                    'status': 'error',
+                    'message': f'Unknown wallet action: {action}'
+                }
+
+        except Exception as e:
+            self.logger.error(f"Error handling wallet message: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return {
+                'status': 'error',
+                'message': f'Internal error: {str(e)}'
+            }
+                
+    async def handle_websocket_message(self, websocket: websockets.WebSocketServerProtocol, message: str):
+        """Handle incoming WebSocket messages with enhanced category support."""
+        try:
+            data = json.loads(message)
+            category = data.get('category')
+
+            if not category:
+                await websocket.send(json.dumps({
+                    'status': 'error',
+                    'message': 'No category specified'
+                }))
+                return
+
+            # Log the incoming message
+            self.logger.debug(f"Received {category} message: {data}")
+
+            # Update handler dictionary with consensus support
+            self.message_handlers = {
+                'wallet': self.handle_wallet_message,
+                'mining': self.handle_mining_message,
+                'transaction': self.handle_transaction_message,
+                'consensus': self.handle_consensus_message,  # Added consensus handler
+                'p2p_test': self.handle_p2p_test_message,  # Assuming this function exists
+            }
+
+            # Check if category is supported
+            if category not in self.message_handlers:
+                supported_categories = list(self.message_handlers.keys())
+                await websocket.send(json.dumps({
+                    'status': 'error',
+                    'message': f'Unknown category: {category}. Valid categories: {supported_categories}'
+                }))
+                return
+
+            # Handle the message using appropriate handler
+            handler = self.message_handlers[category]
+            response = await handler(data)
+            
+            # Log and send response
+            self.logger.debug(f"Handler response: {response}")
+            await websocket.send(json.dumps(response))
+
+        except json.JSONDecodeError:
+            await websocket.send(json.dumps({
+                'status': 'error',
+                'message': 'Invalid JSON message'
+            }))
+        except Exception as e:
+            self.logger.error(f"Error handling message: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            await websocket.send(json.dumps({
+                'status': 'error',
+                'message': str(e)
+            }))
+
+    async def handle_p2p_test_message(self, websocket: websockets.WebSocketServerProtocol, data: dict) -> dict:
+        """Handle P2P test messages with proper parameter passing"""
+        try:
+            if not self.p2p_node:
+                return {
+                    "status": "error",
+                    "message": "P2P node not initialized"
+                }
+
+            # Ensure test handler exists
+            if not hasattr(self.p2p_node, 'test_handler'):
+                self.logger.info("Initializing P2P test handler")
+                self.p2p_node.test_handler = QuantumP2PTestHandler(self.p2p_node)
+
+            return await self.p2p_node.test_handler.handle_test_message(websocket, data)
+            
+        except Exception as e:
+            self.logger.error(f"Error handling P2P test message: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+
+    async def initialize_dagknight(self):
+        """Initialize DAGKnight consensus system."""
+        self.dagknight = DAGKnightConsensus(
+            min_k_cluster=10,
+            max_latency_ms=1000
+        )
+        self.logger.info("DAGKnight consensus system initialized")
+
+    async def handle_new_block_dagknight(self, block: QuantumBlock, sender: str):
+        """Handle new block using DAGKnight consensus."""
+        try:
+            # Measure network latency
+            start_time = time.time()
+            block_hash = block.hash
+            
+            # Basic block validation
+            if not self.blockchain.validate_block(block):
+                self.logger.warning(f"Invalid block received from {sender}: {block_hash}")
+                return False
+                
+            # Calculate network latency
+            network_latency = (time.time() - start_time) * 1000  # Convert to milliseconds
+            
+            # Add block to DAGKnight
+            confirmable = await self.dagknight.add_block(block, network_latency)
+            
+            if confirmable:
+                # Add confirmed block to blockchain
+                success = await self.blockchain.add_block(block)
+                if success:
+                    self.logger.info(f"Block {block_hash[:8]} added to blockchain (latency: {network_latency:.2f}ms)")
+                    
+                    # Propagate block to other peers
+                    await self.propagate_block(block, exclude_peer=sender)
+                    
+                    # Update quantum state
+                    await self.quantum_sync.update_component_state('blocks', {
+                        'block': block.to_dict(),
+                        'latency': network_latency
+                    })
+                
+                return success
+                
+            else:
+                self.logger.debug(f"Block {block_hash[:8]} pending confirmation")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error handling block with DAGKnight: {str(e)}")
+            return False
+
+    async def monitor_network_security(self):
+        """Monitor network security using DAGKnight metrics."""
+        while self.is_running:
+            try:
+                # Get network status
+                status = await self.dagknight.get_network_status()
+                self.logger.info("\n=== DAGKnight Network Status ===")
+                self.logger.info(f"Confirmed blocks: {status['confirmed_blocks']}")
+                self.logger.info(f"Pending blocks: {status['pending_blocks']}")
+                self.logger.info(f"Average latency: {status['average_latency']:.2f}ms")
+                
+                # Analyze security
+                security = await self.dagknight.analyze_network_security()
+                self.logger.info("\n=== Security Analysis ===")
+                self.logger.info(f"Status: {security['status']}")
+                self.logger.info(f"Median latency: {security['median_latency']:.2f}ms")
+                
+                # Alert on security issues
+                if security['status'] != 'secure':
+                    await self.broadcast(Message(
+                        type=MessageType.NETWORK_ALERT.value,
+                        payload={
+                            'type': 'security_warning',
+                            'analysis': security
+                        }
+                    ))
+                
+                await asyncio.sleep(60)  # Check every minute
+                
+            except Exception as e:
+                self.logger.error(f"Error monitoring network security: {str(e)}")
+                await asyncio.sleep(60)
+
+
+
+    def find_highest_fidelity_peer(self, component: str):
+        """Find the peer with the highest fidelity for a given component."""
+        if not self.peers:
+            self.logger.warning(f"No peers available to select for {component}.")
+            return None
+        # Example: Sort by fidelity for the specific component (mock example if fidelity is stored)
+        return max(self.peers.values(), key=lambda peer: peer.get(f'{component}_fidelity', 0), default=None)
+
+
+
+    async def _notify_peer_update(self, peer_id: str, component: str):
+        """Notifies peer of quantum state updates with verification"""
+        try:
+            # Get quantum state and Bell pair for peer
+            qubit = getattr(self.quantum_sync.register, component)
+            bell_pair = self.quantum_sync.bell_pairs.get(peer_id)
+            
+            if not bell_pair:
+                self.logger.warning(f"No Bell pair found for peer {peer_id}")
+                return
+
+            # Generate Bell pair ID
+            bell_pair_id = self.quantum_notifier._get_bell_pair_id(bell_pair)
+
+            # Send update via notifier with verification
+            success = await self.quantum_notifier.notify_peer_update(
+                peer_id,
+                component,
+                qubit.value,
+                bell_pair_id
+            )
+
+            if success:
+                self.logger.info(f"Successfully notified {peer_id} of {component} update")
+            else:
+                self.logger.warning(f"Failed to notify {peer_id} of {component} update")
+
+        except Exception as e:
+            self.logger.error(f"Error notifying peer {peer_id}: {str(e)}")
+            raise
+
 
     async def propagate_multisig_transaction(self, multisig_address: str, sender_public_keys: List[int], threshold: int, receiver: str, amount: Decimal, message: str, aggregate_proof: Tuple[List[int], List[int], List[Tuple[int, List[int]]]]):
         transaction_data = {
@@ -1154,25 +2546,36 @@ class P2PNode:
                 self.logger.error(f"[PEER_CHECK] Error in periodic peer check: {str(e)}")
                 self.logger.error(traceback.format_exc())
                 await asyncio.sleep(30)
-    async def send_handshake(self, peer):
+    async def send_handshake(self, peer: str):
+        """Send handshake message with proper identification."""
         try:
-            await self.ensure_blockchain()
             handshake_data = {
                 "node_id": self.node_id,
                 "version": "1.0",
-                "blockchain_height": len(self.blockchain.chain)
+                "blockchain_height": len(self.blockchain.chain) if self.blockchain else 0,
+                "capabilities": ["quantum", "dagknight", "zkp"],
+                "timestamp": time.time(),
+                "role": "server" if peer in self.peers else "client"
             }
-            message = Message(type=MessageType.HANDSHAKE.value, payload=handshake_data)
-            await self.send_message(peer, message)
-            self.logger.debug(f"Handshake sent to peer {peer}")
+
+            message = Message(
+                type=MessageType.HANDSHAKE.value,
+                payload=handshake_data,
+                sender=self.node_id  # Add sender ID
+            )
+
+            await self.send_raw_message(peer, message)
+            self.logger.info(f"[HANDSHAKE] Handshake sent to {peer}")
+            
+            # Update peer state
+            async with self.peer_lock:
+                self.peer_states[peer] = "handshake_sent"
+
         except Exception as e:
-            self.logger.error(f"Error sending handshake to peer {peer}: {str(e)}")
+            self.logger.error(f"Error sending handshake to {peer}: {str(e)}")
             raise
 
 
-        except Exception as e:
-            self.logger.error(f"Error sending handshake to peer {peer}: {str(e)}")
-            raise
     def validate_public_key(self, public_key: str, expected_length: int = 294) -> bool:
         try:
             # Strip any surrounding whitespace
@@ -1212,97 +2615,122 @@ class P2PNode:
             return False
 
     async def exchange_public_keys(self, peer):
+        """Exchange public keys with message buffering."""
         try:
-            self.logger.debug(f"Starting public key exchange with peer {peer}")
+            self.logger.info(f"\n[KEY_EXCHANGE] {'='*20} Starting {'='*20}")
+            self.logger.info(f"[KEY_EXCHANGE] Peer: {peer}")
 
             # Parse and normalize peer address
             try:
                 peer_ip, peer_port = peer.split(':')
                 peer_port = int(peer_port)
                 peer_normalized = self.normalize_peer_address(peer_ip, peer_port)
-                self.logger.debug(f"Normalized peer address: {peer_normalized}")
+                self.logger.debug(f"[KEY_EXCHANGE] Normalized address: {peer_normalized}")
             except ValueError:
-                self.logger.error(f"Invalid peer address format: {peer}")
+                self.logger.error(f"[KEY_EXCHANGE] Invalid peer address format: {peer}")
                 return False
 
-            # Initialize state variables
-            public_key_sent = False
-            public_key_received = False
-            challenge_sent = False
-            challenge_received = False
-            challenge_response_received = False
+            # Get websocket
+            websocket = self.peers.get(peer_normalized)
+            if not websocket or websocket.closed:
+                self.logger.error(f"[KEY_EXCHANGE] No active connection for {peer_normalized}")
+                return False
 
-            our_challenge_id = None
+            # Check if this is a bootstrap node
+            is_bootstrap = peer_normalized in self.bootstrap_nodes
+            role = "client" if is_bootstrap else "server"
+            self.logger.info(f"[KEY_EXCHANGE] Role: {role} (Bootstrap: {is_bootstrap})")
 
-            # Set a timeout for the entire exchange process
-            exchange_timeout = 60  # 60 seconds total for the exchange
-            start_time = time.time()
+            # Message buffer for handling out-of-order messages
+            message_buffer = []
 
-            while not (public_key_received and challenge_response_received):
-                if time.time() - start_time > exchange_timeout:
-                    self.logger.warning(f"Public key exchange timed out for peer {peer_normalized}")
-                    return False
+            try:
+                # Prepare public key
+                public_key_pem = self.public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                ).decode()
 
-                # Step 1: Send our public key if not already sent
-                if not public_key_sent:
-                    await self.send_public_key(peer_normalized)
-                    public_key_sent = True
-                    self.logger.debug(f"Sent our public key to {peer_normalized}")
+                key_message = Message(
+                    type=MessageType.PUBLIC_KEY_EXCHANGE.value,
+                    payload={
+                        "public_key": public_key_pem,
+                        "node_id": self.node_id,
+                        "role": role
+                    }
+                )
 
-                # Step 2: Send our challenge if public key is received but challenge not sent
-                if public_key_received and not challenge_sent:
-                    our_challenge_id = await self.send_challenge(peer_normalized)
-                    challenge_sent = True
-                    self.logger.debug(f"Sent challenge with ID {our_challenge_id} to {peer_normalized}")
+                if role == "client":
+                    # Send our key
+                    await self.send_raw_message(peer_normalized, key_message)
+                    self.logger.debug("[KEY_EXCHANGE] Client sent public key")
 
-                # Step 3: Wait for the next message from the peer
-                try:
-                    message = await asyncio.wait_for(self.receive_message(peer_normalized), timeout=15)
-                    if message is None:
-                        self.logger.warning(f"No message received from {peer_normalized} within timeout period")
-                        continue
-                    self.logger.debug(f"Received message of type {message.type} from {peer_normalized}")
+                    # Wait for response with buffering
+                    while True:
+                        if len(message_buffer) > 0:
+                            message = message_buffer.pop(0)
+                        else:
+                            try:
+                                response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                                message = Message.from_json(response)
+                            except asyncio.TimeoutError:
+                                self.logger.error("[KEY_EXCHANGE] Timeout waiting for server response")
+                                return False
 
-                except asyncio.TimeoutError:
-                    self.logger.warning(f"Timeout while waiting for message from {peer_normalized}")
-                    continue
+                        if message.type == MessageType.PUBLIC_KEY_EXCHANGE.value:
+                            if await self.handle_public_key_exchange(message, peer_normalized):
+                                self.logger.info("[KEY_EXCHANGE] ✓ Client exchange completed")
+                                return True
+                            break
+                        else:
+                            message_buffer.append(message)
 
-                # Step 4: Handle incoming messages based on type
-                if message.type == MessageType.PUBLIC_KEY_EXCHANGE.value and not public_key_received:
-                    if await self.handle_public_key_exchange(message, peer_normalized):
-                        public_key_received = True
-                        self.logger.debug(f"Received and validated public key from {peer_normalized}")
-                    else:
-                        self.logger.error(f"Failed to handle public key from {peer_normalized}")
-                        return False
+                else:  # Server role
+                    # Wait for client's key with buffering
+                    while True:
+                        if len(message_buffer) > 0:
+                            message = message_buffer.pop(0)
+                        else:
+                            try:
+                                response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                                message = Message.from_json(response)
+                            except asyncio.TimeoutError:
+                                self.logger.error("[KEY_EXCHANGE] Timeout waiting for client key")
+                                return False
 
-                elif message.type == MessageType.CHALLENGE.value and not challenge_received:
-                    await self.handle_challenge(peer_normalized, message.payload, message.challenge_id)
-                    challenge_received = True
-                    self.logger.debug(f"Received challenge from {peer_normalized}")
+                        if message.type == MessageType.PUBLIC_KEY_EXCHANGE.value:
+                            if await self.handle_public_key_exchange(message, peer_normalized):
+                                # Send our key
+                                await self.send_raw_message(peer_normalized, key_message)
+                                self.logger.info("[KEY_EXCHANGE] ✓ Server exchange completed")
+                                return True
+                            break
+                        else:
+                            message_buffer.append(message)
 
-                elif message.type == MessageType.CHALLENGE_RESPONSE.value and not challenge_response_received:
-                    if await self.verify_challenge_response(peer_normalized, our_challenge_id, message.payload):
-                        challenge_response_received = True
-                        self.logger.debug(f"Challenge response from {peer_normalized} verified")
-                    else:
-                        self.logger.error(f"Invalid challenge response from {peer_normalized}")
-                        return False
-
-                else:
-                    self.logger.warning(f"Unexpected message type from {peer_normalized}: {message.type}")
-
-            # Final success state
-            self.logger.info(f"Successfully exchanged keys and completed challenge-response with {peer_normalized}")
-            return True
+            except websockets.exceptions.ConnectionClosed as e:
+                self.logger.error(f"[KEY_EXCHANGE] Connection closed: {str(e)}")
+                return False
+            except Exception as e:
+                self.logger.error(f"[KEY_EXCHANGE] Exchange error: {str(e)}")
+                return False
 
         except Exception as e:
-            self.logger.error(f"Error during key exchange with peer {peer}: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"[KEY_EXCHANGE] Fatal error: {str(e)}")
             return False
 
+        finally:
+            # Process buffered messages
+            if len(message_buffer) > 0 and websocket and not websocket.closed:
+                try:
+                    for message in message_buffer:
+                        await self.handle_message(message, peer_normalized)
+                except Exception as e:
+                    self.logger.error(f"[KEY_EXCHANGE] Error processing buffered messages: {str(e)}")
 
+            self.logger.info(f"[KEY_EXCHANGE] {'='*50}\n")
     async def send_public_key(self, peer: str):
+        """Send initial public key exchange with proper role assignment."""
         try:
             # Convert the public key to PEM format
             public_key_pem = self.public_key.public_bytes(
@@ -1310,134 +2738,604 @@ class P2PNode:
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
             ).decode()
 
-            # Log the full public key being sent for better tracking
-            self.logger.debug(f"Preparing to send public key to {peer}: {public_key_pem[:100]}...")  # Log first 100 chars
-
-            # Create the public key exchange message
+            # Create the public key exchange message with role
+            is_server = peer in self.peers  # If peer exists in self.peers, we're responding to their connection
             message = Message(
                 type=MessageType.PUBLIC_KEY_EXCHANGE.value,
-                payload={"public_key": public_key_pem}
+                payload={
+                    "public_key": public_key_pem,
+                    "node_id": self.node_id,
+                    "role": "server" if is_server else "client"
+                }
             )
 
-            # Send the public key message
-            if peer in self.peers:
-                await self.send_raw_message(peer, message)
-                self.logger.debug(f"Sent public key to peer {peer} via existing peer connection")
-            else:
-                # Use the WebSocket directly if peer is not already in the peers list
-                websocket = self.peers.get(peer)
-                if websocket:
-                    await websocket.send(message.to_json())
-                    self.logger.debug(f"Sent public key to peer {peer} via direct WebSocket connection")
-                else:
-                    # Log an error if no WebSocket connection is found
-                    self.logger.error(f"No WebSocket connection found for peer {peer}")
-                    return False
-
-            # Log a successful public key send operation
-            self.logger.info(f"Successfully sent public key to peer {peer}")
+            # Send the message
+            await self.send_raw_message(peer, message)
+            self.logger.info(f"Public key sent to {peer} as {message.payload['role']}")
+            return True
 
         except Exception as e:
-            # Log any exceptions that occur during the process
             self.logger.error(f"Failed to send public key to {peer}: {str(e)}")
-            self.logger.error(traceback.format_exc())
             return False
 
+
+        # Helpe
         # Helper function to send a challenge
-    async def send_challenge(self, peer: str) -> str:
+    async def send_challenge(self, peer: str) -> Optional[str]:
+        """Send challenge with state checking."""
         try:
+            # Normalize peer address
             peer_normalized = self.normalize_peer_address(peer)
+            
+            # Check current state
+            current_state = self.peer_states.get(peer_normalized)
+            if current_state in ["verified", "quantum_initializing"]:
+                self.logger.info(f"[CHALLENGE] Peer {peer_normalized} already verified, skipping challenge")
+                return None
+
+            self.logger.info(f"\n[CHALLENGE] {'='*50}")
+            self.logger.info(f"[CHALLENGE] Sending challenge to peer: {peer_normalized}")
+            
+            # Generate challenge
             challenge_id = str(uuid.uuid4())
             challenge = os.urandom(32).hex()
-
+            
+            # Store challenge
             if peer_normalized not in self.challenges:
                 self.challenges[peer_normalized] = {}
-            self.challenges[peer_normalized][challenge_id] = challenge
-
-            message = Message(
+                
+            self.challenges[peer_normalized][challenge_id] = {
+                'data': challenge,
+                'timestamp': time.time()
+            }
+            
+            # Create and send challenge message
+            challenge_message = Message(
                 type=MessageType.CHALLENGE.value,
                 payload={'challenge': f"{challenge_id}:{challenge}"},
-                sender=self.node_id,
-                receiver=peer_normalized,
                 challenge_id=challenge_id
             )
 
-            await self.send_message(peer_normalized, message)
-            logger.debug(f"Sent challenge with ID {challenge_id} to {peer_normalized}")
+            # Send challenge
+            await self.send_raw_message(peer_normalized, challenge_message)
+            self.logger.info(f"[CHALLENGE] ✓ Challenge sent to {peer_normalized}")
+            
             return challenge_id
 
         except Exception as e:
-            logger.error(f"Error sending challenge to {peer}: {str(e)}")
-            logger.error(traceback.format_exc())
+            self.logger.error(f"[CHALLENGE] Error sending challenge: {str(e)}")
+            self.logger.error(traceback.format_exc())
             return None
 
-        # Helper function to send a challenge
-    async def send_challenge(self, peer: str) -> str:
-        try:
-            peer_ip, peer_port = peer.split(':')
-            peer_port = int(peer_port)
-        except ValueError:
-            logger.error(f"Invalid peer address format: {peer}")
-            return None
-
-        normalized_peer = self.normalize_peer_address(peer_ip, peer_port)
-
-        challenge_id = str(uuid.uuid4())
-        challenge = os.urandom(32).hex()
-
-        if normalized_peer not in self.challenges:
-            self.challenges[normalized_peer] = {}
-        self.challenges[normalized_peer][challenge_id] = challenge
-
-        message = Message(
-            type=MessageType.CHALLENGE.value,
-            payload={'challenge': f"{challenge_id}:{challenge}"},
-            sender=self.node_id,
-            receiver=normalized_peer,
-            challenge_id=challenge_id
-        )
-
-        await self.send_message(normalized_peer, message)
-        logger.debug(f"Sent challenge with ID {challenge_id} to {normalized_peer}")
-        return challenge_id
 
 
 
     def generate_node_id(self) -> str:
-        return hashlib.sha1(f"{self.host}:{self.port}".encode()).hexdigest()
+        """Generate a unique node ID."""
+        if hasattr(self, 'host') and hasattr(self, 'port'):
+            return hashlib.sha1(f"{self.host}:{self.port}".encode()).hexdigest()
+        return hashlib.sha1(os.urandom(20)).hexdigest()
+
 
     def generate_magnet_link(self) -> MagnetLink:
         info_hash = self.node_id
         peer_id = base64.b64encode(f"{self.host}:{self.port}".encode()).decode()
         return MagnetLink(info_hash, [], peer_id)
     async def start(self):
+        """Enhanced start method with quantum component initialization, bootstrap management, and detailed logging."""
         try:
-            # Step 1: Start the WebSocket server
-            self.server = await websockets.serve(self.handle_connection, self.host, self.port)
-            logger.info(f"P2P node started on {self.host}:{self.port}")
+            self.logger.info("\n=== Starting P2P Node ===")
 
-            # Step 2: Join the network (if applicable)
-            await self.join_network()
+            # Step 1: Initialize Quantum Components
+            try:
+                self.logger.info("[QUANTUM] Initializing quantum components...")
 
-            # Step 3: Start periodic tasks for managing connections and heartbeats
-            asyncio.create_task(self.periodic_tasks())         # Handle periodic operations like cleanups
-            asyncio.create_task(self.periodic_peer_check())    # Regularly check the health of peers
-            asyncio.create_task(self.send_heartbeats())        # Send heartbeats to peers for liveness checks
-            asyncio.create_task(self.periodic_connection_check()) # Check connections periodically
-            asyncio.create_task(self.periodic_sync())
-            asyncio.create_task(self.update_active_peers())  # Add this line
+                if not hasattr(self, 'quantum_sync') or self.quantum_sync is None:
+                    self.quantum_sync = QuantumEntangledSync(self.node_id)
+                
+                # Initialize with blockchain data
+                initial_data = {
+                    "wallets": [w.to_dict() for w in self.blockchain.get_wallets()] if self.blockchain else [],
+                    "transactions": [tx.to_dict() for tx in self.blockchain.get_recent_transactions(limit=100)] if self.blockchain else [],
+                    "blocks": [block.to_dict() for block in self.blockchain.chain] if self.blockchain else [],
+                    "mempool": [tx.to_dict() for tx in self.blockchain.mempool] if hasattr(self.blockchain, '_mempool') else []
+                }
 
+                await self.quantum_sync.initialize_quantum_state(initial_data)
+                self.quantum_initialized = True
+                self.logger.info("[QUANTUM] ✓ Quantum components initialized successfully")
+
+            except Exception as e:
+                self.logger.error("[QUANTUM] Quantum component initialization failed: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                raise RuntimeError("Quantum component initialization failed") from e
+
+            # Step 2: Initialize Bootstrap Manager
+            self.bootstrap_manager = BootstrapManager(self)
             
-            # Step 4: Start WebSocket updates handling
-            await self.ws_updates.start()
-            self.ws_updates.register_handler('subscribe_orderbook', self.handle_subscribe_orderbook)
-            self.ws_updates.register_handler('subscribe_trades', self.handle_subscribe_trades)
+            # Step 3: Attempt to Connect to Bootstrap Nodes
+            if self.bootstrap_nodes:
+                try:
+                    self.logger.info("Connecting to Bootstrap Nodes")
+                    bootstrap_success = await self.bootstrap_manager.connect_to_bootstrap_nodes()
+                    if not bootstrap_success:
+                        self.logger.warning("Failed to connect to bootstrap network, continuing as standalone node")
+                except Exception as e:
+                    self.logger.error("Error connecting to bootstrap nodes: {str(e)}")
+                    self.logger.error(traceback.format_exc())
+
+            # Additional steps (e.g., WebSocket server, background tasks) here...
+
+            self.logger.info("✓ Node started successfully")
 
         except Exception as e:
-            # Log errors during node startup
-            logger.error(f"Failed to start P2P node: {str(e)}")
-            logger.error(traceback.format_exc())
+            self.logger.error(f"Fatal error during node startup: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            raise
 
+
+    async def cleanup(self):
+        """Cleanup resources before shutdown."""
+        try:
+            if self.server:
+                self.server.close()
+                await self.server.wait_closed()
+                self.logger.info("WebSocket server closed")
+            
+            self.is_running = False
+            
+            # Close all peer connections
+            for peer in list(self.peers.keys()):
+                await self.remove_peer(peer)
+                
+            self.logger.info("P2P node cleanup completed")
+            
+        except Exception as e:
+            self.logger.error(f"Error during P2P node cleanup: {str(e)}")
+    async def shutdown(self, sig=None):
+        """Gracefully shutdown the node."""
+        if sig:
+            self.logger.info(f"Received exit signal {sig.name}...")
+        
+        self.is_running = False
+        
+        # Cancel all tasks
+        for task in asyncio.all_tasks():
+            if task is not asyncio.current_task():
+                task.cancel()
+        
+        # Wait for tasks to complete
+        await asyncio.gather(*asyncio.all_tasks(), return_exceptions=True)
+        
+        # Cleanup resources
+        await self.cleanup()
+        
+        self.logger.info("Node shutdown complete")
+    async def monitor_connections(self):
+        """Monitor connection health and status."""
+        while self.is_running:
+            try:
+                active_peers = len(self.connected_peers)
+                total_peers = len(self.peers)
+                
+                self.logger.info(f"\n=== Connection Status ===")
+                self.logger.info(f"Active peers: {active_peers}/{total_peers}")
+                self.logger.info(f"Connected peers: {list(self.connected_peers)}")
+                
+                # Check quantum entanglement status
+                if hasattr(self, 'quantum_sync'):
+                    entangled_peers = len(self.quantum_sync.entangled_peers)
+                    self.logger.info(f"Quantum entangled peers: {entangled_peers}")
+                    
+                    # Check quantum state fidelities
+                    for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                        try:
+                            fidelity = await self.quantum_sync.measure_sync_state(component)
+                            self.logger.debug(f"{component} quantum fidelity: {fidelity:.3f}")
+                        except Exception as e:
+                            self.logger.error(f"Error measuring {component} fidelity: {str(e)}")
+                
+                # Trigger reconnection if needed
+                if active_peers < self.target_peer_count:
+                    self.logger.info("Below target peer count, triggering peer discovery")
+                    asyncio.create_task(self.find_and_connect_to_new_peers())
+                
+                await asyncio.sleep(60)  # Monitor every minute
+                
+            except Exception as e:
+                self.logger.error(f"Error in connection monitoring: {str(e)}")
+                await asyncio.sleep(60)
+        # Add periodic quantum heartbeat sender
+        async def periodic_quantum_heartbeats(self):
+            """Send quantum heartbeats periodically to all peers"""
+            while self.is_running:
+                try:
+                    self.logger.info("[QUANTUM] Starting quantum heartbeat round")
+                    for peer in self.quantum_sync.entangled_peers:
+                        try:
+                            await self.send_quantum_heartbeats(peer)
+                            self.logger.info(f"✓ Sent quantum heartbeat to {peer}")
+                        except Exception as e:
+                            self.logger.error(f"Failed to send quantum heartbeat to {peer}: {str(e)}")
+                    
+                    await asyncio.sleep(self.quantum_heartbeat_interval)  # Default 5 seconds
+                    
+                except Exception as e:
+                    self.logger.error(f"Error in quantum heartbeat loop: {str(e)}")
+                    await asyncio.sleep(self.quantum_heartbeat_interval)
+    async def send_quantum_heartbeat(self, peer: str) -> bool:
+        """Send quantum heartbeat to a peer with detailed logging"""
+        try:
+            self.logger.info(f"\n[QUANTUM] {'='*20} Quantum Heartbeat {'='*20}")
+            self.logger.info(f"[QUANTUM] Sending quantum heartbeat to peer {peer}")
+
+            # Get current quantum states
+            quantum_states = {}
+            fidelities = {}
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                try:
+                    qubit = getattr(self.quantum_sync.register, component)
+                    quantum_states[component] = qubit.value
+                    fidelity = await self.quantum_sync.measure_sync_state(component)
+                    fidelities[component] = fidelity
+                    self.logger.debug(f"[QUANTUM] {component} state: {qubit.value}")
+                    self.logger.debug(f"[QUANTUM] {component} fidelity: {fidelity:.3f}")
+                except Exception as e:
+                    self.logger.error(f"[QUANTUM] Error getting state for {component}: {str(e)}")
+                    return False
+
+            # Get Bell pair
+            bell_pair = self.quantum_sync.bell_pairs.get(peer)
+            if not bell_pair:
+                self.logger.warning(f"[QUANTUM] No Bell pair found for peer {peer}")
+                return False
+            
+            bell_pair_id = self.quantum_notifier._get_bell_pair_id(bell_pair)
+            self.logger.debug(f"[QUANTUM] Using Bell pair ID: {bell_pair_id[:16]}...")
+
+            # Create heartbeat
+            heartbeat = QuantumHeartbeat(
+                node_id=self.node_id,
+                timestamp=time.time(),
+                quantum_states=quantum_states,
+                fidelities=fidelities,
+                bell_pair_id=bell_pair_id,
+                nonce=os.urandom(16).hex()
+            )
+
+            # Sign the heartbeat
+            message_str = (
+                f"{heartbeat.node_id}:{heartbeat.timestamp}:{heartbeat.bell_pair_id}:"
+                f"{heartbeat.nonce}"
+            ).encode()
+            
+            signature = self.private_key.sign(
+                message_str,
+                padding.PSS(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            heartbeat.signature = base64.b64encode(signature).decode()
+
+            # Create and send message
+            message = Message(
+                type=MessageType.QUANTUM_HEARTBEAT.value,
+                payload=heartbeat.to_dict()
+            )
+            await self.send_message(peer, message)
+            
+            # Update tracking
+            self.last_quantum_heartbeat[peer] = time.time()
+            
+            self.logger.info(f"[QUANTUM] ✓ Quantum heartbeat sent successfully to {peer}")
+            self.logger.debug(f"[QUANTUM] Current fidelities: {fidelities}")
+            self.logger.info(f"[QUANTUM] {'='*50}\n")
+            
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[QUANTUM] Error sending quantum heartbeat to {peer}: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return False
+
+    async def periodic_quantum_heartbeats(self):
+        """Continuously send quantum heartbeats to all entangled peers."""
+        while self.is_running:
+            try:
+                for peer in list(self.quantum_sync.entangled_peers.keys()):
+                    try:
+                        await self.send_quantum_heartbeat(peer)
+                        await asyncio.sleep(1)  # Small delay between peers
+                    except Exception as e:
+                        self.logger.error(f"Error sending heartbeat to {peer}: {str(e)}")
+                
+                await asyncio.sleep(self.quantum_heartbeat_interval)  # Wait before next round
+                
+            except Exception as e:
+                self.logger.error(f"Error in quantum heartbeat loop: {str(e)}")
+                await asyncio.sleep(5)  # Brief pause on error
+
+    async def send_quantum_heartbeats(self, peer: str):
+        """Send quantum heartbeat to a specific peer"""
+        try:
+            self.logger.info(f"Initiating quantum heartbeat send to peer {peer}")
+
+            # Step 1: Get current quantum states and fidelities for each component
+            quantum_states = {}
+            fidelities = {}
+            
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                try:
+                    # Retrieve quantum state
+                    qubit = getattr(self.quantum_sync.register, component)
+                    quantum_states[component] = qubit.value
+                    self.logger.debug(f"Quantum state for {component}: {qubit.value}")
+
+                    # Measure fidelity for synchronization state
+                    fidelities[component] = await self.quantum_sync.measure_sync_state(component)
+                    self.logger.debug(f"Fidelity for {component}: {fidelities[component]}")
+
+                except AttributeError as ae:
+                    self.logger.error(f"Failed to retrieve quantum state or fidelity for {component}: {str(ae)}")
+                    raise
+
+            # Step 2: Get Bell pair ID for the peer
+            try:
+                bell_pair_id = self.quantum_notifier._get_bell_pair_id(self.quantum_sync.bell_pairs[peer])
+                self.logger.debug(f"Retrieved Bell pair ID for peer {peer}: {bell_pair_id}")
+            except KeyError as ke:
+                self.logger.error(f"Bell pair ID not found for peer {peer}: {str(ke)}")
+                raise
+
+            # Step 3: Create QuantumHeartbeat instance
+            heartbeat = QuantumHeartbeat(
+                node_id=self.node_id,
+                timestamp=time.time(),
+                quantum_states=quantum_states,
+                fidelities=fidelities,
+                bell_pair_id=bell_pair_id,
+                nonce=self.quantum_notifier._generate_nonce()
+            )
+            self.logger.debug(f"Quantum heartbeat created: {heartbeat}")
+
+            # Step 4: Sign the heartbeat
+            try:
+                message_str = (
+                    f"{heartbeat.node_id}:{heartbeat.timestamp}:{heartbeat.bell_pair_id}:"
+                    f"{heartbeat.nonce}"
+                ).encode()
+                
+                signature = self.private_key.sign(
+                    message_str,
+                    padding.PSS(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH
+                    ),
+                    hashes.SHA256()
+                )
+                heartbeat.signature = base64.b64encode(signature).decode()
+                self.logger.debug(f"Quantum heartbeat signed with signature: {heartbeat.signature}")
+            except Exception as sign_error:
+                self.logger.error(f"Error signing quantum heartbeat for peer {peer}: {str(sign_error)}")
+                raise
+
+            # Step 5: Prepare and send the quantum heartbeat message
+            message = Message(
+                type=MessageType.QUANTUM_HEARTBEAT.value,
+                payload=heartbeat.to_dict()
+            )
+            self.logger.debug(f"Quantum heartbeat message prepared for peer {peer}: {message}")
+
+            await self.send_message(peer, message)
+            self.logger.info(f"Quantum heartbeat successfully sent to peer {peer}")
+
+        except Exception as e:
+            self.logger.error(f"Error sending quantum heartbeat to {peer}: {str(e)}")
+
+
+    async def run_quantum_heartbeats(self):
+        """Dedicated quantum heartbeat loop"""
+        while self.is_running:
+            try:
+                if not self.quantum_initialized:
+                    self.logger.warning("[QUANTUM] Quantum components not initialized, skipping heartbeats")
+                    await asyncio.sleep(5)
+                    continue
+
+                self.logger.info(f"\n[QUANTUM] {'='*20} Quantum Heartbeat Round {'='*20}")
+                peers = [p for p in self.connected_peers if p in self.quantum_sync.entangled_peers]
+                self.logger.info(f"[QUANTUM] Sending quantum heartbeats to {len(peers)} entangled peers")
+
+                for peer in peers:
+                    try:
+                        await self.send_quantum_heartbeat(peer)
+                        await asyncio.sleep(1)  # Small delay between peers
+                    except Exception as e:
+                        self.logger.error(f"[QUANTUM] Error sending heartbeat to {peer}: {str(e)}")
+
+                self.logger.info(f"[QUANTUM] {'='*50}\n")
+                await asyncio.sleep(self.quantum_heartbeat_interval)
+
+            except Exception as e:
+                self.logger.error(f"[QUANTUM] Error in quantum heartbeat loop: {str(e)}")
+                await asyncio.sleep(5)
+
+
+    async def handle_quantum_heartbeat(self, message: Message, sender: str):
+        """Handle incoming quantum heartbeat with detailed logging"""
+        try:
+            self.logger.info(f"\n[QUANTUM] {'='*20} Received Heartbeat {'='*20}")
+            self.logger.info(f"[QUANTUM] Processing heartbeat from {sender}")
+
+            # Parse heartbeat data
+            heartbeat = QuantumHeartbeat.from_dict(message.payload)
+            self.logger.debug(f"[QUANTUM] Heartbeat timestamp: {heartbeat.timestamp}")
+            
+            # Verify signature
+            if not await self.verify_quantum_heartbeat(heartbeat, sender):
+                self.logger.warning(f"[QUANTUM] ✗ Invalid heartbeat signature from {sender}")
+                return False
+            self.logger.debug(f"[QUANTUM] ✓ Signature verified")
+
+            # Verify Bell pair
+            bell_pair = self.quantum_sync.bell_pairs.get(sender)
+            if not bell_pair:
+                self.logger.warning(f"[QUANTUM] ✗ No Bell pair for {sender}")
+                return False
+            
+            local_bell_pair_id = self.quantum_notifier._get_bell_pair_id(bell_pair)
+            if heartbeat.bell_pair_id != local_bell_pair_id:
+                self.logger.warning(f"[QUANTUM] ✗ Bell pair ID mismatch from {sender}")
+                return False
+            self.logger.debug(f"[QUANTUM] ✓ Bell pair verified")
+
+            # Check quantum states and fidelities
+            decoherent_components = []
+            for component, remote_state in heartbeat.quantum_states.items():
+                local_state = getattr(self.quantum_sync.register, component).value
+                fidelity = self.quantum_sync._calculate_fidelity(local_state, remote_state)
+                
+                self.logger.debug(f"[QUANTUM] {component}:")
+                self.logger.debug(f"  - Local state: {local_state}")
+                self.logger.debug(f"  - Remote state: {remote_state}")
+                self.logger.debug(f"  - Fidelity: {fidelity:.3f}")
+                
+                if fidelity < self.quantum_sync.decoherence_threshold:
+                    decoherent_components.append(component)
+                    self.logger.warning(
+                        f"[QUANTUM] Low fidelity detected in {component}: {fidelity:.3f}"
+                    )
+
+            # Handle decoherence if detected
+            if decoherent_components:
+                self.logger.warning(
+                    f"[QUANTUM] Decoherence detected in components: {decoherent_components}"
+                )
+                await self.handle_quantum_decoherence(sender, decoherent_components)
+            else:
+                self.logger.info(f"[QUANTUM] ✓ All components synchronized")
+
+            # Update tracking
+            self.quantum_heartbeats[sender] = heartbeat
+            self.last_quantum_heartbeat[sender] = time.time()
+            
+            # Send response
+            await self.send_quantum_heartbeat_response(sender, heartbeat)
+            
+            self.logger.info(f"[QUANTUM] ✓ Heartbeat processed successfully")
+            self.logger.info(f"[QUANTUM] {'='*50}\n")
+            
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[QUANTUM] Error handling heartbeat from {sender}: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return False
+
+
+
+    async def send_quantum_heartbeat_response(self, sender: str, received_heartbeat: QuantumHeartbeat):
+        """Send response to quantum heartbeat"""
+        try:
+            response = Message(
+                type=MessageType.QUANTUM_HEARTBEAT_RESPONSE.value,
+                payload={
+                    'original_nonce': received_heartbeat.nonce,
+                    'timestamp': time.time(),
+                    'node_id': self.node_id
+                }
+            )
+            await self.send_message(sender, response)
+            
+        except Exception as e:
+            self.logger.error(f"Error sending heartbeat response to {sender}: {str(e)}")
+
+    async def verify_quantum_heartbeat(self, heartbeat: QuantumHeartbeat, sender: str) -> bool:
+        """Verify quantum heartbeat signature"""
+        try:
+            # Get sender's public key
+            public_key = self.peer_public_keys.get(sender)
+            if not public_key:
+                return False
+
+            # Verify signature
+            message_str = (
+                f"{heartbeat.node_id}:{heartbeat.timestamp}:{heartbeat.bell_pair_id}:"
+                f"{heartbeat.nonce}"
+            ).encode()
+            
+            signature = base64.b64decode(heartbeat.signature)
+            
+            public_key.verify(
+                signature,
+                message_str,
+                padding.PSS(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            return True
+
+        except Exception:
+            return False
+
+    async def monitor_quantum_heartbeats(self):
+        """Monitor quantum heartbeats and handle timeouts"""
+        while True:
+            try:
+                current_time = time.time()
+                peers_to_check = list(self.quantum_sync.entangled_peers.keys())
+                
+                for peer in peers_to_check:
+                    last_heartbeat = self.last_quantum_heartbeat.get(peer, 0)
+                    if current_time - last_heartbeat > self.quantum_heartbeat_timeout:
+                        self.logger.warning(f"Quantum heartbeat timeout for peer {peer}")
+                        await self.handle_quantum_heartbeat_timeout(peer)
+
+                await asyncio.sleep(self.quantum_heartbeat_interval)
+                
+            except Exception as e:
+                self.logger.error(f"Error monitoring quantum heartbeats: {str(e)}")
+                await asyncio.sleep(self.quantum_heartbeat_interval)
+
+    async def handle_quantum_heartbeat_timeout(self, peer: str):
+        """Handle quantum heartbeat timeout"""
+        try:
+            self.logger.warning(f"Initiating quantum resync due to heartbeat timeout: {peer}")
+            
+            # Request resync for all components
+            components = ['wallets', 'transactions', 'blocks', 'mempool']
+            await self.request_quantum_resync(peer, components)
+            
+            # If resync fails, remove quantum entanglement
+            if not await self.verify_quantum_sync(peer):
+                self.logger.error(f"Quantum resync failed for {peer}, removing entanglement")
+                await self.remove_quantum_entanglement(peer)
+
+        except Exception as e:
+            self.logger.error(f"Error handling quantum heartbeat timeout: {str(e)}")
+
+    async def handle_heartbeat_decoherence(self, peer: str, components: List[str]):
+        """Handle decoherence detected in heartbeat"""
+        try:
+            self.logger.warning(f"Handling heartbeat decoherence for {peer}: {components}")
+            
+            # Request quantum resync for decoherent components
+            await self.request_quantum_resync(peer, components)
+            
+            # Verify sync was successful
+            if not await self.verify_quantum_sync(peer):
+                self.logger.error(f"Failed to restore quantum sync with {peer}")
+                return False
+                
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error handling heartbeat decoherence: {str(e)}")
+            return False
 
     async def handle_subscribe_orderbook(self, websocket, data):
         # Logic to handle orderbook subscription
@@ -1475,39 +3373,164 @@ class P2PNode:
 
         # After processing the trade, broadcast the update
         await self.broadcast_trade_update(trade_data['pair'], trade_data)
-    async def join_network(self):
-        logger.info("Attempting to join the network...")
-        connected = False
+    async def start(self):
+        """Start the P2P node and connect to bootstrap network."""
+        await self.initialize_dagknight()
 
-        for node in self.bootstrap_nodes + self.seed_nodes:
-            if node:
-                try:
-                    ip, port = node.split(':')
-                    node_id = self.generate_node_id()
-                    kademlia_node = KademliaNode(node_id, ip, int(port))
+        try:
+            self.logger.info("\n=== Starting P2P Node ===")
+            
+            # Initialize quantum components first
+            try:
+                self.logger.info("[QUANTUM] Initializing quantum components...")
+                
+                if not hasattr(self, 'quantum_sync') or self.quantum_sync is None:
+                    self.quantum_sync = QuantumEntangledSync(self.node_id)
                     
-                    logger.info(f"Attempting to connect to node: {node}")
-                    connection_result = await self.connect_to_peer(kademlia_node)
-                    
-                    if connection_result:
-                        connected = True
-                        logger.info(f"Successfully connected to node: {node}")
-                        # Add the connected peer to the active list
-                        self.connected_peers.add(f"{ip}:{port}")
-                    else:
-                        logger.warning(f"Failed to establish connection with node: {node}")
+                # Initialize with blockchain data
+                initial_data = {
+                    "wallets": [w.to_dict() for w in self.blockchain.get_wallets()] if self.blockchain else [],
+                    "transactions": [tx.to_dict() for tx in self.blockchain.get_recent_transactions(limit=100)] if self.blockchain else [],  
+                    "blocks": [block.to_dict() for block in self.blockchain.chain] if self.blockchain else [],
+                    "mempool": [] if not hasattr(self.blockchain, '_mempool') else [tx.to_dict() for tx in self.blockchain.mempool]
+                }
 
-                except Exception as e:
-                    logger.error(f"Failed to connect to node {node}. Error: {str(e)}")
-                    logger.error(traceback.format_exc())
+                await self.quantum_sync.initialize_quantum_state(initial_data)
+                self.quantum_initialized = True
+                self.logger.info("[QUANTUM] ✓ Quantum components initialized")
 
-        if connected:
-            logger.info(f"Successfully joined the network. Connected to {len(self.connected_peers)} peers.")
-            await self.sync_with_connected_peers()
-        else:
-            logger.warning("Failed to connect to any nodes. Running as a standalone node.")
+                # Find available port
+                max_port_attempts = 10
+                current_port = self.port
+                server_started = False
+                
+                for port_attempt in range(max_port_attempts):
+                    try:
+                        self.server = await websockets.serve(
+                            self.handle_connection, 
+                            self.host, 
+                            current_port,
+                            ping_interval=None
+                        )
+                        self.port = current_port  # Update port if successful
+                        self.logger.info(f"✓ WebSocket server started on {self.host}:{current_port}")
+                        server_started = True
+                        break
+                    except OSError as e:
+                        if e.errno == 98:  # Address already in use
+                            current_port += 1
+                            self.logger.warning(f"Port {current_port-1} in use, trying port {current_port}")
+                            if port_attempt == max_port_attempts - 1:
+                                raise RuntimeError(f"Could not find available port after {max_port_attempts} attempts")
+                        else:
+                            raise
 
-        self.log_connected_peers()
+                if not server_started:
+                    raise RuntimeError("Failed to start WebSocket server")
+
+                # Join network before starting tasks
+                self.is_running = True
+                network_joined = await self.join_network()
+                if network_joined:
+                    self.logger.info("✓ Successfully joined P2P network")
+                else:
+                    self.logger.warning("Failed to join P2P network, running as standalone node")
+
+                # Start background tasks
+                tasks = [
+                    asyncio.create_task(self.send_heartbeats(), name="heartbeat"),
+                    asyncio.create_task(self.run_quantum_heartbeats(), name="quantum_heartbeat"),
+                    asyncio.create_task(self.periodic_cleanup(), name="cleanup"),
+                    # Update the line in the start method (or relevant section) as follows
+                    asyncio.create_task(self.maintain_peer_connections(), name="connections"),
+                    asyncio.create_task(self.quantum_monitor.start_monitoring(), name="quantum_monitor"),
+                    asyncio.create_task(self.update_active_peers(), name="peer_updates"),
+                    asyncio.create_task(self.monitor_network_security())
+
+
+                ]
+
+                # Log started tasks
+                self.logger.info("Started background tasks:")
+                for task in tasks:
+                    self.logger.info(f"  - {task.get_name()}")
+
+                # Monitor tasks for failures
+                asyncio.create_task(self.monitor_background_tasks(tasks))
+                
+                self.logger.info("✓ All background tasks started")
+
+            except Exception as e:
+                self.logger.error(f"[QUANTUM] Failed to initialize quantum components: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                raise
+
+        except Exception as e:
+            self.logger.error(f"Fatal error starting P2P node: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            raise
+
+    async def monitor_background_tasks(self, tasks: List[asyncio.Task]):
+        """Monitor background tasks and restart them if they fail."""
+        while self.is_running:
+            for task in tasks[:]:  # Copy list to avoid modification during iteration
+                if task.done():
+                    try:
+                        await task
+                    except Exception as e:
+                        self.logger.error(f"Task {task.get_name()} failed with error: {str(e)}")
+                        self.logger.error(traceback.format_exc())
+                        # Restart the task
+                        if task.get_name() == "heartbeat":
+                            new_task = asyncio.create_task(self.send_heartbeats(), name="heartbeat")
+                        elif task.get_name() == "quantum_heartbeat":
+                            new_task = asyncio.create_task(self.run_quantum_heartbeats(), name="quantum_heartbeat")
+                        elif task.get_name() == "cleanup":
+                            new_task = asyncio.create_task(self.periodic_cleanup(), name="cleanup")
+                        elif task.get_name() == "connections":
+                            new_task = asyncio.create_task(self.maintain_peer_connections(), name="connections")
+                        elif task.get_name() == "quantum_monitor":
+                            new_task = asyncio.create_task(self.quantum_monitor.start_monitoring(), name="quantum_monitor")
+                        elif task.get_name() == "peer_updates":
+                            new_task = asyncio.create_task(self.update_active_peers(), name="peer_updates")
+                        
+                        tasks.remove(task)
+                        tasks.append(new_task)
+                        self.logger.info(f"Restarted failed task: {task.get_name()}")
+                        
+            await asyncio.sleep(5)  # Check every 5 seconds
+
+
+    async def connect_to_peer_list(self, peer_list: List[str], max_connections: int = 5):
+        """Connect to a list of peers with limit."""
+        connected_count = 0
+        for peer_addr in peer_list:
+            if connected_count >= max_connections:
+                break
+                
+            try:
+                peer_ip, peer_port = peer_addr.split(':')
+                peer_node = KademliaNode(
+                    id=self.generate_node_id(),
+                    ip=peer_ip,
+                    port=int(peer_port)
+                )
+                
+                if await self.connect_to_peer(peer_node):
+                    connected_count += 1
+                    self.logger.info(f"Connected to peer {peer_addr}")
+                
+            except Exception as e:
+                self.logger.error(f"Error connecting to peer {peer_addr}: {str(e)}")
+                continue
+
+        return connected_count
+
+    def load_bootstrap_nodes(self):
+        """Load bootstrap nodes from environment variables."""
+        bootstrap_nodes = os.getenv('BOOTSTRAP_NODES', '').split(',')
+        return [node.strip() for node in bootstrap_nodes if node.strip()]
+
 
     async def update_active_peers(self):
         while True:
@@ -1558,10 +3581,25 @@ class P2PNode:
                 await self.connect_to_peer(peer_node)
         except Exception as e:
             logger.error(f"Failed to connect to seed node {node.address}: {str(e)}")
-    async def request_peer_list(self, seed_node: str) -> List[str]:
-        message = Message(MessageType.PEER_LIST_REQUEST.value, {})
-        response = await self.send_and_wait_for_response(seed_node, message)
-        return response.payload.get('peers', [])
+    async def request_peer_list(self, peer: str) -> List[str]:
+        """Request peer list from a connected peer."""
+        try:
+            self.logger.debug(f"Requesting peer list from {peer}")
+            message = Message(
+                type=MessageType.PEER_LIST_REQUEST.value,
+                payload={}
+            )
+            
+            response = await self.send_and_wait_for_response(peer, message, timeout=10.0)
+            if response and response.type == MessageType.PEER_LIST_RESPONSE.value:
+                peer_list = response.payload.get('peers', [])
+                self.logger.debug(f"Received {len(peer_list)} peers from {peer}")
+                return peer_list
+            return []
+        except Exception as e:
+            self.logger.error(f"Error requesting peer list from {peer}: {str(e)}")
+            return []
+
 
     async def handle_peer_list_request(self, sender: str):
         active_peers = await self.get_active_peers()
@@ -1738,33 +3776,40 @@ class P2PNode:
             return []
 
 
-    async def find_node(self, node_id: str, k: int = 5) -> Optional[List[Dict]]:
+    async def find_node(self, node_id: str, k: int = 5) -> Optional[List[KademliaNode]]:
+        """Find nodes closest to the given node ID."""
         try:
+            self.logger.debug(f"Finding nodes closest to {node_id}")
             closest_peers = self.select_closest_peers(node_id, k)
-            nodes = []
+            
+            if not closest_peers:
+                self.logger.warning("No peers available for node lookup")
+                return []
 
+            nodes = []
             for peer in closest_peers:
-                if isinstance(peer, dict):
-                    peer_address = f"{peer['ip']}:{peer['port']}"
-                else:
-                    peer_address = peer
-                response = await self.send_find_node(node_id, peer_address)
-                if response and 'nodes' in response.payload:
-                    nodes.extend(response.payload['nodes'])
-                else:
-                    self.logger.warning(f"No nodes found in response from peer {peer_address}")
+                try:
+                    response = await self.send_find_node(node_id, peer)
+                    if response and isinstance(response.payload, dict) and 'nodes' in response.payload:
+                        new_nodes = response.payload['nodes']
+                        if isinstance(new_nodes, list):
+                            nodes.extend(new_nodes)
+                            self.logger.debug(f"Received {len(new_nodes)} nodes from peer {peer}")
+                except Exception as e:
+                    self.logger.error(f"Error getting nodes from peer {peer}: {str(e)}")
+                    continue
 
             if not nodes:
-                self.logger.warning("No nodes found during find_node operation.")
-                return None
+                self.logger.warning("No nodes found during find_node operation")
+                return []
 
-            self.logger.debug(f"Found nodes: {nodes}")
+            self.logger.debug(f"Found {len(nodes)} total nodes")
             return nodes
 
         except Exception as e:
-            self.logger.error(f"Failed to find node: {str(e)}")
+            self.logger.error(f"Error in find_node: {str(e)}")
             self.logger.error(traceback.format_exc())
-            return None
+            return []
 
     def get_closest_nodes(self, node_id: str) -> List[KademliaNode]:
         try:
@@ -2105,105 +4150,174 @@ class P2PNode:
             self.logger.error(f"Error handling block acceptance: {str(e)}")
             self.logger.error(traceback.format_exc())
     async def handle_message(self, message: Message, sender: str):
+        """Enhanced message handler with consistent type comparison, quantum state updates, verification, and detailed logging."""
         try:
-            logger.debug(f"Handling message of type {message.type} from {sender}")
+            # Extract message type and standardize it for comparison
+            msg_type = str(message.type).lower() if message.type else ""
+            self.logger.debug(f"\n[MESSAGE] Received message from {sender}")
+            self.logger.debug(f"[MESSAGE] Type: {msg_type}")
+            self.logger.debug(f"[MESSAGE] Payload: {message.payload}")
             response = None
 
-            # Handle BLOCK message
-            if message.type == MessageType.BLOCK.value:
-                logger.info(f"[BLOCK] Received BLOCK message from {sender}. Block details: {message.payload}")
-                await self.handle_new_block(message.payload, sender)
+            # Handle challenge messages first with direct string comparison
+            if msg_type == "challenge":
+                self.logger.info(f"[CHALLENGE] Processing challenge from {sender}")
+                challenge_payload = message.payload.get('challenge')
+                if not challenge_payload:
+                    self.logger.error(f"[CHALLENGE] Invalid challenge payload from {sender}")
+                    return
 
-            # Handle GET_WALLETS message
-            elif message.type == MessageType.GET_WALLETS.value:
-                logger.info(f"[WALLETS] Received GET_WALLETS request from {sender}.")
+                # Parse challenge data
+                try:
+                    if ':' in challenge_payload:
+                        challenge_id, challenge = challenge_payload.split(':', 1)
+                    else:
+                        challenge_id = message.challenge_id
+                        challenge = challenge_payload
+
+                    self.logger.debug(f"[CHALLENGE] Challenge ID: {challenge_id}")
+                    self.logger.debug(f"[CHALLENGE] Challenge Data: {challenge[:32]}...")
+                    await self.handle_challenge(sender, challenge, challenge_id)
+                    return
+
+                except Exception as e:
+                    self.logger.error(f"[CHALLENGE] Error parsing challenge: {str(e)}")
+                    return
+
+            elif msg_type == "challenge_response":
+                self.logger.info(f"[CHALLENGE_RESPONSE] Received response from {sender}")
+                await self.handle_challenge_response(sender, message.payload)
+                return
+
+            # Quantum state update messages with verification
+            elif msg_type == str(MessageType.QUANTUM_STATE_UPDATE.value).lower():
+                success = await self.quantum_notifier.handle_update_message(message.payload, sender)
+                if success:
+                    await self.quantum_notifier._send_verification(QuantumStateUpdate.from_dict(message.payload), sender)
+                return
+
+            elif msg_type == str(MessageType.QUANTUM_HEARTBEAT.value).lower():
+                self.logger.info(f"[QUANTUM] Received heartbeat from {sender}")
+                await self.handle_quantum_heartbeat(message, sender)
+                return
+
+            elif msg_type == str(MessageType.QUANTUM_STATE_VERIFICATION.value).lower():
+                await self.quantum_notifier.handle_verification_message(message.payload, sender)
+                return
+
+            # Quantum sync messages
+            elif msg_type == str(MessageType.QUANTUM_ENTANGLEMENT_REQUEST.value).lower():
+                await self.handle_entanglement_request(message, sender)
+                return
+
+            elif msg_type == str(MessageType.QUANTUM_ENTANGLEMENT_RESPONSE.value).lower():
+                await self.handle_entanglement_response(message, sender)
+                return
+
+            elif msg_type == str(MessageType.QUANTUM_RESYNC_REQUEST.value).lower():
+                await self.handle_quantum_resync_request(message, sender)
+                return
+
+            elif msg_type == str(MessageType.QUANTUM_RESYNC_RESPONSE.value).lower():
+                await self.handle_quantum_resync_response(message, sender)
+                return
+
+            # Fast path for transactions and blocks - handle these with quantum state updates and peer notification
+            elif msg_type == str(MessageType.TRANSACTION.value).lower():
+                self.logger.info(f"[TRANSACTION] Received TRANSACTION message from {sender}. Details: {message.payload}")
+                result = await self.handle_transaction(message.payload, sender)
+
+                if result:
+                    await self.quantum_sync.update_component_state('transactions', message.payload)
+                    await self._notify_peer_update(sender, 'transactions')
+                return
+
+            elif msg_type == str(MessageType.BLOCK.value).lower():
+                self.logger.info(f"[BLOCK] Received BLOCK message from {sender}. Details: {message.payload}")
+                result = await self.handle_block(message.payload, sender)
+
+                if result:
+                    await self.quantum_sync.update_component_state('blocks', message.payload)
+                    await self._notify_peer_update(sender, 'blocks')
+
+                    # Update mempool quantum state and notify peers
+                    mempool_data = [tx.to_dict() for tx in self.blockchain.mempool]
+                    await self.quantum_sync.update_component_state('mempool', mempool_data)
+                    await self._notify_peer_update(sender, 'mempool')
+                return
+
+            # Handle sync-related messages with priority
+            elif msg_type in [
+                str(MessageType.SYNC_STATUS.value).lower(),
+                str(MessageType.SYNC_REQUEST.value).lower(),
+                str(MessageType.SYNC_RESPONSE.value).lower(),
+                str(MessageType.SYNC_DATA.value).lower(),
+            ]:
+                await self.handle_sync_message(message, sender)
+                return
+
+            # Additional message types with logging
+            elif msg_type == str(MessageType.GET_WALLETS.value).lower():
+                self.logger.info(f"[WALLETS] Received GET_WALLETS request from {sender}")
                 await self.handle_get_wallets(sender)
 
-            # Handle WALLETS message
-            elif message.type == MessageType.WALLETS.value:
-                logger.info(f"[WALLETS] Received WALLETS message from {sender}. Wallet details: {message.payload}")
+            elif msg_type == str(MessageType.WALLETS.value).lower():
+                self.logger.info(f"[WALLETS] Received WALLETS message from {sender}. Details: {message.payload}")
                 await self.handle_wallets(message.payload, sender)
 
-            # Handle CHALLENGE message
-            elif message.type == MessageType.CHALLENGE.value:
-                logger.info(f"[CHALLENGE] Received CHALLENGE message from {sender}. Challenge data: {message.payload}")
-                await self.handle_challenge(sender, message.payload.get('challenge') or message.payload.get('data'), message.challenge_id)
-
-            # Handle PUBLIC_KEY_EXCHANGE message
-            elif message.type == MessageType.PUBLIC_KEY_EXCHANGE.value:
-                logger.info(f"[KEY_EXCHANGE] Received PUBLIC_KEY_EXCHANGE message from {sender}. Public key exchange data: {message.payload}")
+            elif msg_type == str(MessageType.PUBLIC_KEY_EXCHANGE.value).lower():
+                self.logger.info(f"[KEY_EXCHANGE] Received PUBLIC_KEY_EXCHANGE message from {sender}. Data: {message.payload}")
                 await self.handle_public_key_exchange(message, sender)
 
-            # Handle CHALLENGE_RESPONSE message
-            elif message.type == MessageType.CHALLENGE_RESPONSE.value:
-                logger.info(f"[CHALLENGE_RESPONSE] Received CHALLENGE_RESPONSE message from {sender}. Response data: {message.payload}")
-                await self.handle_challenge_response(sender, message.payload)
-
-            # Handle FIND_NODE message
-            elif message.type == MessageType.FIND_NODE.value:
-                logger.info(f"[FIND_NODE] Received FIND_NODE request from {sender}. Request details: {message.payload}")
+            elif msg_type == str(MessageType.FIND_NODE.value).lower():
+                self.logger.info(f"[FIND_NODE] Received FIND_NODE request from {sender}. Details: {message.payload}")
                 response = await self.handle_find_node(message.payload, sender)
 
-            # Handle FIND_VALUE message
-            elif message.type == MessageType.FIND_VALUE.value:
-                logger.info(f"[FIND_VALUE] Received FIND_VALUE request from {sender}. Value details: {message.payload}")
+            elif msg_type == str(MessageType.FIND_VALUE.value).lower():
+                self.logger.info(f"[FIND_VALUE] Received FIND_VALUE request from {sender}. Details: {message.payload}")
                 response = await self.handle_find_value(message.payload, sender)
 
-            # Handle STORE message
-            elif message.type == MessageType.STORE.value:
-                logger.info(f"[STORE] Received STORE message from {sender}. Store details: {message.payload}")
+            elif msg_type == str(MessageType.STORE.value).lower():
+                self.logger.info(f"[STORE] Received STORE message from {sender}. Details: {message.payload}")
                 await self.handle_store(message.payload, sender)
 
-            # Handle TRANSACTION message
-            elif message.type == MessageType.TRANSACTION.value:
-                logger.info(f"[TRANSACTION] Received TRANSACTION message from {sender}. Transaction details: {message.payload}")
-                await self.handle_transaction(message.payload, sender)
-
-            # Handle BLOCK_PROPOSAL message
-            elif message.type == MessageType.BLOCK_PROPOSAL.value:
-                logger.info(f"[BLOCK_PROPOSAL] Received BLOCK_PROPOSAL message from {sender}. Proposal details: {message.payload}")
+            elif msg_type == str(MessageType.BLOCK_PROPOSAL.value).lower():
+                self.logger.info(f"[BLOCK_PROPOSAL] Received BLOCK_PROPOSAL message from {sender}. Details: {message.payload}")
                 await self.handle_block_proposal(message, sender)
 
-            # Handle FULL_BLOCK_REQUEST message
-            elif message.type == MessageType.FULL_BLOCK_REQUEST.value:
-                logger.info(f"[FULL_BLOCK_REQUEST] Received FULL_BLOCK_REQUEST from {sender}. Request details: {message.payload}")
+            elif msg_type == str(MessageType.FULL_BLOCK_REQUEST.value).lower():
+                self.logger.info(f"[FULL_BLOCK_REQUEST] Received FULL_BLOCK_REQUEST from {sender}. Details: {message.payload}")
                 await self.handle_full_block_request(message, sender)
 
-            # Handle FULL_BLOCK_RESPONSE message
-            elif message.type == MessageType.FULL_BLOCK_RESPONSE.value:
-                logger.info(f"[FULL_BLOCK_RESPONSE] Received FULL_BLOCK_RESPONSE from {sender}. Block details: {message.payload}")
+            elif msg_type == str(MessageType.FULL_BLOCK_RESPONSE.value).lower():
+                self.logger.info(f"[FULL_BLOCK_RESPONSE] Received FULL_BLOCK_RESPONSE from {sender}. Block details: {message.payload}")
                 await self.handle_full_block_response(message, sender)
 
-            # Handle BLOCK_ACCEPTANCE message
-            elif message.type == MessageType.BLOCK_ACCEPTANCE.value:
-                logger.info(f"[BLOCK_ACCEPTANCE] Received BLOCK_ACCEPTANCE message from {sender}. Acceptance details: {message.payload}")
+            elif msg_type == str(MessageType.BLOCK_ACCEPTANCE.value).lower():
+                self.logger.info(f"[BLOCK_ACCEPTANCE] Received BLOCK_ACCEPTANCE message from {sender}. Details: {message.payload}")
                 await self.handle_block_acceptance(message, sender)
 
-            # Handle STATE_REQUEST message
-            elif message.type == MessageType.STATE_REQUEST.value:
-                logger.info(f"[STATE_REQUEST] Received STATE_REQUEST from {sender}")
+            elif msg_type == str(MessageType.STATE_REQUEST.value).lower():
+                self.logger.info(f"[STATE_REQUEST] Received STATE_REQUEST from {sender}")
                 state = self.blockchain.get_node_state()
                 response = Message(type=MessageType.STATE_RESPONSE.value, payload=asdict(state))
 
-            # Handle GET_ALL_DATA message
-            elif message.type == MessageType.GET_ALL_DATA.value:
-                logger.info(f"Received GET_ALL_DATA request from {sender}")
+            elif msg_type == str(MessageType.GET_ALL_DATA.value).lower():
+                self.logger.info(f"[GET_ALL_DATA] Received GET_ALL_DATA request from {sender}")
                 all_data = await self.blockchain.get_all_data()
                 response = Message(MessageType.ALL_DATA.value, all_data)
 
-            # Handle LOGO_UPLOAD message
-            elif message.type == MessageType.LOGO_UPLOAD.value:
-                logger.info(f"[LOGO_UPLOAD] Received LOGO_UPLOAD message from {sender}. Logo details: {message.payload}")
+            elif msg_type == str(MessageType.LOGO_UPLOAD.value).lower():
+                self.logger.info(f"[LOGO_UPLOAD] Received LOGO_UPLOAD message from {sender}. Logo details: {message.payload}")
                 await self.handle_logo_upload(message.payload, sender)
 
-            # Handle GET_TRANSACTIONS message
-            elif message.type == MessageType.GET_TRANSACTIONS.value:
-                logger.info(f"[GET_TRANSACTIONS] Received GET_TRANSACTIONS message from {sender}")
+            elif msg_type == str(MessageType.GET_TRANSACTIONS.value).lower():
+                self.logger.info(f"[GET_TRANSACTIONS] Received GET_TRANSACTIONS message from {sender}")
                 await self.handle_get_transactions(sender)
 
-            # Handle UNKNOWN message type
+            # Handle unknown message types
             else:
-                logger.warning(f"Received unknown message type from {sender}: {message.type}")
+                self.logger.warning(f"Received unknown message type from {sender}: {message.type}")
 
             # If a response is generated, send it back to the sender
             if response:
@@ -2211,12 +4325,354 @@ class P2PNode:
                 await self.send_message(sender, response)
 
         except Exception as e:
-            logger.error(f"Failed to handle message from {sender}: {str(e)}")
-            logger.error(f"Message content: {message.to_json()}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            self.logger.error(f"Failed to handle message from {sender}: {str(e)}")
+            self.logger.error(f"Message content: {message.to_json()}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+
+
+    async def handle_entanglement_request(self, message: Message, sender: str):
+        """Handle incoming quantum entanglement request"""
+        try:
+            self.logger.info(f"[QUANTUM] Received entanglement request from {sender}")
+
+            # Get our current state
+            our_state = {
+                'wallets': [w.to_dict() for w in self.blockchain.get_wallets()],
+                'transactions': [tx.to_dict() for tx in self.blockchain.get_recent_transactions()],
+                'blocks': [block.to_dict() for block in self.blockchain.chain],
+                'mempool': [tx.to_dict() for tx in self.blockchain.mempool]
+            }
+
+            # Initialize quantum sync if needed
+            if not self.quantum_initialized:
+                await self.initialize_quantum_sync(our_state)
+
+            # Create quantum entanglement
+            peer_state = message.payload.get('state_data', {})
+            peer_register = await self.quantum_sync.entangle_with_peer(sender, peer_state)
+            
+            if not peer_register:
+                self.logger.error(f"[QUANTUM] Failed to create quantum register with {sender}")
+                return
+
+            # Generate and store Bell pair
+            bell_pair = self.quantum_sync._generate_bell_pair()
+            self.quantum_sync.bell_pairs[sender] = bell_pair
+
+            # Send response
+            response = Message(
+                type=MessageType.QUANTUM_ENTANGLEMENT_RESPONSE.value,
+                payload={
+                    'node_id': self.node_id,
+                    'state_data': our_state,
+                    'timestamp': time.time()
+                }
+            )
+
+            await self.send_message(sender, response)
+            
+            self.logger.info(f"[QUANTUM] ✓ Quantum entanglement established with {sender}")
+
+            # Start quantum monitoring
+            asyncio.create_task(self.monitor_peer_quantum_state(sender))
+
+        except Exception as e:
+            self.logger.error(f"[QUANTUM] Error handling entanglement request: {str(e)}")
+
+
+    def parse_challenge_message(self, message: Message) -> Tuple[str, str]:
+        """Parse challenge message and return (challenge_id, challenge_data)"""
+        if not isinstance(message.payload, dict):
+            raise ValueError("Invalid challenge payload format")
+            
+        challenge_str = message.payload.get('challenge')
+        if not challenge_str:
+            raise ValueError("Missing challenge in payload")
+            
+        if ':' in challenge_str:
+            challenge_id, challenge = challenge_str.split(':', 1)
+        else:
+            challenge_id = message.challenge_id
+            challenge = challenge_str
+            
+        if not challenge_id or not challenge:
+            raise ValueError("Invalid challenge format")
+            
+        return challenge_id, challenge
+
+    async def periodic_consensus_check(self):
+        """Periodically check quantum consensus"""
+        while True:
+            try:
+                for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                    consensus = await self.quantum_consensus.check_quantum_consensus(
+                        component
+                    )
+                    if not consensus:
+                        self.logger.warning(
+                            f"Quantum consensus lost for {component}"
+                        )
+                        await self.handle_consensus_loss(component)
+                
+                await asyncio.sleep(5)  # Check every 5 seconds
+                
+            except Exception as e:
+                self.logger.error(f"Error in consensus check: {str(e)}")
+                await asyncio.sleep(5)
+
+    async def handle_consensus_loss(self, component: str):
+        """Handle loss of quantum consensus"""
+        try:
+            self.logger.info(f"Handling consensus loss for {component}")
+            
+            # Get highest fidelity peer
+            best_peer = await self.find_highest_fidelity_peer(component)
+            
+            if best_peer:
+                # Request state update from best peer
+                await self.request_verified_state_update(component, best_peer)
+                
+                # Verify consensus is restored
+                consensus = await self.quantum_consensus.check_quantum_consensus(
+                    component
+                )
+                if consensus:
+                    self.logger.info(f"Restored consensus for {component}")
+                else:
+                    self.logger.warning(
+                        f"Failed to restore consensus for {component}"
+                    )
+            
+        except Exception as e:
+            self.logger.error(f"Error handling consensus loss: {str(e)}")
+
+    async def monitor_quantum_health(self, interval: float = 5.0):
+        """Monitor quantum state health and trigger recovery if needed"""
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                
+                for peer in self.quantum_sync.entangled_peers:
+                    for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                        fidelity = await self.quantum_sync.measure_sync_state(component)
+                        
+                        if fidelity < self.quantum_sync.decoherence_threshold:
+                            self.logger.warning(
+                                f"Low fidelity detected: {component} with {peer} "
+                                f"(fidelity: {fidelity:.3f})"
+                            )
+                            await self.handle_quantum_decoherence_recovery(
+                                component, peer)
+                            
+            except Exception as e:
+                self.logger.error(f"Error in quantum health monitoring: {str(e)}")
+                await asyncio.sleep(interval)
+    async def cleanup_quantum_resources(self, peer: str):
+        """Clean up quantum resources for a peer"""
+        try:
+            # Remove from entangled peers
+            self.quantum_sync.entangled_peers.pop(peer, None)
+            # Remove Bell pairs
+            self.quantum_sync.bell_pairs.pop(peer, None)
+            # Clear verification cache
+            nonces_to_remove = [
+                nonce for nonce in self.quantum_notifier.verification_cache
+                if nonce.startswith(f"{peer}:")
+            ]
+            for nonce in nonces_to_remove:
+                self.quantum_notifier.verification_cache.pop(nonce, None)
+            
+            self.logger.info(f"Cleaned up quantum resources for peer {peer}")
+            
+        except Exception as e:
+            self.logger.error(f"Error cleaning up quantum resources: {str(e)}")
+
+    async def handle_quantum_state_verification(self, message: Dict[str, Any], sender: str):
+        """Handle incoming quantum state verification messages"""
+        await self.quantum_notifier.handle_verification_message(message, sender)
+
+    async def get_bell_pair_id_for_peer(self, peer: str) -> Optional[str]:
+        """Get Bell pair ID for a peer"""
+        bell_pair = self.quantum_sync.bell_pairs.get(peer)
+        if bell_pair:
+            return self.quantum_notifier._get_bell_pair_id(bell_pair)
+        return None
+    async def verify_and_update_quantum_state(self, component: str, new_data: dict, sender: str) -> bool:
+        """Verify and update quantum state with security checks"""
+        try:
+            # Get Bell pair ID
+            bell_pair_id = await self.get_bell_pair_id_for_peer(sender)
+            if not bell_pair_id:
+                self.logger.warning(f"No Bell pair found for peer {sender}")
+                return False
+
+            # Create state update
+            update = QuantumStateUpdate(
+                component=component,
+                state_value=self.quantum_sync.register.compute_state_value(new_data),
+                timestamp=time.time(),
+                bell_pair_id=bell_pair_id,
+                node_id=self.node_id,
+                nonce=self.quantum_notifier._generate_nonce()
+            )
+            
+            # Verify and apply update
+            if await self.quantum_notifier._verify_quantum_state(update, sender):
+                await self.quantum_notifier._apply_quantum_update(update, sender)
+                return True
+            return False
+
+        except Exception as e:
+            self.logger.error(f"Error in verify_and_update_quantum_state: {str(e)}")
+            return False
+
+    async def handle_quantum_decoherence_recovery(self, component: str, peer: str):
+        """Handle recovery from quantum decoherence"""
+        try:
+            self.logger.info(f"[QUANTUM] Starting decoherence recovery for {component} with {peer}")
+            
+            # Request verified state
+            response = await self.request_verified_state_update(component, peer)
+            if not response:
+                return False
+                
+            # Verify and apply update
+            success = await self.verify_and_update_quantum_state(
+                component, 
+                response.payload['state_data'],
+                peer
+            )
+            
+            if success:
+                self.logger.info(f"[QUANTUM] Successfully recovered {component} state with {peer}")
+            else:
+                self.logger.warning(f"[QUANTUM] Failed to recover {component} state with {peer}")
+                
+            return success
+
+        except Exception as e:
+            self.logger.error(f"[QUANTUM] Error in decoherence recovery: {str(e)}")
+            return False
 
 
 
+
+    async def monitor_quantum_state(self, interval: float = 5.0):
+        """Monitor quantum state health and trigger recovery if needed"""
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                
+                if not self.quantum_initialized:
+                    continue
+                    
+                for peer in self.quantum_sync.entangled_peers:
+                    for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                        fidelity = await self.quantum_sync.measure_sync_state(component)
+                        
+                        if fidelity < self.quantum_sync.decoherence_threshold:
+                            self.logger.warning(
+                                f"[QUANTUM] Low fidelity detected for {component} "
+                                f"with peer {peer} (fidelity: {fidelity:.3f})"
+                            )
+                            await self.handle_quantum_decoherence_recovery(component, peer)
+                            
+            except Exception as e:
+                self.logger.error(f"[QUANTUM] Error in quantum state monitoring: {str(e)}")
+                await asyncio.sleep(interval)
+
+
+    async def request_verified_state_update(self, component: str):
+        """Request verified quantum state update from peers"""
+        try:
+            # Get entangled peers for this component
+            qubit = getattr(self.quantum_sync.register, component)
+            peers = list(qubit.peers)
+            
+            if not peers:
+                self.logger.warning(f"No entangled peers for {component}")
+                return
+
+            # Request update from random peer
+            peer_id = random.choice(peers)
+            
+            # Create resync request
+            resync_message = Message(
+                type=MessageType.QUANTUM_RESYNC_REQUEST.value,
+                payload={
+                    'component': component,
+                    'node_id': self.node_id,
+                    'timestamp': time.time()
+                }
+            )
+
+            # Wait for verified response
+            response = await self.send_and_wait_for_response(peer_id, resync_message)
+            
+            if response and response.type == MessageType.QUANTUM_RESYNC_RESPONSE.value:
+                update = QuantumStateUpdate.from_dict(response.payload)
+                
+                # Verify and apply update
+                if await self.quantum_notifier._verify_quantum_state(update, peer_id):
+                    await self.quantum_notifier._apply_quantum_update(update, peer_id)
+                    self.logger.info(f"Successfully resynced {component} with {peer_id}")
+                else:
+                    self.logger.warning(f"Failed to verify quantum state from {peer_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error requesting state update: {str(e)}")
+            raise
+    async def update_component_state(self, component: str, new_data: dict):
+        """Update quantum state with verified peer notifications"""
+        try:
+            await self.quantum_sync.update_component_state(component, new_data)
+            
+            # Notify all entangled peers with verification
+            update_tasks = []
+            for peer_id in self.quantum_sync.entangled_peers:
+                update_tasks.append(self._notify_peer_update(peer_id, component))
+            
+            if update_tasks:
+                results = await asyncio.gather(*update_tasks, return_exceptions=True)
+                successful = sum(1 for r in results if r and not isinstance(r, Exception))
+                self.logger.info(
+                    f"Notified {successful}/{len(update_tasks)} peers of {component} update"
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Error updating component state: {str(e)}")
+            raise
+
+
+
+    async def handle_sync_message(self, message: Message, sender: str):
+        try:
+            if message.type == MessageType.SYNC_STATUS.value:
+                await self.handle_sync_status(sender, message.payload)
+            elif message.type == MessageType.SYNC_REQUEST.value:
+                await self.handle_sync_request(sender, message.payload)
+            elif message.type == MessageType.SYNC_RESPONSE.value:
+                await self.handle_sync_response(sender, message.payload)
+            elif message.type == MessageType.SYNC_DATA.value:
+                await self.handle_sync_data(sender, message.payload)
+        except Exception as e:
+            self.logger.error(f"Error handling sync message: {str(e)}")
+
+    async def sync_new_peer(self, peer: str):
+        """Sync state with a new peer"""
+        # Get our current state hashes
+        our_state = {
+            SyncComponent.WALLETS.value: await self.calculate_state_hash(SyncComponent.WALLETS),
+            SyncComponent.TRANSACTIONS.value: await self.calculate_state_hash(SyncComponent.TRANSACTIONS),
+            SyncComponent.BLOCKS.value: await self.calculate_state_hash(SyncComponent.BLOCKS),
+            SyncComponent.MEMPOOL.value: await self.calculate_state_hash(SyncComponent.MEMPOOL)
+        }
+
+        # Send sync request
+        await self.send_message(peer, Message(
+            type=MessageType.SYNC_REQUEST.value,
+            payload={"state_hashes": our_state}
+        ))
 
     async def handle_get_transactions(self, sender):
         try:
@@ -2262,18 +4718,34 @@ class P2PNode:
             wallet = Wallet.from_dict(wallet_data)
             self.blockchain.add_wallet(wallet)
         logger.info(f"Processed {len(new_wallets)} wallets from {sender}")
- 
+    async def handle_handshake(self, peer: str, data: dict):
+        """Handle incoming handshake with challenge initiation."""
+        try:
+            peer_normalized = self.normalize_peer_address(peer)
+            self.logger.info(f"[HANDSHAKE] Processing handshake from {peer_normalized}")
+
+            # Update peer info with handshake data
+            self.peer_info[peer_normalized].update({
+                'blockchain_height': data.get('blockchain_height', 0),
+                'capabilities': data.get('capabilities', []),
+                'quantum_ready': data.get('quantum_ready', False),
+                'timestamp': data.get('timestamp', time.time()),
+                'last_activity': time.time()
+            })
+
+            # Proceed with challenge
+            challenge_id = await self.send_challenge(peer_normalized)
+            if not challenge_id:
+                raise ValueError("Failed to send challenge")
+
+            self.logger.info(f"[HANDSHAKE] Challenge sent to {peer_normalized}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[HANDSHAKE] Error handling handshake: {str(e)}")
+            return False
 
 
-
-    async def handle_handshake(self, payload, sender):
-        node_id = payload.get('node_id')
-        version = payload.get('version')
-        blockchain_height = payload.get('blockchain_height')
-        logger.info(f"Received handshake from {sender}: Node ID: {node_id}, Version: {version}, Blockchain Height: {blockchain_height}")
-        # You might want to store this information or use it to decide whether to sync
-        if blockchain_height > len(self.blockchain.chain):
-            await self.sync_blockchain(sender)
 
     async def sync_blockchain(self, peer):
         try:
@@ -2385,70 +4857,6 @@ class P2PNode:
         mempool_transactions = [tx.to_dict() for tx in self.blockchain.mempool]
         response = Message(type=MessageType.MEMPOOL.value, payload={'transactions': mempool_transactions})
         await self.send_message(sender, response)
-    async def handle_public_key_exchange(self, message: Message, peer: str):
-        try:
-            # Log receipt of the public key exchange message
-            self.logger.debug(f"Received public key exchange message from {peer}: {message.payload}")
-            peer_public_key_pem = message.payload.get("public_key")
-            if not peer_public_key_pem:
-                self.logger.error(f"Public key missing in the payload from {peer}")
-                return False
-
-            peer_normalized = self.normalize_peer_address(peer)
-            self.logger.debug(f"Normalized peer address: {peer_normalized}")
-
-            # Attempt to load the received public key
-            self.logger.debug(f"Attempting to load public key for {peer}")
-            try:
-                peer_public_key = serialization.load_pem_public_key(
-                    peer_public_key_pem.encode(),
-                    backend=default_backend()
-                )
-                self.logger.debug(f"Successfully loaded public key for {peer}: {type(peer_public_key)}")
-            except ValueError as e:
-                self.logger.error(f"Failed to load public key for {peer}: {str(e)}")
-                return False
-
-            # Ensure the public key is an RSA public key
-            if not isinstance(peer_public_key, rsa.RSAPublicKey):
-                self.logger.error(f"Received key from {peer} is not an RSA public key")
-                return False
-
-            # Store the public key
-            self.peer_public_keys[peer_normalized] = peer_public_key
-            self.logger.info(f"Public key for {peer_normalized} successfully stored.")
-
-            # Log the type of the stored public key for verification
-            stored_key = self.peer_public_keys.get(peer_normalized)
-            self.logger.debug(f"Stored public key type for {peer_normalized}: {type(stored_key)}")
-
-            # Dump the current state of peer_public_keys for debugging purposes
-            self.dump_peer_public_keys()
-
-            # Send our public key in response to complete the exchange
-            our_public_key_pem = self.public_key.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            ).decode()
-
-            response = Message(
-                type=MessageType.PUBLIC_KEY_EXCHANGE.value,
-                payload={"public_key": our_public_key_pem}
-            )
-
-            # Log the action of sending our public key and send the message
-            self.logger.debug(f"Sending our public key to {peer}")
-            await self.send_raw_message(peer, response)
-
-            # Log the success of the public key exchange process
-            self.logger.info(f"Public key exchange completed successfully with {peer_normalized}")
-            return True
-
-        except Exception as e:
-            # Log detailed error information including traceback
-            self.logger.error(f"Error during public key exchange with {peer}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            return False
 
 
     def validate_and_convert_public_key(self, peer: str) -> bool:
@@ -2545,44 +4953,240 @@ class P2PNode:
             logger.error(traceback.format_exc())
 
     async def handle_transaction(self, transaction_data: dict, sender: str):
+        """Handle incoming transaction with real-time propagation and detailed logging."""
+        try:
+            start_time = time.time()
+            tx_hash = None
+            
+            # Log incoming transaction
+            self.logger.info(f"[TRANSACTION] Received transaction from {sender}")
+            self.logger.debug(f"[TRANSACTION] Transaction data: {transaction_data}")
+
+            # Perform fast format validation
+            if not self.validate_transaction_format(transaction_data):
+                self.logger.warning(f"[TRANSACTION] Invalid transaction format from {sender}")
+                return
+
+            try:
+                # Determine transaction type and process accordingly
+                if transaction_data.get('type') == 'multisig_transaction':
+                    self.logger.info(f"[TRANSACTION] Processing multisig transaction")
+                    tx_hash = await self.process_multisig_transaction(transaction_data)
+                else:
+                    self.logger.info(f"[TRANSACTION] Processing regular transaction")
+                    tx_hash = await self.process_regular_transaction(transaction_data)
+
+                # Exit if processing fails
+                if not tx_hash:
+                    return
+
+                # Update sync state after processing
+                self.sync_states[SyncComponent.MEMPOOL].current_hash = await self.calculate_state_hash(SyncComponent.MEMPOOL)
+
+                # Prepare for propagation to peers
+                self.logger.info(f"[TRANSACTION] Propagating transaction {tx_hash} to peers")
+                active_peers = self.connected_peers - {sender}
+                propagation_tasks = [self.send_message(peer, Message(
+                    type=MessageType.TRANSACTION.value,
+                    payload=transaction_data
+                )) for peer in active_peers]
+
+                # Execute propagation with timeout and log results
+                if propagation_tasks:
+                    self.logger.info(f"[TRANSACTION] Starting propagation to {len(propagation_tasks)} peers")
+                    done_tasks, pending_tasks = await asyncio.wait(propagation_tasks, timeout=1.0)
+                    
+                    successful_propagations = len([t for t in done_tasks if not t.exception()])
+                    self.logger.info(f"[TRANSACTION] Propagation completed: {successful_propagations}/{len(propagation_tasks)} successful")
+                    
+                    if pending_tasks:
+                        self.logger.warning(f"[TRANSACTION] {len(pending_tasks)} propagations timed out")
+                else:
+                    self.logger.warning("[TRANSACTION] No peers available for propagation")
+
+                # Log transaction processing time
+                processing_time = (time.time() - start_time) * 1000  # Convert to ms
+                self.logger.info(f"[TRANSACTION] {tx_hash} processed and propagated in {processing_time:.2f}ms")
+
+                # Record and log average propagation metrics if available
+                if hasattr(self, 'tx_metrics'):
+                    self.tx_metrics.record_propagation(processing_time)
+                    avg_time = self.tx_metrics.get_average_propagation()
+                    self.logger.info(f"[TRANSACTION] Average propagation time: {avg_time:.2f}ms")
+
+                # Notify WebSocket subscribers about the new transaction
+                await self.broadcast_event('new_transaction', {
+                    'tx_hash': tx_hash,
+                    'type': transaction_data.get('type', 'regular'),
+                    'timestamp': time.time(),
+                    'propagation_time': processing_time
+                })
+
+            except Exception as e:
+                self.logger.error(f"[TRANSACTION] Processing error: {str(e)}")
+                self.logger.error(traceback.format_exc())
+
+        except Exception as e:
+            self.logger.error(f"[TRANSACTION] Fatal error: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
+        # Final transaction state logging
+        finally:
+            if tx_hash:
+                mempool_size = len(self.blockchain.mempool) if self.blockchain else 0
+                self.logger.info(f"[TRANSACTION] Current mempool size: {mempool_size}")
+                self.logger.info(f"[TRANSACTION] Transaction {tx_hash} handling completed")
+    async def log_network_transaction_state(self):
+        """Log the state of transactions across the network."""
+        while True:
+            try:
+                if self.transaction_tracker.transactions:
+                    self.logger.info("\n=== Transaction Network State ===")
+                    for tx_hash, state in self.transaction_tracker.transactions.items():
+                        self.logger.info(f"Transaction: {tx_hash}")
+                        self.logger.info(f"  Status: {state.status}")
+                        self.logger.info(f"  Age: {time.time() - state.timestamp:.2f}s")
+                        self.logger.info(f"  Propagation count: {state.propagation_count}")
+                        self.logger.info(f"  Received by peers: {len(state.received_by)}")
+                        self.logger.info(f"  Peers: {state.received_by}")
+                        self.logger.info("---")
+                await asyncio.sleep(5)  # Log every 5 seconds
+            except Exception as e:
+                self.logger.error(f"Error logging transaction state: {str(e)}")
+                await asyncio.sleep(5)
+    async def log_transaction_state(self):
+        """Log current transaction state across the network."""
+        try:
+            local_mempool = len(self.blockchain.mempool) if self.blockchain else 0
+            peer_states = {}
+            
+            for peer in self.connected_peers:
+                try:
+                    response = await self.send_message(peer, Message(
+                        type=MessageType.GET_MEMPOOL.value,
+                        payload={}
+                    ))
+                    if response and response.payload:
+                        peer_states[peer] = len(response.payload.get('transactions', []))
+                except Exception as e:
+                    self.logger.error(f"Error getting mempool from peer {peer}: {str(e)}")
+                    peer_states[peer] = "error"
+
+            self.logger.info(f"[TRANSACTION_STATE] Local mempool: {local_mempool}")
+            self.logger.info(f"[TRANSACTION_STATE] Peer mempools: {peer_states}")
+            
+        except Exception as e:
+            self.logger.error(f"Error logging transaction state: {str(e)}")
+
+    async def verify_transaction_propagation(self, tx_hash: str):
+        """Verify that a transaction has propagated to all peers."""
+        try:
+            propagation_status = {}
+            
+            for peer in self.connected_peers:
+                try:
+                    response = await self.send_message(peer, Message(
+                        type=MessageType.VERIFY_TRANSACTION.value,
+                        payload={"tx_hash": tx_hash}
+                    ))
+                    propagation_status[peer] = response.payload.get('exists', False)
+                except Exception as e:
+                    self.logger.error(f"Error verifying transaction with peer {peer}: {str(e)}")
+                    propagation_status[peer] = "error"
+
+            self.logger.info(f"[PROPAGATION] Transaction {tx_hash} status across network:")
+            self.logger.info(f"[PROPAGATION] Status by peer: {propagation_status}")
+            return propagation_status
+            
+        except Exception as e:
+            self.logger.error(f"Error verifying transaction propagation: {str(e)}")
+            return {}
+    async def process_multisig_transaction(self, transaction_data: dict) -> Optional[str]:
+        """Process a multisig transaction"""
+        try:
+            # Validate required fields
+            required_fields = ['multisig_address', 'sender_public_keys', 'threshold', 
+                             'receiver', 'amount', 'message', 'aggregate_proof']
+            if not all(field in transaction_data for field in required_fields):
+                logger.warning("Missing required fields in multisig transaction")
+                return None
+
+            # Process the transaction
+            tx_hash = await self.blockchain.add_multisig_transaction(
+                transaction_data['multisig_address'],
+                transaction_data['sender_public_keys'],
+                transaction_data['threshold'],
+                transaction_data['receiver'],
+                Decimal(transaction_data['amount']),
+                transaction_data['message'],
+                transaction_data['aggregate_proof']
+            )
+            
+            logger.info(f"Multisig transaction added: {tx_hash}")
+            return tx_hash
+
+        except Exception as e:
+            logger.error(f"Error processing multisig transaction: {str(e)}")
+            raise
+
+    async def process_regular_transaction(self, transaction_data: dict) -> Optional[str]:
+        """Process a regular transaction"""
         try:
             transaction = Transaction.from_dict(transaction_data)
             
-            # Generate and verify ZKP
-            secret = transaction.amount  # Or any other secret data
-            public_input = int(transaction.hash(), 16)
-            proof = self.zkp_system.prove(secret, public_input)
-            
-            if not self.zkp_system.verify(public_input, proof):
-                logger.warning(f"Invalid ZKP for transaction from {sender}")
-                return
+            # Validate the transaction
+            if not await self.blockchain.validate_transaction(transaction):
+                logger.warning(f"Invalid transaction: {transaction_data}")
+                return None
+                
+            # Add to blockchain
+            tx_hash = await self.blockchain.add_transaction(transaction)
+            logger.info(f"Regular transaction added: {tx_hash}")
+            return tx_hash
 
-            if await self.blockchain.add_transaction(transaction):
-                await self.broadcast(Message(MessageType.TRANSACTION.value, transaction_data), exclude=sender)
         except Exception as e:
-            logger.error(f"Failed to handle transaction: {str(e)}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Error processing regular transaction: {str(e)}")
+            raise
+
+    def validate_transaction_format(self, transaction_data: dict) -> bool:
+        """Validate the basic format of a transaction"""
+        try:
+            # Check if it's a dictionary
+            if not isinstance(transaction_data, dict):
+                return False
+
+            # Check transaction type
+            if transaction_data.get('type') == 'multisig_transaction':
+                required_fields = ['multisig_address', 'sender_public_keys', 'threshold', 
+                                 'receiver', 'amount', 'message', 'aggregate_proof']
+            else:
+                required_fields = ['sender', 'receiver', 'amount', 'signature']
+
+            # Validate required fields
+            if not all(field in transaction_data for field in required_fields):
+                return False
+
+            # Validate amount format
+            try:
+                if isinstance(transaction_data['amount'], str):
+                    Decimal(transaction_data['amount'])
+                elif not isinstance(transaction_data['amount'], (int, float, Decimal)):
+                    return False
+            except:
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error validating transaction format: {str(e)}")
+            return False
+
 
 
 
     async def handle_block(self, block_data: dict, sender: str):
-        logger.info(f"Received new block from {sender}")
-        try:
-            new_block = QuantumBlock.from_dict(block_data)
-            logger.debug(f"Deserialized block: {new_block.to_dict()}")
-            
-            if self.blockchain.validate_block(new_block):
-                logger.info(f"Block {new_block.hash} is valid. Adding to blockchain.")
-                await self.blockchain.add_block(new_block)
-                logger.info(f"Block {new_block.hash} successfully added to blockchain")
-                
-                # Propagate the block to other peers
-                await self.propagate_block(new_block)
-            else:
-                logger.warning(f"Received invalid block from {sender}: {new_block.hash}")
-        except Exception as e:
-            logger.error(f"Error processing block from {sender}: {str(e)}")
-            logger.error(traceback.format_exc())
+        block = QuantumBlock.from_dict(block_data)
+        await self.handle_new_block_dagknight(block, sender)
 
 
 
@@ -2623,7 +5227,17 @@ class P2PNode:
             self.logger.error(f"Failed to send find node: {str(e)}")
             self.logger.error(traceback.format_exc())
             return None
+    async def periodic_transaction_monitoring(self):
+        """Monitor transaction propagation periodically."""
+        while True:
+            try:
+                await self.log_transaction_state()
+                await asyncio.sleep(5)  # Check every 5 seconds
+            except Exception as e:
+                self.logger.error(f"Error in transaction monitoring: {str(e)}")
+                await asyncio.sleep(5)
 
+    # Add to your task definitions in run():
 
     async def send_find_value(self, node: KademliaNode, key: str) -> Optional[str]:
         try:
@@ -2654,128 +5268,108 @@ class P2PNode:
             logger.error(f"Failed to ping node: {str(e)}")
             return False
     async def broadcast(self, message: Message, max_retries: int = 3, retry_delay: float = 2.0):
-        self.logger.info(f"Broadcasting message of type {message.type}")
-        self.logger.debug(f"Current connected peers: {self.connected_peers}")
-
-        """Broadcast a message to all active peers with a retry mechanism."""
+        """Broadcast a message to all active peers with enhanced logging."""
+        self.logger.info("[BROADCAST] Starting message broadcast")
+        self.logger.debug(f"[BROADCAST] Message type: {message.type}")
+        
         retries = 0
         success = False
-
+        
         while retries < max_retries and not success:
-            # Log all connected peers
-            self.logger.debug(f"All connected peers: {self.connected_peers}")
-
-            # If no active peers, log and return early
-            if not self.connected_peers:
-                self.logger.warning("No active peers available for broadcasting.")
-                self.log_peer_status()  # Log peer statuses when no active peers are found
-                return
+            self.logger.debug(f"[BROADCAST] Broadcast attempt {retries + 1}/{max_retries}")
             
-            # Log attempt details
-            self.logger.info(f"Attempting to broadcast message of type {message.type} to {len(self.connected_peers)} active peers (Attempt {retries + 1})")
-
-            # Initialize successful broadcast counter
+            if not self.connected_peers:
+                self.logger.warning("[BROADCAST] No active peers available")
+                return False
+                
+            self.logger.info(f"[BROADCAST] Broadcasting to {len(self.connected_peers)} peers")
+            
             successful_broadcasts = 0
-
-            # Loop through active peers and attempt to send messages
-            for peer_address in self.connected_peers.copy():  # Use .copy() to avoid modifying set during iteration
+            failed_peers = []
+            
+            for peer_address in self.connected_peers.copy():
                 try:
-                    # Send the message to the peer
+                    self.logger.debug(f"[BROADCAST] Sending to peer: {peer_address}")
                     await self.send_message(peer_address, message)
                     successful_broadcasts += 1
-                    self.logger.info(f"Message of type {message.type} successfully sent to peer {peer_address}")
+                    self.logger.debug(f"[BROADCAST] Successfully sent to {peer_address}")
                 except Exception as e:
-                    # If sending the message fails, log the error and remove the peer
-                    self.logger.error(f"Failed to send message to peer {peer_address}: {str(e)}")
+                    self.logger.error(f"[BROADCAST] Failed to send to {peer_address}: {str(e)}")
+                    failed_peers.append(peer_address)
                     self.connected_peers.remove(peer_address)
             
-            # Log the success rate of the broadcast
-            self.logger.info(f"Successfully broadcasted message to {successful_broadcasts} out of {len(self.connected_peers)} active peers (Attempt {retries + 1})")
-
-            # Log current connected peers after broadcast
-            self.log_connected_peers()
-
-            # Check if all peers acknowledged the message
-            if successful_broadcasts == len(self.connected_peers):
+            success_rate = successful_broadcasts / len(self.connected_peers) if self.connected_peers else 0
+            self.logger.info(f"[BROADCAST] Broadcast completed - Success rate: {success_rate:.1%}")
+            self.logger.info(f"[BROADCAST] Successful: {successful_broadcasts}, Failed: {len(failed_peers)}")
+            
+            if successful_broadcasts > 0:
                 success = True
-                self.logger.info("Message broadcasted to all peers successfully.")
             else:
-                self.logger.warning(f"Some peers failed to receive the message. {len(self.connected_peers) - successful_broadcasts} peers did not acknowledge.")
-
-                # Retry mechanism if broadcast was unsuccessful
-                if successful_broadcasts == 0:
-                    retries += 1
-                    self.logger.warning(f"No peers acknowledged the broadcast. Retrying broadcast in {retry_delay} seconds (Attempt {retries}/{max_retries})...")
+                retries += 1
+                if retries < max_retries:
+                    self.logger.warning(f"[BROADCAST] Retrying broadcast in {retry_delay} seconds")
                     await asyncio.sleep(retry_delay)
-
-        if not success:
-            self.logger.error(f"Broadcast failed after {max_retries} retries.")
-
+        
+        return success
 
 
     async def is_peer_connected(self, peer):
-        try:
-            websocket = self.peers.get(peer)
-            if websocket and websocket.open:
-                await asyncio.wait_for(websocket.ping(), timeout=5)
-                return True
-        except (asyncio.TimeoutError, websockets.exceptions.WebSocketException):
-            pass
+        
+        websocket = self.peers.get(peer)
+        if websocket and websocket.open:
+            await asyncio.wait_for(websocket.ping(), timeout=5)
+            return True
         return False
     def cleanup_challenges(self):
-        current_time = time.time()
-        for peer in list(self.challenges.keys()):
-            for challenge_id in list(self.challenges[peer].keys()):
-                if current_time - self.challenges[peer][challenge_id]['timestamp'] > 300:  # 5 minutes timeout
-                    del self.challenges[peer][challenge_id]
-            if not self.challenges[peer]:
-                del self.challenges[peer]
+        """Safely cleanup old challenges"""
+        try:
+            current_time = time.time()
+            for peer_id in list(self.challenges.keys()):
+                peer_challenges = self.challenges[peer_id]
+                for ch_id in list(peer_challenges.keys()):
+                    challenge_data = peer_challenges[ch_id]
+                    if isinstance(challenge_data, dict) and current_time - challenge_data.get('timestamp', 0) > 300:
+                        del peer_challenges[ch_id]
+                if not peer_challenges:
+                    del self.challenges[peer_id]
+        except Exception as e:
+            self.logger.error(f"Error cleaning up challenges: {str(e)}")
+
     async def periodic_cleanup(self):
         while True:
             self.cleanup_challenges()
             await asyncio.sleep(60)  # Run every minute
-    async def send_message(self, peer_normalized: str, message: Message):
-        """Send an encrypted message to a peer."""
+    async def send_message(self, peer: str, message: Message):
+        """Send message with state verification."""
         try:
-            # Check if peer is known
-            if peer_normalized not in self.peers and peer_normalized not in [node.address for bucket in self.buckets for node in bucket]:
-                self.logger.warning(f"Attempted to send message to unknown peer: {peer_normalized}")
+            peer_normalized = self.normalize_peer_address(peer)
+            
+            # Check peer state before sending
+            if self.peer_states.get(peer_normalized) != "verified":
+                self.logger.warning(f"Cannot send message to unverified peer {peer_normalized}")
                 return
-
-            # Check if the peer is still connected or establish a new connection
-            if not await self.ensure_peer_connection(peer_normalized):
-                self.logger.warning(f"Failed to establish connection with peer {peer_normalized}. Removing from peer list.")
-                await self.remove_peer(peer_normalized)
-                return
-
-            # Get the public key of the recipient (peer)
-            recipient_public_key = await self.get_peer_public_key(peer_normalized)
+                
+            # Get public key and verify it exists
+            recipient_public_key = self.peer_public_keys.get(peer_normalized)
             if not recipient_public_key:
-                self.logger.error(f"Missing public key for peer {peer_normalized}. Removing peer.")
-                await self.remove_peer(peer_normalized)
+                self.logger.error(f"No public key for peer {peer_normalized}")
                 return
 
-            # Encrypt the message before sending
+            # Encrypt and send message
             message_json = message.to_json()
-            self.logger.debug(f"Message to encrypt: {message_json[:100]}...")  # Log first 100 characters for debugging
             encrypted_message = self.encrypt_message(message_json, recipient_public_key)
-            self.logger.debug(f"Encrypted message length: {len(encrypted_message)}")
+            
+            websocket = self.peers.get(peer_normalized)
+            if websocket and not websocket.closed:
+                await websocket.send(encrypted_message)
+                self.logger.info(f"Message of type {message.type} sent to {peer_normalized}")
+            else:
+                raise ValueError(f"No active connection to {peer_normalized}")
 
-            # Send the encrypted message via WebSocket
-            await self.peers[peer_normalized].send(encrypted_message)
-            self.logger.info(f"Encrypted message of type {message.type} sent to peer {peer_normalized}")
-
-        except websockets.exceptions.ConnectionClosed as closed_exception:
-            self.logger.warning(f"Connection to peer {peer_normalized} closed: {str(closed_exception)}. Removing peer.")
-            await self.remove_peer(peer_normalized)
         except Exception as e:
-            # Handle unexpected errors, log the exception, and remove the peer
-            self.logger.error(f"Failed to send message to peer {peer_normalized}: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"Error sending message to {peer_normalized}: {str(e)}")
             await self.remove_peer(peer_normalized)
 
-        # Log the current state of peers after the operation
-        self.logger.debug(f"Current peers after send_message: {list(self.peers.keys())}")
 
     async def ensure_peer_connection(self, peer_normalized: str) -> bool:
         """Ensure that a connection exists with the peer, establishing one if necessary."""
@@ -2801,15 +5395,24 @@ class P2PNode:
 
 
     async def send_raw_message(self, peer: str, message: Message):
-        if peer in self.peers:
-            try:
-                await self.peers[peer].send(message.to_json())
-                logger.debug(f"Raw message sent to peer {peer}: {message.to_json()[:100]}...")  # Log first 100 chars
-            except websockets.exceptions.WebSocketException as e:
-                logger.error(f"Failed to send raw message to peer {peer}: {str(e)}")
-            except Exception as e:
-                logger.error(f"Unexpected error sending raw message to peer {peer}: {str(e)}")
-                logger.error(traceback.format_exc())
+        """Send raw message with enhanced error handling."""
+        try:
+            if peer not in self.peers:
+                raise ValueError(f"Peer {peer} not found")
+
+            message_json = message.to_json()
+            self.logger.debug(f"Raw message sent to peer {peer}: {message_json[:100]}...")
+            
+            websocket = self.peers[peer]
+            if not websocket.open:
+                raise ValueError(f"Connection to peer {peer} is closed")
+                
+            await websocket.send(message_json)
+
+        except Exception as e:
+            self.logger.error(f"Error sending raw message to {peer}: {str(e)}")
+            raise
+
 
     async def send_and_wait_for_response(self, peer: str, message: Message, timeout: float = 300.0) -> Optional[Message]:
         try:
@@ -2838,76 +5441,203 @@ class P2PNode:
             # Optionally, you can implement a retry mechanism here
             return None
 
-            
-    async def wait_for_challenge_response(self, peer_address: str, challenge_id: str, timeout: float = 60.0) -> bool:
+                        
+    async def wait_for_challenge_response(self, peer: str, challenge_id: str, timeout: float = 30) -> bool:
+        """Wait for and verify challenge response with better error handling"""
+        peer_normalized = self.normalize_peer_address(peer)
+        start_time = time.time()
+        
         try:
-            start_time = time.time()
+            self.logger.info(f"\n[CHALLENGE] Waiting for response from {peer_normalized}")
+            self.logger.info(f"[CHALLENGE] Challenge ID: {challenge_id}")
+
             while time.time() - start_time < timeout:
-                message = await self.receive_message(peer_address)
-                if message and message.type == MessageType.CHALLENGE_RESPONSE.value:
-                    if message.challenge_id == challenge_id:
-                        return await self.verify_challenge_response(peer_address, challenge_id, message.payload)
-                await asyncio.sleep(0.1)
-            logger.warning(f"Timeout waiting for challenge response from {peer_address}. Elapsed time: {time.time() - start_time:.2f}s")
+                try:
+                    # Check if peer connection still exists
+                    if peer_normalized not in self.peers:
+                        self.logger.warning(f"[CHALLENGE] Lost connection to {peer_normalized}")
+                        return False
+
+                    # Wait for message with smaller timeout
+                    message = await self.receive_message(peer_normalized, timeout=5.0)
+                    if not message:
+                        continue
+
+                    if message.type.lower() == "challenge_response":
+                        self.logger.debug(f"[CHALLENGE] Received response for challenge {message.challenge_id}")
+                        
+                        # Verify the challenge ID matches
+                        if message.challenge_id == challenge_id:
+                            verification_result = await self.verify_challenge_response(
+                                peer_normalized, 
+                                challenge_id, 
+                                message.payload
+                            )
+                            
+                            if verification_result:
+                                self.logger.info(f"[CHALLENGE] ✓ Challenge response verified for {peer_normalized}")
+                                
+                                # Move to quantum initialization
+                                self.logger.info(f"[QUANTUM] Challenge verified, proceeding with quantum initialization")
+                                self.peer_states[peer_normalized] = "verified"
+                                return True
+                            else:
+                                self.logger.error(f"[CHALLENGE] ✗ Challenge verification failed for {peer_normalized}")
+                                return False
+                                    
+                    else:
+                        self.logger.debug(f"[CHALLENGE] Received non-challenge message: {message.type}")
+                        
+                except websockets.exceptions.ConnectionClosed:
+                    self.logger.warning(f"[CHALLENGE] Connection closed by {peer_normalized}")
+                    return False
+                    
+                except Exception as e:
+                    self.logger.error(f"[CHALLENGE] Error processing response: {str(e)}")
+                    await asyncio.sleep(1)
+                    
+            self.logger.error(f"[CHALLENGE] ✗ Challenge response timeout for {peer_normalized}")
             return False
+                
         except Exception as e:
-            logger.error(f"Error waiting for challenge response from {peer_address}: {str(e)}")
+            self.logger.error(f"[CHALLENGE] Error in wait_for_challenge_response: {str(e)}")
             return False
+
+
+    async def reconnect_to_peer(self, peer: str) -> bool:
+        """Attempt to reconnect to a peer"""
+        try:
+            self.logger.info(f"[RECONNECT] Attempting to reconnect to {peer}")
+            
+            # Remove old connection
+            await self.remove_peer(peer)
+            
+            # Get peer IP and port
+            ip, port = peer.split(':')
+            port = int(port)
+            
+            # Create new connection
+            websocket = await websockets.connect(
+                f"ws://{ip}:{port}",
+                timeout=10,
+                close_timeout=5
+            )
+            
+            # Store new connection
+            self.peers[peer] = websocket
+            
+            # Re-establish security
+            if await self.exchange_public_keys(peer):
+                self.logger.info(f"[RECONNECT] Successfully reconnected to {peer}")
+                return True
+            else:
+                self.logger.error(f"[RECONNECT] Failed to exchange keys with {peer}")
+                await self.remove_peer(peer)
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"[RECONNECT] Failed to reconnect to {peer}: {str(e)}")
+            return False
+
+    async def handle_connection_closed(self, peer: str):
+        """Handle websocket connection closure"""
+        try:
+            self.logger.warning(f"[CONNECTION] Connection closed with {peer}")
+            
+            # Check if we're in the middle of a challenge
+            active_challenges = [cid for cid, data in self.challenges.items() if 'peer' in data and data['peer'] == peer]
+            
+            if active_challenges:
+                self.logger.info(f"[CONNECTION] Active challenges found for {peer}, attempting reconnect")
+                if await self.reconnect_to_peer(peer):
+                    return True
+            
+            await self.remove_peer(peer)
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"[CONNECTION] Error handling closed connection: {str(e)}")
+            return False
+
+
     async def receive_message(self, peer: str, timeout: float = 300.0) -> Optional[Message]:
+        """
+        Receive and process messages with improved encryption handling.
+        """
         peer_normalized = self.normalize_peer_address(peer)
 
-        # Initialize the lock for this peer if not already present
         if peer_normalized not in self.peer_locks:
             self.peer_locks[peer_normalized] = Lock()
 
-        # Acquire the peer-specific lock to avoid race conditions
         async with self.peer_locks[peer_normalized]:
-            if peer_normalized in self.peers:
+            if peer_normalized not in self.peers:
+                return None
+
+            try:
+                websocket = self.peers[peer_normalized]
+                raw_message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                
+                if not raw_message:
+                    self.logger.warning(f"Empty message from {peer_normalized}")
+                    return None
+
                 try:
-                    while True:
+                    # First try to parse as unencrypted JSON
+                    try:
+                        message_data = json.loads(raw_message)
+                        message = Message.from_json(raw_message)
+                        message_type = message.type.lower() if message.type else ""
+                        
+                        # Handle unencrypted message types
+                        if message_type in ["public_key_exchange", "challenge", "challenge_response"]:
+                            self.logger.debug(f"Received unencrypted {message_type} message")
+                            return message
+
+                    except json.JSONDecodeError:
+                        # Not valid JSON, likely encrypted
+                        if peer_normalized not in self.peer_public_keys:
+                            self.logger.error(f"No public key for {peer_normalized}")
+                            return None
+                        
                         try:
-                            # Attempt to receive the message with a timeout
-                            raw_message = await asyncio.wait_for(self.peers[peer_normalized].recv(), timeout=timeout)
-
-                            if not raw_message:
-                                self.logger.warning(f"Received empty message from {peer_normalized}")
+                            # Decrypt the message
+                            decrypted_message = self.decrypt_message(raw_message)
+                            if not decrypted_message:
+                                self.logger.error(f"Decryption failed for message from {peer_normalized}")
                                 return None
 
-                            try:
-                                # Try to parse the message as JSON (assuming it might not be encrypted)
-                                message = Message.from_json(raw_message)
-                                if message.type in [MessageType.PUBLIC_KEY_EXCHANGE.value, MessageType.CHALLENGE.value, MessageType.CHALLENGE_RESPONSE.value]:
-                                    # These message types are not encrypted, return the message directly
-                                    return message
-                            except json.JSONDecodeError:
-                                # If it's not valid JSON, assume it's encrypted
-                                pass
+                            # Parse the decrypted message
+                            message = Message.from_json(decrypted_message)
+                            self.logger.debug(f"Successfully decrypted and parsed message of type: {message.type}")
+                            return message
 
-                            # For other message types, decrypt the message if we have the peer's public key
-                            if peer_normalized in self.peer_public_keys:
-                                try:
-                                    decrypted_message = self.decrypt_message(raw_message)
-                                    return Message.from_json(decrypted_message)
-                                except ValueError as decrypt_error:
-                                    self.logger.error(f"Failed to decrypt message from {peer_normalized}: {str(decrypt_error)}")
-                                    return None
-                            else:
-                                self.logger.error(f"No public key found for peer {peer_normalized}")
-                                return None
+                        except json.JSONDecodeError as e:
+                            self.logger.error(f"Failed to parse decrypted message: {str(e)}")
+                            return None
+                        except Exception as e:
+                            self.logger.error(f"Error processing encrypted message: {str(e)}")
+                            return None
 
-                        except asyncio.TimeoutError:
-                            # Instead of disconnecting, send a keep-alive message
-                            await self.send_keepalive(peer_normalized)
-                            continue  # Continue waiting for a message
-
-                except websockets.exceptions.ConnectionClosed:
-                    self.logger.warning(f"Connection closed with {peer_normalized}")
-                    await self.remove_peer(peer_normalized)
                 except Exception as e:
-                    self.logger.error(f"Unexpected error receiving message from {peer_normalized}: {str(e)}")
-                    await self.remove_peer(peer_normalized)
+                    self.logger.error(f"Error processing message from {peer_normalized}: {str(e)}")
+                    return None
+
+            except websockets.exceptions.ConnectionClosed:
+                self.logger.warning(f"Connection closed by {peer_normalized}")
+                await self.remove_peer(peer_normalized)
+                return None
+            except asyncio.TimeoutError:
+                # Send keepalive instead of closing
+                await self.send_keepalive(peer_normalized)
+                return None
+            except Exception as e:
+                self.logger.error(f"Error in receive_message for {peer_normalized}: {str(e)}")
+                await self.remove_peer(peer_normalized)
+                return None
 
             return None
+
+
 
     # Helper function to send keep-alive messages
     async def send_keepalive(self, peer: str):
@@ -2927,65 +5657,94 @@ class P2PNode:
         logger.debug(f"Checking if {ip}:{port} is self: {is_self}")
         return is_self
 
-
-
     async def handle_public_key_exchange(self, message: Message, peer: str):
+        """Handle public key exchange and respond with handshake."""
         try:
-            logger.debug(f"Received public key exchange message from {peer}: {message.payload}")
-            peer_public_key_pem = message.payload["public_key"]
             peer_normalized = self.normalize_peer_address(peer)
+            self.logger.debug(f"Handling public key exchange from {peer_normalized}")
 
-            logger.debug(f"Attempting to load public key for {peer}")
+            # Extract payload data
+            payload = message.payload
+            peer_public_key_pem = payload.get("public_key")
+            
+            if not peer_public_key_pem:
+                raise ValueError("Missing public key in exchange message")
+
+            # Load and validate the public key
             try:
                 peer_public_key = serialization.load_pem_public_key(
                     peer_public_key_pem.encode(),
                     backend=default_backend()
                 )
-                logger.debug(f"Successfully loaded public key for {peer}: {type(peer_public_key)}")
-            except ValueError as e:
-                logger.error(f"Failed to load public key for {peer}: {str(e)}")
-                return False
+                if not isinstance(peer_public_key, rsa.RSAPublicKey):
+                    raise ValueError("Invalid public key type")
+            except Exception as e:
+                raise ValueError(f"Invalid public key format: {str(e)}")
 
-            if not isinstance(peer_public_key, rsa.RSAPublicKey):
-                logger.error(f"Received key from {peer} is not an RSA public key")
-                return False
-
-            # Store the public key
+            # Store the public key and update peer info
             self.peer_public_keys[peer_normalized] = peer_public_key
-            logger.info(f"Public key for {peer_normalized} successfully stored.")
+            self.peer_info[peer_normalized] = {
+                'node_id': payload.get('node_id'),
+                'version': payload.get('version', '1.0'),
+                'quantum_capable': payload.get('quantum_capable', False),
+                'last_activity': time.time()
+            }
 
-            # Log the type of the stored public key
-            stored_key = self.peer_public_keys.get(peer_normalized)
-            logger.debug(f"Stored public key type for {peer_normalized}: {type(stored_key)}")
+            self.logger.info(f"Public key exchange completed with {peer_normalized}")
 
-            # Dump the current state of peer_public_keys
-            self.dump_peer_public_keys()
+            # Send our handshake immediately after key exchange
+            handshake_data = {
+                "node_id": self.node_id,
+                "version": "1.0",
+                "blockchain_height": len(self.blockchain.chain) if self.blockchain else 0,
+                "capabilities": ["quantum", "dagknight", "zkp"],
+                "timestamp": time.time(),
+                "quantum_ready": hasattr(self, 'quantum_sync')
+            }
 
-            # Mark the connection as ready for encrypted communication
-            self.peer_states[peer_normalized] = "ready"
+            handshake_message = Message(
+                type=MessageType.HANDSHAKE.value,
+                payload=handshake_data,
+                sender=self.node_id  # Add sender ID
+            )
 
-            logger.info(f"Public key exchange completed successfully with {peer_normalized}")
+            await self.send_raw_message(peer_normalized, handshake_message)
+            self.logger.info(f"[HANDSHAKE] Sent initial handshake to {peer_normalized}")
+            
             return True
 
         except Exception as e:
-            logger.error(f"Error in handle_public_key_exchange: {str(e)}")
-            logger.error(traceback.format_exc())
+            self.logger.error(f"Error handling public key exchange: {str(e)}")
             return False
-    def decrypt_message(self, encrypted_message: str) -> str:
+
+
+
+
+    def decrypt_message(self, encrypted_message: str) -> Optional[str]:
+        """Decrypt message with improved error handling."""
         try:
-            # Decode the base64-encoded encrypted message
-            encrypted_bytes = base64.b64decode(encrypted_message)
+            # Decode base64 if needed
+            if isinstance(encrypted_message, str):
+                try:
+                    encrypted_bytes = base64.b64decode(encrypted_message)
+                except:
+                    encrypted_bytes = encrypted_message.encode()
+            else:
+                encrypted_bytes = encrypted_message
+
             self.logger.debug(f"Decrypting message of length: {len(encrypted_bytes)} bytes")
 
-            # Define the chunk size (256 bytes for RSA 2048-bit encryption)
-            chunk_size = 256
-            chunks = [encrypted_bytes[i:i + chunk_size] for i in range(0, len(encrypted_bytes), chunk_size)]
+            # Split into chunks for RSA decryption
+            chunk_size = 256  # RSA 2048 decryption chunk size
+            chunks = [encrypted_bytes[i:i + chunk_size] 
+                     for i in range(0, len(encrypted_bytes), chunk_size)]
+
             self.logger.debug(f"Message split into {len(chunks)} chunks, each of size {chunk_size}")
 
+            # Decrypt each chunk
             decrypted_chunks = []
             for i, chunk in enumerate(chunks):
                 try:
-                    # Decrypt each chunk using the private key
                     decrypted_chunk = self.private_key.decrypt(
                         chunk,
                         padding.OAEP(
@@ -2996,18 +5755,20 @@ class P2PNode:
                     )
                     decrypted_chunks.append(decrypted_chunk)
                     self.logger.debug(f"Successfully decrypted chunk {i + 1} of size {len(chunk)} bytes")
-                except Exception as chunk_error:
-                    self.logger.error(f"Error decrypting chunk {i + 1}: {str(chunk_error)}")
-                    self.logger.error(f"Chunk {i + 1} content (base64): {base64.b64encode(chunk).decode()}")
-                    raise
+                except Exception as e:
+                    self.logger.error(f"Failed to decrypt chunk {i + 1}: {str(e)}")
+                    return None
 
-            # Combine decrypted chunks
-            decrypted_message = b''.join(decrypted_chunks).decode('utf-8')
-
-            # Log the successfully decrypted message (first 100 characters)
+            # Combine decrypted chunks and decode
+            decrypted_data = b''.join(decrypted_chunks)
+            decrypted_message = decrypted_data.decode('utf-8')
+            
             self.logger.debug(f"Successfully decrypted message (first 100 chars): {decrypted_message[:100]}...")
-
             return decrypted_message
+
+        except Exception as e:
+            self.logger.error(f"Decryption failed: {str(e)}")
+            return None
 
         except Exception as e:
             # Log the error and the full base64-encoded encrypted message for debugging
@@ -3015,27 +5776,37 @@ class P2PNode:
             self.logger.error(f"Full encrypted message (base64): {encrypted_message}")
             raise ValueError(f"Decryption failed: {str(e)}")
     async def remove_peer(self, peer: str):
-        normalized_peer = self.normalize_peer_address(peer)
-        self.logger.info(f"[REMOVE] Removing peer: {normalized_peer}")
+        """Remove peer with comprehensive cleanup."""
+        try:
+            async with self.peer_lock:
+                if peer in self.peers:
+                    self.logger.info(f"[CLEANUP] Removing peer {peer}")
+                    
+                    # Close websocket if needed
+                    websocket = self.peers[peer]
+                    if websocket and not websocket.closed:
+                        try:
+                            await websocket.close()
+                        except Exception as e:
+                            self.logger.debug(f"Error closing websocket for {peer}: {str(e)}")
 
-        async with self.peer_lock:
-            if normalized_peer in self.peers:
-                try:
-                    await self.peers[normalized_peer].close()
-                    self.logger.debug(f"[REMOVE] Closed WebSocket connection to peer {normalized_peer}")
-                except Exception as e:
-                    self.logger.error(f"[REMOVE] Error closing connection to peer {normalized_peer}: {str(e)}")
-                
-                del self.peers[normalized_peer]
-            
-            self.peer_states.pop(normalized_peer, None)
-            self.peer_public_keys.pop(normalized_peer, None)
-            self.pending_challenges.pop(normalized_peer, None)
-            self.challenges.pop(normalized_peer, None)
-            self.connected_peers.discard(normalized_peer)
+                    # Clean up all peer-related state
+                    self.peers.pop(peer, None)
+                    self.peer_states.pop(peer, None)
+                    self.peer_public_keys.pop(peer, None)
+                    self.connected_peers.discard(peer)
+                    self.challenges.pop(peer, None)
+                    
+                    # Clean up quantum state if applicable
+                    if hasattr(self, 'quantum_sync'):
+                        self.quantum_sync.entangled_peers.pop(peer, None)
+                        self.quantum_sync.bell_pairs.pop(peer, None)
+                    
+                    self.logger.info(f"Peer {peer} removed successfully")
 
-        self.logger.info(f"[REMOVE] Peer removed: {normalized_peer}")
-        self.log_peer_status()
+        except Exception as e:
+            self.logger.error(f"Error removing peer {peer}: {str(e)}")
+
 
     async def attempt_reconnection(self, peer: str):
         max_retries = 5
@@ -3147,20 +5918,66 @@ class P2PNode:
         
         logger.error("Timed out waiting for P2PNode to connect.")
         return False
+    async def check_peer_connection(self, peer_id: str) -> bool:
+        """
+        Check if a specific peer is still connected and responsive.
+        
+        Args:
+            peer_id (str): The ID of the peer to check
+            
+        Returns:
+            bool: True if peer is connected and responsive, False otherwise
+        """
+        try:
+            if peer_id not in self.peers:
+                return False
 
-    def is_connected(self):
-        if len(self.peers) == 0:
-            logger.debug("No peers connected.")
+            websocket = self.peers[peer_id]
+            if not websocket or not websocket.open:
+                return False
+
+            try:
+                pong_waiter = await websocket.ping()
+                await asyncio.wait_for(pong_waiter, timeout=5)
+                return True
+            except (asyncio.TimeoutError, websockets.exceptions.WebSocketException):
+                return False
+
+        except Exception as e:
+            self.logger.debug(f"Error checking peer {peer_id} connection: {str(e)}")
             return False
 
-        # Ensure all peers are actively connected
-        for peer_id, peer in self.peers.items():
-            if not self.is_peer_active(peer):
-                logger.debug(f"Peer {peer_id} is not active.")
-                return False
+    async def is_connected(self) -> bool:
+        """
+        Asynchronously check if the P2P node is properly connected to the network.
         
-        logger.debug("All peers are active and connected.")
-        return True
+        Returns:
+            bool: True if connected to peers, False otherwise
+        """
+        try:
+            # First check if we have any peers
+            if len(self.peers) == 0:
+                self.logger.debug("No peers connected")
+                return False
+
+            # Check each peer's connection status
+            active_peers = 0
+            for peer_id, peer in self.peers.items():
+                try:
+                    if await self.check_peer_connection(peer_id):
+                        active_peers += 1
+                except Exception as e:
+                    self.logger.debug(f"Error checking peer {peer_id}: {str(e)}")
+                    continue
+
+            # Log connection status
+            self.logger.debug(f"Active peers: {active_peers}/{len(self.peers)}")
+            return active_peers > 0
+
+        except Exception as e:
+            self.logger.error(f"Error checking connection status: {str(e)}")
+            return False
+
 
     def is_peer_active(self, peer):
         try:
@@ -3197,99 +6014,897 @@ class P2PNode:
             except Exception as e:
                 logger.error(f"Error in periodic connection check: {str(e)}")
                 await asyncio.sleep(60)
-    async def connect_to_peer(self, node: KademliaNode) -> bool:
-        """
-        Connect to a peer, perform key exchange, send a challenge, and update peer states.
-        """
-        peer_address = f"{node.ip}:{node.port}"
-        self.logger.info(f"[CONNECT] Attempting to connect to peer: {peer_address}")
-
+                    
+    async def join_network(self):
+        """Join the P2P network using bootstrap nodes from .env."""
         try:
-            # Step 1: Establish WebSocket connection with timeout
-            websocket = await asyncio.wait_for(
-                websockets.connect(f"ws://{peer_address}", timeout=30),
-                timeout=30
-            )
-            self.logger.info(f"[CONNECT] WebSocket connection established with {peer_address}")
+            self.logger.info("\n=== Joining Network ===")
+            bootstrap_nodes = self.bootstrap_nodes
+            self.logger.info(f"Bootstrap nodes: {bootstrap_nodes}")
 
-            # Step 2: Lock the peer list and update peer states
+            if not bootstrap_nodes:
+                self.logger.warning("No bootstrap nodes configured")
+                return False
+
+            connected = False
+            for bootstrap_node in bootstrap_nodes:
+                if not bootstrap_node.strip():
+                    continue
+
+                try:
+                    self.logger.info(f"Attempting to connect to bootstrap node: {bootstrap_node}")
+                    host, port = bootstrap_node.strip().split(':')
+                    port = int(port)
+
+                    # Create KademliaNode instance
+                    node_id = hashlib.sha1(f"{host}:{port}".encode()).hexdigest()
+                    bootstrap_kademlia = KademliaNode(
+                        id=node_id,
+                        ip=host,
+                        port=port,
+                        magnet_link=None
+                    )
+
+                    # Try to connect with timeout
+                    try:
+                        connection_success = await asyncio.wait_for(
+                            self.connect_to_peer(bootstrap_kademlia),
+                            timeout=30
+                        )
+                        if connection_success:
+                            self.logger.info(f"Successfully connected to bootstrap node {bootstrap_node}")
+                            connected = True
+                            break
+                        else:
+                            self.logger.warning(f"Failed to connect to bootstrap node {bootstrap_node}")
+                    except asyncio.TimeoutError:
+                        self.logger.error(f"Connection attempt to {bootstrap_node} timed out")
+
+                except Exception as e:
+                    self.logger.error(f"Error connecting to bootstrap node {bootstrap_node}: {str(e)}")
+                    self.logger.error(traceback.format_exc())
+                    continue
+
+            if not connected:
+                self.logger.warning("Failed to connect to any bootstrap nodes")
+                return False
+
+            self.logger.info(f"Successfully joined network with {len(self.connected_peers)} peers")
+            # Initiate state sync with connected peers
+            await self.sync_with_connected_peers()
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error joining network: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return False
+
+    async def connect_to_peer(self, node: KademliaNode) -> bool:
+        """Connect to a peer with bootstrap node awareness and better connection management."""
+        peer_address = f"{node.ip}:{node.port}"
+        websocket = None
+        
+        try:
+            self.logger.info(f"\n[CONNECT] {'='*50}")
+            self.logger.info(f"[CONNECT] Initiating connection to peer: {peer_address}")
+            
+            # Check if this is a bootstrap node
+            is_bootstrap = peer_address in self.bootstrap_nodes
+            self.logger.info(f"[CONNECT] Node type: {'Bootstrap' if is_bootstrap else 'Regular'}")
+            
+            # Connection validation
+            if self.is_self_connection(node.ip, node.port):
+                self.logger.warning(f"[CONNECT] Prevented self-connection to {peer_address}")
+                return False
+                
+            # Check existing connection
+            if peer_address in self.connected_peers:
+                websocket = self.peers.get(peer_address)
+                if websocket and not websocket.closed:
+                    self.logger.info(f"[CONNECT] Already connected to {peer_address}")
+                    return True
+                else:
+                    self.logger.info(f"[CONNECT] Found stale connection, cleaning up")
+                    await self.remove_peer(peer_address)
+
+            if len(self.connected_peers) >= self.max_peers and not is_bootstrap:
+                self.logger.warning(f"[CONNECT] Max peers ({self.max_peers}) reached")
+                return False
+
+            # Establish WebSocket connection
+            try:
+                websocket = await asyncio.wait_for(
+                    websockets.connect(
+                        f"ws://{node.ip}:{node.port}",
+                        timeout=30,
+                        ping_interval=20,
+                        ping_timeout=10,
+                        close_timeout=5,
+                        max_size=2**23,
+                        extra_headers={
+                            'X-Node-Type': 'client' if is_bootstrap else 'server',
+                            'X-Node-ID': self.node_id
+                        }
+                    ),
+                    timeout=30
+                )
+                self.logger.info(f"[CONNECT] ✓ WebSocket connection established with {peer_address}")
+            except Exception as conn_error:
+                self.logger.error(f"[CONNECT] Connection failed: {str(conn_error)}")
+                return False
+
+            # Update peer tracking
             async with self.peer_lock:
                 self.peers[peer_address] = websocket
                 self.peer_states[peer_address] = "connecting"
-                self.connected_peers.add(peer_address)  # Add to connected_peers set
-            self.logger.info(f"[CONNECT] Peer {peer_address} added to peers list and connected_peers")
+                self.peer_info[peer_address] = {
+                    'connected_at': time.time(),
+                    'last_seen': time.time(),
+                    'is_bootstrap': is_bootstrap,
+                    'reconnect_attempts': 0,
+                    'node_id': node.id,
+                    'connection_type': 'bootstrap' if is_bootstrap else 'regular'
+                }
+                self.logger.info(f"[CONNECT] ✓ Added {peer_address} to peer tracking")
 
-            # Step 3: Perform public key exchange
-            if await self.exchange_public_keys(peer_address):
-                self.logger.info(f"[CONNECT] Public keys exchanged with {peer_address}")
-                self.peer_states[peer_address] = "key_exchanged"
+            # Attempt key exchange with retries for bootstrap nodes
+            max_attempts = 3 if is_bootstrap else 1
+            exchange_success = False
+            
+            for attempt in range(max_attempts):
+                try:
+                    if attempt > 0:
+                        self.logger.info(f"[CONNECT] Retry {attempt} for key exchange with bootstrap node")
+                        await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
+                    
+                    if await self.exchange_public_keys(peer_address):
+                        exchange_success = True
+                        break
+                except Exception as e:
+                    self.logger.error(f"[CONNECT] Key exchange attempt {attempt + 1} failed: {str(e)}")
+                    if attempt == max_attempts - 1:
+                        raise
 
-                # Step 4: Send a challenge to the peer
-                our_challenge_id = await self.send_challenge(peer_address)
-                self.logger.info(f"[CONNECT] Sent challenge with ID {our_challenge_id} to {peer_address}")
-                self.peer_states[peer_address] = "challenge_sent"
-
-                # Step 5: Wait for the challenge response
-                if await self.wait_for_challenge_response(peer_address, our_challenge_id, timeout=60):
-                    self.logger.info(f"[CONNECT] Challenge response verified for peer: {peer_address}")
-
-                    # Step 6: Lock peer list, update peer states, and finalize connection
-                    async with self.peer_lock:
-                        self.peer_states[peer_address] = "connected"
-                        self.logger.debug(f"Attempting to add peer {peer_address} to active peer list")
-                        self.connected_peers.add(peer_address)
-                        self.logger.debug(f"Peer list after adding: {self.connected_peers}")
-
-                    self.logger.info(f"[CONNECT] Peer {peer_address} successfully connected and added to active list")
-
-                    await self.finalize_connection(peer_address)
-
-                    # Step 7: Start handling messages and keep-alive mechanisms
-                    asyncio.create_task(self.handle_messages(websocket, peer_address))
-                    asyncio.create_task(self.keep_connection_alive(websocket, peer_address))
-
-                    # Step 8: Sync with connected peers after a successful connection
-                    await self.sync_with_connected_peers()
-                    self.logger.info(f"Successfully synced with connected peers after connecting to {peer_address}")
-
-                    return True
-                else:
-                    self.logger.error(f"[CONNECT] Failed to receive valid challenge response from {peer_address}")
-            else:
-                self.logger.warning(f"[CONNECT] Failed to exchange keys with peer: {peer_address}")
+            if exchange_success:
+                self.connected_peers.add(peer_address)
+                self.peer_states[peer_address] = "connected"
+                
+                # Start connection handlers
+                asyncio.create_task(
+                    self.handle_messages(websocket, peer_address),
+                    name=f"msg_handler_{peer_address}"
+                )
+                asyncio.create_task(
+                    self.keep_connection_alive(websocket, peer_address),
+                    name=f"keepalive_{peer_address}"
+                )
+                
+                # Start additional monitoring for bootstrap nodes
+                if is_bootstrap:
+                    asyncio.create_task(
+                        self.monitor_bootstrap_connection(peer_address),
+                        name=f"bootstrap_monitor_{peer_address}"
+                    )
+                
+                self.logger.info(f"[CONNECT] ✓ Successfully connected to {peer_address}")
+                return True
+            
+            self.logger.error(f"[CONNECT] Failed to complete key exchange with {peer_address}")
+            await self.remove_peer(peer_address)
+            return False
 
         except Exception as e:
-            self.logger.error(f"[CONNECT] Error connecting to peer {peer_address}: {str(e)}")
+            self.logger.error(f"[CONNECT] Error connecting to {peer_address}: {str(e)}")
             self.logger.error(traceback.format_exc())
+            if websocket and not websocket.closed:
+                await websocket.close()
+            await self.remove_peer(peer_address)
+            return False
 
-        # If the connection fails at any point, clean up and remove the peer
-        await self.remove_peer(peer_address)
+        finally:
+            self.logger.info(f"[CONNECT] {'='*50}\n")
+    async def request_peer_list(self, peer: str) -> List[str]:
+        """Request peer list from a connected peer."""
+        try:
+            self.logger.debug(f"Requesting peer list from {peer}")
+            message = Message(
+                type=MessageType.PEER_LIST_REQUEST.value,
+                payload={}
+            )
+            
+            response = await self.send_and_wait_for_response(peer, message, timeout=10.0)
+            if response and response.type == MessageType.PEER_LIST_RESPONSE.value:
+                peer_list = response.payload.get('peers', [])
+                self.logger.debug(f"Received {len(peer_list)} peers from {peer}")
+                return peer_list
+            return []
+        except Exception as e:
+            self.logger.error(f"Error requesting peer list from {peer}: {str(e)}")
+            return []
+    def is_self_connection(self, ip: str, port: int) -> bool:
+        """
+        Check if a given IP and port combination represents this node itself.
+        
+        Args:
+            ip (str): IP address to check
+            port (int): Port number to check
+            
+        Returns:
+            bool: True if this is a self-connection, False otherwise
+        """
+        own_ips = {self.host, self.external_ip, 'localhost', '127.0.0.1'}
+        if ip in own_ips and port == self.port:
+            self.logger.debug(f"Detected self-connection attempt: {ip}:{port}")
+            return True
         return False
+
+    async def cleanup_invalid_connections(self):
+        """Clean up invalid or stale connections."""
+        self.logger.info("Starting cleanup of invalid connections")
+        try:
+            async with self.peer_lock:
+                # Track peers to remove
+                peers_to_remove = set()
+                
+                # Check for self-connections
+                for peer in list(self.peers.keys()):
+                    try:
+                        ip, port = peer.split(':')
+                        port = int(port)
+                        if self.is_self_connection(ip, port):
+                            self.logger.warning(f"Found self-connection to remove: {peer}")
+                            peers_to_remove.add(peer)
+                    except ValueError:
+                        self.logger.warning(f"Invalid peer address format: {peer}")
+                        peers_to_remove.add(peer)
+
+                # Check for stale 'connecting' states
+                current_time = time.time()
+                for peer, state in self.peer_states.items():
+                    if state == 'connecting' and peer in self.peers:
+                        websocket = self.peers[peer]
+                        if not websocket.open or current_time - getattr(websocket, 'last_activity', 0) > 60:
+                            self.logger.warning(f"Found stale connecting state: {peer}")
+                            peers_to_remove.add(peer)
+
+                # Remove invalid peers
+                for peer in peers_to_remove:
+                    await self.remove_peer(peer)
+                    
+                self.logger.info(f"Cleanup complete. Removed {len(peers_to_remove)} invalid connections")
+                
+                # Log current state
+                self.log_peer_status()
+
+        except Exception as e:
+            self.logger.error(f"Error during connection cleanup: {str(e)}")
+            self.logger.error(traceback.format_exc())
+    async def cleanup_connections(self):
+        """Clean up stale and invalid connections periodically."""
+        while self.is_running:
+            try:
+                self.logger.info("\n=== Starting Connection Cleanup ===")
+                async with self.peer_lock:
+                    peers_to_remove = set()
+                    
+                    # Get current peer addresses and states
+                    current_peers = list(self.peers.keys())
+                    self.logger.info(f"Current peer count: {len(current_peers)}")
+                    
+                    for peer in current_peers:
+                        try:
+                            ip, port = peer.split(':')
+                            port = int(port)
+                            
+                            # Check for self-connections
+                            if self.is_self_connection(ip, port):
+                                self.logger.warning(f"Found self-connection to remove: {peer}")
+                                peers_to_remove.add(peer)
+                                continue
+                                
+                            # Check for stale 'connecting' states
+                            if self.peer_states.get(peer) == 'connecting':
+                                if time.time() - self.last_activity_time > 60:  # 60 seconds timeout
+                                    self.logger.warning(f"Found stale connecting state: {peer}")
+                                    peers_to_remove.add(peer)
+                                    continue
+                            
+                            # Check for duplicate connections to same IP with different ports
+                            for other_peer in current_peers:
+                                if peer != other_peer and other_peer.split(':')[0] == ip:
+                                    if self.peer_states.get(peer) == 'connecting':
+                                        self.logger.warning(f"Found duplicate connection: {peer}")
+                                        peers_to_remove.add(peer)
+                                        break
+
+                            # Verify connection is still alive
+                            if not await self.is_connection_alive(peer):
+                                self.logger.warning(f"Found dead connection: {peer}")
+                                peers_to_remove.add(peer)
+                                
+                        except ValueError:
+                            self.logger.warning(f"Invalid peer address format: {peer}")
+                            peers_to_remove.add(peer)
+
+                    # Remove identified peers
+                    for peer in peers_to_remove:
+                        await self.remove_peer(peer)
+                    
+                    # Log cleanup results
+                    self.logger.info(f"Removed {len(peers_to_remove)} invalid connections")
+                    self.logger.info(f"Remaining peers: {len(self.peers)}")
+                    
+                    # Update active peers list
+                    self.connected_peers = {peer for peer in self.peers.keys() 
+                                         if self.peer_states.get(peer) == 'connected'}
+                    
+                # Log final state
+                self.log_peer_status()
+                self.logger.info("=== Connection Cleanup Complete ===\n")
+                
+                await asyncio.sleep(30)  # Run every 30 seconds
+                
+            except Exception as e:
+                self.logger.error(f"Error during connection cleanup: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                await asyncio.sleep(30)
+
+    def is_self_connection(self, ip: str, port: int) -> bool:
+        """
+        Check if a given IP and port combination represents this node itself.
+        
+        Args:
+            ip (str): IP address to check
+            port (int): Port number to check
+            
+        Returns:
+            bool: True if this is a self-connection, False otherwise
+        """
+        own_ips = {
+            self.host, 
+            self.external_ip, 
+            'localhost', 
+            '127.0.0.1',
+            socket.gethostbyname(socket.gethostname())
+        }
+        
+        # Clean up None values
+        own_ips.discard(None)
+        
+        is_self = (ip in own_ips and port == self.port)
+        if is_self:
+            self.logger.debug(f"Detected self-connection attempt: {ip}:{port}")
+        return is_self
+
+    async def connect_to_peer(self, node: KademliaNode) -> bool:
+        """Connect to a peer with enhanced security and quantum initialization."""
+        peer_address = f"{node.ip}:{node.port}"
+        connection_start_time = time.time()
+        websocket = None
+        
+        try:
+            self.logger.info(f"\n[CONNECT] {'='*50}")
+            self.logger.info(f"[CONNECT] Initiating connection to peer: {peer_address}")
+            
+            # Basic connection checks
+            if self.is_self_connection(node.ip, node.port):
+                self.logger.warning(f"[CONNECT] Prevented self-connection attempt to {peer_address}")
+                return False
+                
+            if peer_address in self.connected_peers:
+                self.logger.info(f"[CONNECT] Already connected to {peer_address}")
+                return True
+                
+            if len(self.connected_peers) >= self.max_peers:
+                self.logger.warning(f"[CONNECT] Max peers ({self.max_peers}) reached")
+                return False
+
+            # Step 1: WebSocket Connection
+            try:
+                websocket_uri = f"ws://{node.ip}:{node.port}"
+                self.logger.debug(f"[CONNECT] Attempting WebSocket connection to {websocket_uri}")
+                
+                websocket = await asyncio.wait_for(
+                    websockets.connect(
+                        websocket_uri,
+                        timeout=30,
+                        max_size=2**23,
+                        close_timeout=5,
+                        ping_interval=None
+                    ),
+                    timeout=30
+                )
+                self.logger.info(f"[CONNECT] ✓ WebSocket connection established with {peer_address}")
+                
+            except Exception as conn_error:
+                self.logger.error(f"[CONNECT] WebSocket connection failed: {str(conn_error)}")
+                return False
+
+            # Step 2: Update peer tracking
+            async with self.peer_lock:
+                self.peers[peer_address] = websocket
+                self.peer_states[peer_address] = "connecting"
+                self.connected_peers.add(peer_address)
+                self.logger.info(f"[CONNECT] ✓ Added {peer_address} to peer tracking")
+
+            # Step 3: Exchange Public Keys
+            if not await self.exchange_public_keys(peer_address):
+                raise ValueError("Public key exchange failed")
+                
+            # Step 4: Perform Handshake
+            if not await self.perform_handshake(peer_address):
+                raise ValueError("Handshake failed")
+
+            # Step 5: Challenge-Response Verification
+            challenge_id = await self.send_challenge(peer_address)
+            if not challenge_id:
+                raise ValueError("Failed to send challenge")
+                
+            if not await self.wait_for_challenge_response(peer_address, challenge_id, timeout=30):
+                raise ValueError("Challenge verification failed")
+
+            # Step 6: Initialize Quantum Components
+            if self.quantum_initialized or await self.initialize_quantum_components():
+                try:
+                    self.logger.info(f"[QUANTUM] Initializing quantum components for {peer_address}")
+                    if await self.establish_quantum_entanglement(peer_address):
+                        async with self.peer_lock:
+                            self.peer_states[peer_address] = "quantum_ready"
+                        self.logger.info(f"[QUANTUM] ✓ Quantum entanglement established with {peer_address}")
+                        
+                        # Start quantum monitoring
+                        asyncio.create_task(self.monitor_peer_quantum_state(peer_address))
+                        asyncio.create_task(self.send_quantum_heartbeats(peer_address))
+                    else:
+                        self.logger.warning(f"[QUANTUM] Failed to establish quantum entanglement with {peer_address}")
+                except Exception as qe:
+                    self.logger.error(f"[QUANTUM] Error in quantum initialization: {str(qe)}")
+                    # Continue even if quantum setup fails
+            else:
+                self.logger.warning(f"[QUANTUM] Quantum components not available for {peer_address}")
+
+            # Step 7: Start Message Handling
+            asyncio.create_task(self.handle_messages(websocket, peer_address))
+            asyncio.create_task(self.keep_connection_alive(websocket, peer_address))
+
+            # Log successful connection
+            connection_time = time.time() - connection_start_time
+            self.logger.info(f"[CONNECT] ✓ Successfully connected to {peer_address} in {connection_time:.2f}s")
+            self.logger.info(f"[CONNECT] State: {self.peer_states.get(peer_address, 'unknown')}")
+            self.logger.info(f"[CONNECT] Quantum Ready: {self.peer_states.get(peer_address) == 'quantum_ready'}")
+            self.logger.info(f"[CONNECT] {'='*50}\n")
+            
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[CONNECT] Error connecting to {peer_address}: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            
+            if websocket:
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+                
+            await self.remove_peer(peer_address)
+            return False
+
+
+
+
+    async def validate_connection(self, node: KademliaNode, peer_address: str) -> bool:
+        """Validate the connection attempt."""
+        try:
+            if self.is_self_connection(node.ip, node.port):
+                self.logger.warning(f"[CONNECT] Prevented self-connection to {peer_address}")
+                return False
+
+            if peer_address in self.connected_peers:
+                self.logger.info(f"[CONNECT] Already connected to {peer_address}")
+                return True
+
+            if len(self.connected_peers) >= self.max_peers:
+                self.logger.warning(f"[CONNECT] Max peers ({self.max_peers}) reached")
+                return False
+
+            return True
+        except Exception as e:
+            self.logger.error(f"[CONNECT] Validation error: {str(e)}")
+            return False
+
+    async def establish_websocket(self, peer_address: str) -> Optional[websockets.WebSocketClientProtocol]:
+        """Establish WebSocket connection with retry logic."""
+        try:
+            self.logger.info(f"[CONNECT] Establishing WebSocket connection to {peer_address}")
+            websocket = await asyncio.wait_for(
+                websockets.connect(
+                    f"ws://{peer_address}",
+                    timeout=30,
+                    ping_interval=None,
+                    max_size=2**23,
+                    close_timeout=5
+                ),
+                timeout=30
+            )
+            self.logger.info(f"[CONNECT] ✓ WebSocket connection established")
+            return websocket
+        except Exception as e:
+            self.logger.error(f"[CONNECT] WebSocket connection failed: {str(e)}")
+            return None
+
+    async def register_peer(self, peer_address: str, websocket) -> bool:
+        """Register the peer in the node's peer tracking."""
+        try:
+            async with self.peer_lock:
+                self.peers[peer_address] = websocket
+                self.peer_states[peer_address] = "connecting"
+                self.connected_peers.add(peer_address)
+                self.logger.info(f"[CONNECT] ✓ Peer registered: {peer_address}")
+                return True
+        except Exception as e:
+            self.logger.error(f"[CONNECT] Peer registration failed: {str(e)}")
+            return False
+
+    async def perform_security_handshake(self, peer_address: str) -> bool:
+        """Perform security handshake with the peer."""
+        try:
+            if self.peer_states.get(peer_address) in ["verified", "quantum_initializing"]:
+                return True
+
+            exchange_success = await asyncio.wait_for(
+                self.exchange_public_keys(peer_address), 
+                timeout=60
+            )
+            if not exchange_success:
+                raise ValueError("Public key exchange failed")
+
+            challenge_id = await self.send_challenge(peer_address)
+            if not challenge_id:
+                if self.peer_states.get(peer_address) in ["verified", "quantum_initializing"]:
+                    return True
+                raise ValueError("Failed to send challenge")
+
+            if not await self.wait_for_challenge_response(peer_address, challenge_id, timeout=60):
+                raise ValueError("Challenge response verification failed")
+
+            self.logger.info(f"[CONNECT] ✓ Security handshake completed")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[CONNECT] Security handshake failed: {str(e)}")
+            return False
+
+    async def initialize_quantum_components(self, peer_address: str):
+        """Initialize quantum components for the peer connection."""
+        try:
+            if not self.quantum_initialized:
+                await self.setup_quantum_components()
+
+            await self.establish_quantum_entanglement(peer_address)
+
+        except Exception as e:
+            self.logger.error(f"[QUANTUM] Initialization error: {str(e)}")
+            self.logger.warning(f"[QUANTUM] Continuing without quantum entanglement")
+
+    def start_peer_monitoring(self, websocket, peer_address: str):
+        """Start monitoring tasks for the peer."""
+        asyncio.create_task(self.handle_messages(websocket, peer_address))
+        asyncio.create_task(self.keep_connection_alive(websocket, peer_address))
+        if peer_address in self.quantum_sync.entangled_peers:
+            asyncio.create_task(self.monitor_peer_quantum_state(peer_address))
+            asyncio.create_task(self.send_quantum_heartbeats(peer_address))
+
+    async def handle_connection_error(self, peer_address: str, websocket, error: Exception):
+        """Handle connection errors and cleanup."""
+        self.logger.error(f"[CONNECT] Connection failed to {peer_address}: {str(error)}")
+        self.logger.error(traceback.format_exc())
+
+        if websocket:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
+        await self.remove_peer(peer_address)
+        self.logger.info(f"[CONNECT] {'='*50}\n")
+
+    async def log_connection_success(self, peer_address: str, start_time: float):
+        """Log successful connection details."""
+        connection_time = time.time() - start_time
+        self.logger.info(f"[CONNECT] ✓ Connected to {peer_address} in {connection_time:.2f}s")
+        self.logger.info(f"[CONNECT] ✓ State: {self.peer_states.get(peer_address, 'unknown')}")
+        if hasattr(self, 'quantum_sync'):
+            self.logger.info(f"[CONNECT] ✓ Quantum peers: {len(self.quantum_sync.entangled_peers)}")
+        self.logger.info(f"[CONNECT] {'='*50}\n")
+
+    async def validate_connection(self, node: KademliaNode, peer_address: str) -> bool:
+        """Validate the connection attempt."""
+        try:
+            if self.is_self_connection(node.ip, node.port):
+                self.logger.warning(f"[CONNECT] Prevented self-connection to {peer_address}")
+                return False
+
+            if peer_address in self.connected_peers:
+                self.logger.info(f"[CONNECT] Already connected to {peer_address}")
+                return True
+
+            if len(self.connected_peers) >= self.max_peers:
+                self.logger.warning(f"[CONNECT] Max peers ({self.max_peers}) reached")
+                return False
+
+            return True
+        except Exception as e:
+            self.logger.error(f"[CONNECT] Validation error: {str(e)}")
+            return False
+
+    async def establish_websocket(self, peer_address: str) -> Optional[websockets.WebSocketClientProtocol]:
+        """Establish WebSocket connection with retry logic."""
+        try:
+            self.logger.info(f"[CONNECT] Establishing WebSocket connection to {peer_address}")
+            websocket = await asyncio.wait_for(
+                websockets.connect(
+                    f"ws://{peer_address}",
+                    timeout=30,
+                    ping_interval=None,
+                    max_size=2**23,
+                    close_timeout=5
+                ),
+                timeout=30
+            )
+            self.logger.info(f"[CONNECT] ✓ WebSocket connection established")
+            return websocket
+        except Exception as e:
+            self.logger.error(f"[CONNECT] WebSocket connection failed: {str(e)}")
+            return None
+
+    async def register_peer(self, peer_address: str, websocket) -> bool:
+        """Register the peer in the node's peer tracking."""
+        try:
+            async with self.peer_lock:
+                self.peers[peer_address] = websocket
+                self.peer_states[peer_address] = "connecting"
+                self.connected_peers.add(peer_address)
+                self.logger.info(f"[CONNECT] ✓ Peer registered: {peer_address}")
+                return True
+        except Exception as e:
+            self.logger.error(f"[CONNECT] Peer registration failed: {str(e)}")
+            return False
+
+    async def perform_security_handshake(self, peer_address: str) -> bool:
+        """Perform security handshake with the peer."""
+        try:
+            if self.peer_states.get(peer_address) in ["verified", "quantum_initializing"]:
+                return True
+
+            exchange_success = await asyncio.wait_for(
+                self.exchange_public_keys(peer_address), 
+                timeout=60
+            )
+            if not exchange_success:
+                raise ValueError("Public key exchange failed")
+
+            challenge_id = await self.send_challenge(peer_address)
+            if not challenge_id:
+                if self.peer_states.get(peer_address) in ["verified", "quantum_initializing"]:
+                    return True
+                raise ValueError("Failed to send challenge")
+
+            if not await self.wait_for_challenge_response(peer_address, challenge_id, timeout=60):
+                raise ValueError("Challenge response verification failed")
+
+            self.logger.info(f"[CONNECT] ✓ Security handshake completed")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[CONNECT] Security handshake failed: {str(e)}")
+            return False
+
+    async def initialize_quantum_components(self):
+        """Initialize quantum components without requiring a peer."""
+        try:
+            self.logger.info("[QUANTUM] Initializing quantum components...")
+            
+            # Initialize quantum sync if not already done
+            if not hasattr(self, 'quantum_sync') or self.quantum_sync is None:
+                self.quantum_sync = QuantumEntangledSync(self.node_id)
+                
+            # Get initial state from blockchain
+            initial_data = {
+                'wallets': [w.to_dict() for w in self.blockchain.get_wallets()] if self.blockchain else [],
+                'transactions': [tx.to_dict() for tx in self.blockchain.get_recent_transactions(limit=100)] if self.blockchain else [],
+                'blocks': [block.to_dict() for block in self.blockchain.chain] if self.blockchain else [],
+                'mempool': [tx.to_dict() for tx in self.blockchain.mempool] if hasattr(self.blockchain, 'mempool') else []
+            }
+
+            # Initialize quantum state
+            await self.quantum_sync.initialize_quantum_state(initial_data)
+            
+            # Initialize quantum notifier
+            if not hasattr(self, 'quantum_notifier'):
+                self.quantum_notifier = QuantumStateNotifier(self)
+            
+            # Initialize quantum monitor
+            if not hasattr(self, 'quantum_monitor'):
+                self.quantum_monitor = QuantumNetworkMonitor(self)
+                
+            # Initialize quantum consensus
+            if not hasattr(self, 'quantum_consensus'):
+                self.quantum_consensus = QuantumConsensusManager(self)
+
+            # Initialize quantum heartbeat tracking
+            if not hasattr(self, 'quantum_heartbeats'):
+                self.quantum_heartbeats = {}
+            if not hasattr(self, 'last_quantum_heartbeat'):
+                self.last_quantum_heartbeat = {}
+                
+            # Set initialization flags
+            self.quantum_initialized = True
+            
+            # Start quantum monitoring
+            asyncio.create_task(self.monitor_quantum_state())
+            
+            self.logger.info("[QUANTUM] ✓ Quantum components initialized successfully")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[QUANTUM] Error initializing quantum components: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            raise
+
+
+
+    def start_peer_monitoring(self, websocket, peer_address: str):
+        """Start monitoring tasks for the peer."""
+        asyncio.create_task(self.handle_messages(websocket, peer_address))
+        asyncio.create_task(self.keep_connection_alive(websocket, peer_address))
+        if peer_address in self.quantum_sync.entangled_peers:
+            asyncio.create_task(self.monitor_peer_quantum_state(peer_address))
+            asyncio.create_task(self.send_quantum_heartbeats(peer_address))
+
+    async def handle_connection_error(self, peer_address: str, websocket, error: Exception):
+        """Handle connection errors and cleanup."""
+        self.logger.error(f"[CONNECT] Connection failed to {peer_address}: {str(error)}")
+        self.logger.error(traceback.format_exc())
+
+        if websocket:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
+        await self.remove_peer(peer_address)
+        self.logger.info(f"[CONNECT] {'='*50}\n")
+
+    async def log_connection_success(self, peer_address: str, start_time: float):
+        """Log successful connection details."""
+        connection_time = time.time() - start_time
+        self.logger.info(f"[CONNECT] ✓ Connected to {peer_address} in {connection_time:.2f}s")
+        self.logger.info(f"[CONNECT] ✓ State: {self.peer_states.get(peer_address, 'unknown')}")
+        if hasattr(self, 'quantum_sync'):
+            self.logger.info(f"[CONNECT] ✓ Quantum peers: {len(self.quantum_sync.entangled_peers)}")
+        self.logger.info(f"[CONNECT] {'='*50}\n")
+
+
+
+    async def wait_for_public_key(self, peer: str, timeout: float = 30.0) -> bool:
+        """Wait for peer's public key with timeout."""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if peer in self.peer_public_keys:
+                return True
+            await asyncio.sleep(0.1)
+        return False
+
+    async def setup_quantum_entanglement(self, peer: str):
+        """Set up quantum entanglement with a peer."""
+        try:
+            self.logger.info(f"[QUANTUM] Initializing quantum entanglement with {peer}")
+            
+            # Get current state
+            current_state = {
+                'wallets': [w.to_dict() for w in self.blockchain.get_wallets()] if self.blockchain else {},
+                'transactions': [tx.to_dict() for tx in self.blockchain.get_recent_transactions()] if self.blockchain else {},
+                'blocks': [block.to_dict() for block in self.blockchain.chain] if self.blockchain else {},
+                'mempool': [tx.to_dict() for tx in self.blockchain.mempool] if self.blockchain else {}
+            }
+
+            # Create entanglement request
+            request_message = Message(
+                type=MessageType.QUANTUM_ENTANGLEMENT_REQUEST.value,
+                payload={
+                    'node_id': self.node_id,
+                    'state_data': current_state,
+                    'timestamp': time.time()
+                }
+            )
+
+            # Send request and wait for response
+            response = await self.send_and_wait_for_response(
+                peer,
+                request_message,
+                timeout=30.0
+            )
+
+            if not response or response.type != MessageType.QUANTUM_ENTANGLEMENT_RESPONSE.value:
+                raise ValueError("Failed to receive quantum entanglement response")
+
+            # Establish entanglement
+            peer_state = response.payload.get('state_data', {})
+            peer_register = await self.quantum_sync.entangle_with_peer(peer, peer_state)
+
+            if not peer_register:
+                raise ValueError("Failed to create quantum register")
+
+            # Start quantum monitoring for this peer
+            asyncio.create_task(self.send_quantum_heartbeats(peer))
+            asyncio.create_task(self.monitor_peer_quantum_state(peer))
+
+            self.logger.info(f"[QUANTUM] ✓ Quantum entanglement established with {peer}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[QUANTUM] Error in quantum setup: {str(e)}")
+            raise
 
 
     async def finalize_connection(self, peer_address: str):
         self.logger.info(f"[FINALIZE] Finalizing connection with peer {peer_address}")
         async with self.peer_lock:
-            self.peer_states[peer_address] = "connected"
-            logger.debug(f"Attempting to add peer {peer_address} to active peer list")
-            self.connected_peers.add(peer_address)
-            logger.debug(f"Peer list after adding: {self.connected_peers}")
+            try:
+                # Set peer state to connected and add to active peers
+                self.peer_states[peer_address] = "connected"
+                logger.debug(f"Attempting to add peer {peer_address} to active peer list")
+                self.connected_peers.add(peer_address)
+                logger.debug(f"Peer list after adding: {self.connected_peers}")
 
-            if peer_address not in self.peers:
-                self.logger.warning(f"[FINALIZE] Peer {peer_address} not found in self.peers. Adding it.")
-                # You might need to establish a new WebSocket connection here if it's missing
-                websocket = await websockets.connect(f"ws://{peer_address}")
-                self.peers[peer_address] = websocket
-        
-        await self.complete_connection(peer_address)
-        self.logger.info(f"[FINALIZE] Connection finalized with peer {peer_address}")
-        self.log_peer_status()
-        
-        # Verify the peer was added correctly
-        self.logger.info(f"[FINALIZE] Verification after finalization:")
-        self.logger.info(f"  Peer in self.peers: {peer_address in self.peers}")
-        self.logger.info(f"  Peer in self.connected_peers: {peer_address in self.connected_peers}")
-        self.logger.info(f"  Peer state: {self.peer_states.get(peer_address)}")
+                # Check if peer is already in self.peers, if not, establish WebSocket connection
+                if peer_address not in self.peers:
+                    self.logger.warning(f"[FINALIZE] Peer {peer_address} not found in self.peers. Adding it.")
+                    websocket = await websockets.connect(f"ws://{peer_address}")
+                    self.peers[peer_address] = websocket
+            
+                # Complete connection setup for the peer
+                await self.complete_connection(peer_address)
+                self.logger.info(f"[FINALIZE] Connection finalized with peer {peer_address}")
+                self.log_peer_status()
+
+                # Sync state with the new peer
+                await self.sync_new_peer(peer_address)
+
+                # Set up real-time message handling
+                asyncio.create_task(self.handle_real_time_messages(peer_address))
+
+                # Set up periodic sync check
+                asyncio.create_task(self.periodic_sync_check(peer_address))
+
+                # Verification logs after finalization
+                self.logger.info(f"[FINALIZE] Verification after finalization:")
+                self.logger.info(f"  Peer in self.peers: {peer_address in self.peers}")
+                self.logger.info(f"  Peer in self.connected_peers: {peer_address in self.connected_peers}")
+                self.logger.info(f"  Peer state: {self.peer_states.get(peer_address)}")
+
+            except Exception as e:
+                self.logger.error(f"Error finalizing connection with peer {peer_address}: {str(e)}")
+                await self.remove_peer(peer_address)
+    async def handle_real_time_messages(self, peer: str):
+        """Handle real-time messages from a peer"""
+        while peer in self.connected_peers:
+            try:
+                message = await self.receive_message(peer)
+                if not message:
+                    continue
+
+                # Handle high-priority messages immediately
+                if message.type in [MessageType.TRANSACTION.value, MessageType.BLOCK.value]:
+                    asyncio.create_task(self.handle_message(message, peer))
+                else:
+                    # Queue other messages for normal processing
+                    await self.message_queue.put((message, peer))
+
+            except Exception as e:
+                self.logger.error(f"Error in real-time message handling for {peer}: {str(e)}")
+                await self.remove_peer(peer)
+                break
 
     def log_peer_status(self):
         self.logger.info("Current peer status:")
@@ -3299,34 +6914,163 @@ class P2PNode:
         active_peers = [peer for peer in self.connected_peers if self.peer_states.get(peer) == "connected"]
         self.logger.info(f"  Active peers: {active_peers}")
     async def handle_messages(self, websocket: websockets.WebSocketServerProtocol, peer: str):
+        """Handle incoming messages with enhanced security, state management, and challenge handling."""
         try:
+            connection_state = "initial"  # Track connection state
+            peer_normalized = self.normalize_peer_address(peer)
+            self.logger.info(f"\n[HANDLER] {'='*20} Started Message Handler {'='*20}")
+            self.logger.info(f"[HANDLER] Peer: {peer_normalized}")
+            
+            # Initialize or reset peer state
+            async with self.peer_lock:
+                self.peer_states[peer_normalized] = "connecting"
+                if peer_normalized not in self.peer_info:
+                    self.peer_info[peer_normalized] = {
+                        'last_activity': time.time(),
+                        'connection_attempts': 0,
+                        'challenges': {}
+                    }
+
+            # Set up connection monitoring
+            last_activity = time.time()
+            ping_interval = 20  # Seconds between pings
+            
             while True:
                 try:
+                    # Check if we need to send a ping
+                    current_time = time.time()
+                    if current_time - last_activity > ping_interval:
+                        try:
+                            pong_waiter = await websocket.ping()
+                            await asyncio.wait_for(pong_waiter, timeout=10)
+                            last_activity = current_time
+                            self.logger.debug(f"[HANDLER] ✓ Keepalive ping successful for {peer_normalized}")
+                        except Exception as ping_error:
+                            self.logger.warning(f"[HANDLER] Ping failed for {peer_normalized}: {str(ping_error)}")
+                            break
+
+                    # Receive message with timeout
                     message = await asyncio.wait_for(websocket.recv(), timeout=30)
+                    last_activity = time.time()
+                    
+                    # Parse and process message
                     try:
                         parsed_message = Message.from_json(message)
-                        await self.process_message(parsed_message, peer)
-                    except json.JSONDecodeError:
-                        self.logger.error(f"Failed to parse message from {peer}")
-                    except Exception as e:
-                        self.logger.error(f"Error processing message from {peer}: {str(e)}")
+                        message_type = parsed_message.type.lower() if parsed_message.type else ""
+                        
+                        self.logger.debug(f"[HANDLER] Received message type: {message_type}")
+
+                        # Handle authentication phase
+                        if connection_state == "initial":
+                            if message_type == MessageType.PUBLIC_KEY_EXCHANGE.value:
+                                if await self.handle_public_key_exchange(parsed_message, peer_normalized):
+                                    connection_state = "keys_exchanged"
+                                    self.peer_states[peer_normalized] = "keys_exchanged"
+                                    self.logger.info(f"[HANDLER] Public keys exchanged with {peer_normalized}")
+                                continue
+
+                        elif connection_state == "keys_exchanged":
+                            if message_type == MessageType.HANDSHAKE.value:
+                                if await self.handle_handshake(peer_normalized, parsed_message.payload):
+                                    connection_state = "handshake_complete"
+                                    self.peer_states[peer_normalized] = "handshake_complete"
+                                    self.logger.info(f"[HANDLER] Handshake completed with {peer_normalized}")
+                                continue
+
+                        elif connection_state == "handshake_complete":
+                            if message_type == MessageType.CHALLENGE.value:
+                                challenge_success = await self.handle_challenge(
+                                    peer_normalized,
+                                    parsed_message.payload.get('challenge', ''),
+                                    parsed_message.challenge_id
+                                )
+                                if challenge_success:
+                                    connection_state = "authenticated"
+                                    self.peer_states[peer_normalized] = "authenticated"
+                                    self.logger.info(f"[HANDLER] Authentication completed with {peer_normalized}")
+                                continue
+
+                        # Handle post-authentication messages
+                        if connection_state == "authenticated":
+                            # Check if this is a message type that requires decryption
+                            if message_type not in [
+                                MessageType.PUBLIC_KEY_EXCHANGE.value,
+                                MessageType.CHALLENGE.value,
+                                MessageType.CHALLENGE_RESPONSE.value,
+                                MessageType.HANDSHAKE.value
+                            ]:
+                                try:
+                                    decrypted = self.decrypt_message(message)
+                                    parsed_message = Message.from_json(decrypted)
+                                    message_type = parsed_message.type.lower()
+                                except Exception as decrypt_error:
+                                    self.logger.error(f"[HANDLER] Decryption failed: {str(decrypt_error)}")
+                                    continue
+
+                            # Route message to appropriate handler
+                            try:
+                                if message_type == MessageType.TRANSACTION.value:
+                                    await self.handle_transaction_message(parsed_message, peer_normalized)
+                                elif message_type == MessageType.BLOCK.value:
+                                    await self.handle_block_message(parsed_message, peer_normalized)
+                                elif message_type == MessageType.SYNC_STATUS.value:
+                                    await self.handle_sync_message(parsed_message, peer_normalized)
+                                elif message_type in [
+                                    MessageType.GET_TRANSACTIONS.value,
+                                    MessageType.GET_WALLETS.value,
+                                    MessageType.GET_MEMPOOL.value
+                                ]:
+                                    await self.handle_get_request(parsed_message, peer_normalized)
+                                elif message_type == MessageType.CHALLENGE_RESPONSE.value:
+                                    await self.verify_challenge_response(
+                                        peer_normalized,
+                                        parsed_message.challenge_id,
+                                        parsed_message.payload
+                                    )
+                                else:
+                                    await self.handle_generic_message(parsed_message, peer_normalized)
+
+                                # Check sync needs after successful message handling
+                                await self.check_sync_needs(peer_normalized)
+
+                            except Exception as handler_error:
+                                self.logger.error(f"[HANDLER] Error in message handler: {str(handler_error)}")
+                                continue
+
+                    except json.JSONDecodeError as json_error:
+                        self.logger.error(f"[HANDLER] JSON decode error: {str(json_error)}")
+                        continue
+                    except Exception as message_error:
+                        self.logger.error(f"[HANDLER] Message processing error: {str(message_error)}")
+                        continue
+
                 except asyncio.TimeoutError:
-                    self.logger.warning(f"No message received from {peer} in 30 seconds. Sending ping.")
-                    try:
-                        pong_waiter = await websocket.ping()
-                        await asyncio.wait_for(pong_waiter, timeout=10)
-                        self.logger.debug(f"Received pong from {peer}")
-                    except asyncio.TimeoutError:
-                        self.logger.warning(f"Pong timeout from {peer}")
-                        raise websockets.exceptions.ConnectionClosed(1000, "Pong timeout")
-        except websockets.exceptions.ConnectionClosed:
-            self.logger.info(f"Connection closed with {peer}")
+                    # Timeout on receive is normal; continue to send ping
+                    continue
+                except websockets.exceptions.ConnectionClosed:
+                    self.logger.info(f"[HANDLER] Connection closed with {peer_normalized}")
+                    break
+                except Exception as loop_error:
+                    self.logger.error(f"[HANDLER] Error in message loop: {str(loop_error)}")
+                    break
+
+        except Exception as e:
+            self.logger.error(f"[HANDLER] Fatal error: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
         finally:
-            await self.remove_peer(peer)
-            await self.attempt_reconnection(peer)
+            # Cleanup
+            self.logger.info(f"[HANDLER] {'='*20} Handler Cleanup {'='*20}")
+            await self.remove_peer(peer_normalized)
+            
+            # Log final state
+            mempool_size = len(self.blockchain.mempool) if self.blockchain else 0
+            self.logger.info(f"[HANDLER] Final Network State:")
+            self.logger.info(f"  Connected Peers: {len(self.connected_peers)}")
+            self.logger.info(f"  Mempool Size: {mempool_size}")
+            self.logger.info(f"  Active Peers: {list(self.connected_peers)}")
+            self.logger.info(f"[HANDLER] {'='*50}\n")
 
-
-            return False
 
     async def attempt_reconnection(self, peer: str):
         max_retries = 5
@@ -3346,39 +7090,6 @@ class P2PNode:
         
         self.logger.warning(f"Failed to reconnect to {peer} after {max_retries} attempts")
             
-    async def handle_messages(self, websocket: websockets.WebSocketServerProtocol, peer: str):
-        try:
-            while True:
-                try:
-                    # Receive message with a 30-second timeout
-                    message = await asyncio.wait_for(websocket.recv(), timeout=30)
-                    
-                    try:
-                        # Parse the message
-                        parsed_message = Message.from_json(message)
-                        await self.process_message(parsed_message, peer)
-                    except json.JSONDecodeError:
-                        self.logger.error(f"Failed to parse message from {peer}")
-                    except Exception as e:
-                        self.logger.error(f"Error processing message from {peer}: {str(e)}")
-
-                except asyncio.TimeoutError:
-                    # No message received in 30 seconds, send a ping
-                    self.logger.warning(f"No message received from {peer} in 30 seconds. Sending ping.")
-                    
-                    try:
-                        pong_waiter = await websocket.ping()
-                        await asyncio.wait_for(pong_waiter, timeout=10)
-                        self.logger.debug(f"Received pong from {peer}")
-                    except asyncio.TimeoutError:
-                        self.logger.warning(f"Pong timeout from {peer}")
-                        raise websockets.exceptions.ConnectionClosed(1000, "Pong timeout")
-        
-        except websockets.exceptions.ConnectionClosed:
-            self.logger.info(f"Connection closed with {peer}")
-        
-        finally:
-            await self.remove_peer(peer)
     async def process_message(self, message: Message, sender: str):
         try:
             logger.debug(f"Processing message from {sender}: {message.to_json()}")
@@ -3426,31 +7137,35 @@ class P2PNode:
         except Exception as e:
             logger.error(f"Failed to send ping to {peer}: {e}")
             raise
-
-    async def keep_connection_alive(self, websocket, peer):
-        missed_heartbeats = 0
-        max_missed_heartbeats = 3
-        while True:
-            try:
-                await asyncio.sleep(20)  # Send heartbeat every 20 seconds
-                await websocket.send(json.dumps({"type": "heartbeat", "timestamp": time.time()}))
+    async def keep_connection_alive(self, websocket: websockets.WebSocketClientProtocol, peer: str):
+        """Maintain connection with verified peer."""
+        try:
+            while peer in self.peers and not websocket.closed:
                 try:
-                    response = await asyncio.wait_for(websocket.recv(), timeout=10)
-                    heartbeat_response = json.loads(response)
-                    if heartbeat_response.get("type") == "heartbeat_ack":
-                        missed_heartbeats = 0
-                        self.last_activity_time = time.time()
+                    # Send ping and wait for pong
+                    pong_waiter = await websocket.ping()
+                    await asyncio.wait_for(pong_waiter, timeout=10)
+                    self.logger.debug(f"✓ Keepalive successful for {peer}")
+                    
+                    # Update last activity time
+                    self.peer_info[peer]['last_activity'] = time.time()
+                    
+                    await asyncio.sleep(20)  # Wait before next ping
+                    
                 except asyncio.TimeoutError:
-                    missed_heartbeats += 1
-                    self.logger.warning(f"Missed heartbeat from {peer}, count: {missed_heartbeats}")
-                    if missed_heartbeats >= max_missed_heartbeats:
-                        self.logger.warning(f"Max missed heartbeats reached for {peer}, closing connection")
-                        break
-            except Exception as e:
-                self.logger.error(f"Error in keep_connection_alive for {peer}: {str(e)}")
-                break
-        
-        await self.handle_disconnection(peer)
+                    self.logger.warning(f"Keepalive timeout for {peer}")
+                    break
+                except Exception as e:
+                    self.logger.error(f"Keepalive error for {peer}: {str(e)}")
+                    break
+                    
+            # Connection is dead, clean up
+            await self.remove_peer(peer)
+            
+        except Exception as e:
+            self.logger.error(f"Error in keepalive for {peer}: {str(e)}")
+            await self.remove_peer(peer)
+
 
 
 
@@ -3464,29 +7179,26 @@ class P2PNode:
         except:
             return False
 
-    async def handle_disconnection(self, peer):
-        self.logger.info(f"Handling disconnection for peer {peer}")
-        await self.remove_peer(peer)
-        
-        max_retries = 5
-        retry_delay = 5
-
-        for attempt in range(max_retries):
-            try:
-                self.logger.info(f"Attempting to reconnect to {peer} (Attempt {attempt + 1}/{max_retries})")
-                ip, port = peer.split(':')
-                node = KademliaNode(id=self.generate_node_id(), ip=ip, port=int(port))
-                
-                if await self.connect_to_peer(node):
-                    self.logger.info(f"Successfully reconnected to {peer}")
-                    return
-            except Exception as e:
-                self.logger.error(f"Reconnection attempt {attempt + 1} failed: {str(e)}")
+    async def handle_disconnection(self, peer: str):
+        """Handle peer disconnection with proper state cleanup."""
+        try:
+            self.logger.info(f"Handling disconnection for peer {peer}")
             
-            # Exponential backoff
-            await asyncio.sleep(retry_delay * (2 ** attempt))
-        
-        self.logger.warning(f"Failed to reconnect to {peer} after {max_retries} attempts")
+            async with self.peer_lock:  # Use lock to prevent race conditions
+                # Check if peer still exists before removing
+                if peer in self.peers:
+                    await self.remove_peer(peer)
+                    self.logger.info(f"Disconnected peer {peer} removed")
+                else:
+                    self.logger.debug(f"Peer {peer} already removed")
+
+            # Only attempt reconnection if not already in progress
+            if not self.peer_states.get(peer) == "reconnecting":
+                await self.attempt_reconnection(peer)
+
+        except Exception as e:
+            self.logger.error(f"Error handling disconnection for {peer}: {str(e)}")
+
 
 
 
@@ -3527,25 +7239,7 @@ class P2PNode:
                     del challenges[challenge_id]
             if not challenges:
                 del self.pending_challenges[peer]
-    async def handle_messages(self, websocket: websockets.WebSocketServerProtocol, peer: str):
-        while True:
-            try:
-                message = await websocket.recv()
-                try:
-                    parsed_message = Message.from_json(message)
-                    await self.process_message(parsed_message, peer)
-                except json.JSONDecodeError:
-                    self.logger.error(f"Failed to parse message from {peer}")
-                except Exception as e:
-                    self.logger.error(f"Error processing message from {peer}: {str(e)}")
-            except websockets.exceptions.ConnectionClosed:
-                self.logger.warning(f"Connection closed with {peer}, attempting to reconnect")
-                break
-            except Exception as e:
-                self.logger.error(f"Unexpected error in handle_messages for {peer}: {str(e)}")
-                await asyncio.sleep(1)  # Brief pause before continuing
 
-        await self.handle_disconnection(peer)
     async def connection_monitor(self):
         while True:
             try:
@@ -3619,12 +7313,44 @@ class P2PNode:
         self.seen_messages.discard(message_hash)
 
     async def announce_to_network(self):
+        """Announce presence to the network with enhanced logging."""
+        self.logger.info("\n=== Announcing to Network ===")
         try:
-            message = Message(MessageType.MAGNET_LINK.value, {"magnet_link": self.magnet_link.to_uri()})
-            await self.broadcast(message)
+            if not self.connected_peers:
+                self.logger.warning("No peers connected. Cannot announce to network.")
+                return False
+
+            self.logger.info(f"Preparing announcement for {len(self.connected_peers)} peers")
+            message = Message(
+                MessageType.MAGNET_LINK.value,
+                {"magnet_link": self.magnet_link.to_uri()}
+            )
+
+            # Log magnet link details
+            self.logger.debug(f"Magnet Link: {self.magnet_link.to_uri()}")
+            self.logger.debug(f"Node ID: {self.node_id}")
+
+            # Broadcast with detailed logging
+            announcement_success = await self.broadcast(message)
+            
+            if announcement_success:
+                self.logger.info("✓ Successfully announced to network")
+                # Log current network state
+                self.logger.info(f"Connected Peers: {len(self.connected_peers)}")
+                self.logger.info(f"Active Peers: {list(self.connected_peers)}")
+            else:
+                self.logger.warning("✗ Failed to announce to some peers")
+
+            self.logger.info("=== Network Announcement Complete ===\n")
+            return announcement_success
+
         except Exception as e:
-            logger.error(f"Failed to announce to network: {str(e)}")
-            logger.error(traceback.format_exc())
+            self.logger.error("Error announcing to network:")
+            self.logger.error(str(e))
+            self.logger.error(traceback.format_exc())
+            self.logger.info("=== Network Announcement Failed ===\n")
+            return False
+
 
     async def find_peer_by_magnet(self, magnet_link: MagnetLink) -> Optional[KademliaNode]:
         try:
@@ -3684,156 +7410,932 @@ class P2PNode:
                 await self.handle_disconnection(peer)
                 break
     async def handle_connection(self, websocket: websockets.WebSocketServerProtocol, path: str):
-        """
-        Handles the connection lifecycle with a peer, including public key exchange,
-        challenge-response handling, keep-alive mechanism, and reconnection attempts.
-        """
+        """Handle incoming connection as server with coordinated challenge sequence."""
         peer_ip, peer_port = websocket.remote_address[:2]
-        peer_normalized = self.normalize_peer_address(peer_ip, peer_port)
-        self.logger.info(f"New incoming connection from {peer_ip}:{peer_port}")
-
+        peer_address = f"{peer_ip}:{peer_port}"
+        
         try:
-            # Add the peer to the peer list and set its state to "connecting"
-            self.peers[peer_normalized] = websocket
-            self.peer_states[peer_normalized] = "connecting"
-            self.logger.debug(f"Added peer {peer_normalized} to the peer list")
+            self.logger.info(f"\n[SERVER] {'='*20} New Connection {'='*20}")
+            self.logger.info(f"[SERVER] Remote peer: {peer_address}")
 
-            # Step 1: Exchange public keys
-            if not await self.exchange_public_keys(peer_normalized):
-                raise ValueError("Public key exchange failed")
-            self.logger.debug(f"Public key exchange completed with {peer_normalized}")
+            # Initialize peer tracking
+            async with self.peer_lock:
+                self.peers[peer_address] = websocket
+                self.peer_states[peer_address] = "server_init"
 
-            # Step 2: Send a challenge to the peer
-            challenge_id = await self.send_challenge(peer_normalized)
-            if not challenge_id:
-                raise ValueError("Failed to send challenge")
-            self.logger.debug(f"Sent challenge to {peer_normalized}")
-
-            # Step 3: Wait for and handle challenge messages during the handshake
-            handshake_completed = False
-            while not handshake_completed:
-                message = await self.receive_message(peer_normalized)
-                if not message:
-                    raise ValueError(f"No message received from {peer_normalized}")
-
-                if message.type == MessageType.CHALLENGE.value:
-                    await self.handle_challenge(peer_normalized, message.payload, message.challenge_id)
-                    self.logger.debug(f"Handled challenge from {peer_normalized}")
-                elif message.type == MessageType.CHALLENGE_RESPONSE.value:
-                    if await self.verify_challenge_response(peer_normalized, challenge_id, message.payload):
-                        handshake_completed = True
-                        self.logger.info(f"Handshake completed successfully with {peer_normalized}")
-                        self.peer_states[peer_normalized] = "connected"
-                    else:
-                        raise ValueError(f"Invalid challenge response from {peer_normalized}")
-                else:
-                    self.logger.warning(f"Unexpected message type during handshake: {message.type}")
-                    await self.handle_message(message, peer_normalized)
-
-            # Step 4: Start the keep-alive task
-            keepalive_task = asyncio.create_task(self.keep_connection_alive(peer_normalized))
-
-            # Step 5: Handle regular messages after handshake completion
-            async for message in websocket:
-                try:
-                    parsed_message = Message.from_json(message)
-                    if parsed_message.type == MessageType.GET_TRANSACTIONS.value:
-                        await self.handle_get_transactions(peer_normalized)
-                    else:
-                        await self.handle_message(parsed_message, peer_normalized)
-                except json.JSONDecodeError:
-                    self.logger.warning(f"Received invalid JSON from {peer_normalized}")
-                except Exception as e:
-                    self.logger.error(f"Error handling message from {peer_normalized}: {str(e)}")
-
-        except websockets.exceptions.ConnectionClosed as e:
-            self.logger.warning(f"Connection closed with {peer_normalized}: {str(e)}")
-            await asyncio.sleep(5)  # Wait before attempting to reconnect
+            # Step 1: Wait for client's public key
             try:
-                # Attempt reconnection
-                websocket = await websockets.connect(f"ws://{peer_ip}:{peer_port}")
-                self.logger.info(f"Reconnected to {peer_normalized}")
-            except Exception as reconnect_error:
-                self.logger.error(f"Failed to reconnect to {peer_normalized}: {reconnect_error}")
-        except ValueError as e:
-            self.logger.error(f"Error during handshake with {peer_normalized}: {str(e)}")
-        except Exception as e:
-            self.logger.error(f"Unexpected error during connection with {peer_normalized}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-        finally:
-            # Cancel the keep-alive task and ensure peer is removed after disconnection
-            if 'keepalive_task' in locals():
-                keepalive_task.cancel()
-            await self.handle_disconnection(peer_normalized)
+                message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                key_message = Message.from_json(message)
+                
+                if key_message.type != MessageType.PUBLIC_KEY_EXCHANGE.value:
+                    raise ValueError(f"Expected public key exchange, got {key_message.type}")
+                
+                if not await self.handle_public_key_exchange(key_message, peer_address):
+                    raise ValueError("Public key exchange failed")
+                    
+                self.logger.info(f"[SERVER] ✓ Received client's public key")
+                
+                # Send server's public key
+                public_key_pem = self.public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                ).decode()
+                
+                response = Message(
+                    type=MessageType.PUBLIC_KEY_EXCHANGE.value,
+                    payload={
+                        "public_key": public_key_pem,
+                        "node_id": self.node_id,
+                        "role": "server"
+                    }
+                )
+                await self.send_raw_message(peer_address, response)
+                self.logger.info(f"[SERVER] ✓ Sent server public key")
 
+            except Exception as e:
+                self.logger.error(f"[SERVER] Public key exchange failed: {str(e)}")
+                raise
 
+            # Step 2: Wait for client's handshake
+            try:
+                message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                handshake = Message.from_json(message)
+                
+                if handshake.type != MessageType.HANDSHAKE.value:
+                    raise ValueError(f"Expected handshake, got {handshake.type}")
+                
+                await self.handle_handshake(peer_address, handshake.payload)
+                self.logger.info(f"[SERVER] ✓ Received client handshake")
 
-    async def perform_handshake(self, websocket, peer):
-        try:
-            # Increase timeout from 60 to 120 seconds
-            exchange_timeout = 120
-            start_time = time.time()
+                # Send server's handshake response
+                await self.ensure_blockchain()
+                handshake_response = Message(
+                    type=MessageType.HANDSHAKE.value,
+                    payload={
+                        "node_id": self.node_id,
+                        "version": "1.0",
+                        "blockchain_height": len(self.blockchain.chain) if self.blockchain else 0,
+                        "timestamp": time.time(),
+                        "capabilities": ["quantum", "dagknight", "zkp"],
+                        "role": "server"
+                    }
+                )
+                await self.send_raw_message(peer_address, handshake_response)
+                self.logger.info(f"[SERVER] ✓ Sent handshake response")
 
-            public_key_received = False
-            challenge_response_received = False
+            except Exception as e:
+                self.logger.error(f"[SERVER] Handshake failed: {str(e)}")
+                raise
 
-            # Step 1: Send our public key to the peer
-            await self.send_public_key(websocket, peer)
-            self.handshake_states[peer] = HandshakeState.PUBLIC_KEY_SENT
-            logger.debug(f"Public key sent to {peer}")
+            # Step 3: Server sends challenge first
+            try:
+                challenge_id = str(uuid.uuid4())
+                challenge_data = os.urandom(32).hex()
+                server_challenge = {
+                    challenge_id: {
+                        'data': challenge_data,
+                        'timestamp': time.time()
+                    }
+                }
+                
+                # Store challenge
+                self.challenges[peer_address] = server_challenge
+                
+                challenge_message = Message(
+                    type=MessageType.CHALLENGE.value,
+                    payload={'challenge': f"{challenge_id}:{challenge_data}"},
+                    challenge_id=challenge_id
+                )
+                await self.send_raw_message(peer_address, challenge_message)
+                self.logger.info(f"[SERVER] ✓ Sent challenge")
 
-            # Step 2: Receive the peer's public key
-            while not public_key_received and time.time() - start_time < exchange_timeout:
-                peer_public_key = await self.receive_public_key(websocket, peer)
-                if peer_public_key:
-                    self.peer_public_keys[peer] = peer_public_key
-                    self.handshake_states[peer] = HandshakeState.PUBLIC_KEY_RECEIVED
-                    public_key_received = True
-                    logger.debug(f"Public key received from {peer}")
-                await asyncio.sleep(1)
+                # Wait for client's challenge response
+                message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                response = Message.from_json(message)
+                
+                if response.type != MessageType.CHALLENGE_RESPONSE.value:
+                    raise ValueError(f"Expected challenge response, got {response.type}")
 
-            if not public_key_received:
-                logger.warning(f"Public key exchange timed out for peer {peer}")
-                return False
-
-            # Step 3: Generate and send a challenge
-            challenge = self.generate_challenge()
-            await self.send_challenge(websocket, peer, challenge)
-            self.handshake_states[peer] = HandshakeState.CHALLENGE_SENT
-            logger.debug(f"Challenge sent to {peer}")
-
-            # Step 4: Handle messages during handshake
-            while not (public_key_received and challenge_response_received):
-                if time.time() - start_time > exchange_timeout:
-                    self.logger.warning(f"Public key exchange or challenge-response timed out for peer {peer}")
-                    return False
-
-                message = await self.receive_message(peer)
-                if not message:
-                    raise ValueError(f"No message received from {peer}")
-
-                if message.type == MessageType.CHALLENGE.value:
-                    await self.handle_challenge(peer, message.payload, message.challenge_id)
-                    logger.debug(f"Handled challenge from {peer}")
-                elif message.type == MessageType.CHALLENGE_RESPONSE.value:
-                    await self.verify_challenge_response(peer, challenge, message.payload)
-                    challenge_response_received = True
-                    logger.debug(f"Challenge response received from {peer}")
+                # Verify client's response
+                if await self.verify_challenge_response(peer_address, challenge_id, response.payload):
+                    self.logger.info(f"[SERVER] ✓ Client challenge response verified")
+                    self.peer_states[peer_address] = "challenge_verified"
                 else:
-                    logger.warning(f"Unexpected message type during handshake: {message.type}")
-                    await self.queue_message_for_later(message, peer)
+                    raise ValueError("Challenge verification failed")
 
-            # Mark handshake as completed
-            self.handshake_states[peer] = HandshakeState.COMPLETED
-            logger.info(f"Handshake completed successfully with {peer}")
+                # Now handle client's challenge
+                message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                client_challenge = Message.from_json(message)
+                
+                if client_challenge.type == MessageType.CHALLENGE.value:
+                    await self.handle_challenge(peer_address, client_challenge.payload, client_challenge.challenge_id)
+                    self.logger.info(f"[SERVER] ✓ Connection established with {peer_address}")
+                    
+                    # Start handlers
+                    asyncio.create_task(self.handle_messages(websocket, peer_address))
+                    asyncio.create_task(self.keep_connection_alive(websocket, peer_address))
+                else:
+                    raise ValueError(f"Expected client challenge, got {client_challenge.type}")
+
+            except Exception as e:
+                self.logger.error(f"[SERVER] Challenge sequence failed: {str(e)}")
+                raise
+
+        except Exception as e:
+            self.logger.error(f"[SERVER] Connection failed: {str(e)}")
+            await self.remove_peer(peer_address)
+
+        finally:
+            self.logger.info(f"[SERVER] {'='*50}\n")
+
+
+    async def wait_for_message(self, websocket: websockets.WebSocketServerProtocol, 
+                             expected_type: str, timeout: float = 10.0) -> Optional[Message]:
+        """Wait for a specific type of message with improved handling."""
+        try:
+            start_time = time.time()
+            processed_messages = set()
+
+            while time.time() - start_time < timeout:
+                try:
+                    raw_message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                    message = Message.from_json(raw_message)
+                    
+                    if message.id in processed_messages:
+                        continue
+                    processed_messages.add(message.id)
+
+                    # Process the message if it's what we're waiting for
+                    if message.type.lower() == expected_type.lower():
+                        self.logger.debug(f"Received expected message type: {expected_type}")
+                        return message
+                    else:
+                        # Handle other message types that might come in
+                        await self.handle_unexpected_message(message)
+                        
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    self.logger.error(f"Error receiving message: {str(e)}")
+
+            self.logger.warning(f"Timeout waiting for message type: {expected_type}")
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Error in wait_for_message: {str(e)}")
+            return None
+
+    async def handle_unexpected_message(self, message: Message):
+        """Handle messages that arrive during wait_for_message."""
+        try:
+            if message.type == MessageType.HANDSHAKE.value:
+                peer = message.sender
+                if peer:
+                    await self.handle_handshake(peer, message.payload)
+            elif message.type == MessageType.CHALLENGE.value:
+                peer = message.sender
+                if peer:
+                    challenge = message.payload.get('challenge')
+                    await self.handle_challenge(peer, challenge, message.challenge_id)
+        except Exception as e:
+            self.logger.error(f"Error handling unexpected message: {str(e)}")
+
+
+
+    async def verify_connection_state(self, peer: str):
+        """Verify final connection state."""
+        try:
+            # Verify peer state
+            if self.peer_states.get(peer) != "quantum_ready":
+                raise ValueError(f"Unexpected peer state: {self.peer_states.get(peer)}")
+                
+            # Verify peer is connected
+            if peer not in self.connected_peers:
+                raise ValueError("Peer not in connected peers set")
+                
+            # Verify quantum entanglement
+            if peer not in self.quantum_sync.entangled_peers:
+                raise ValueError("Peer not quantum entangled")
+                
+            # Verify Bell pair
+            if peer not in self.quantum_sync.bell_pairs:
+                raise ValueError("No Bell pair for peer")
+                
+            self.logger.info(f"[VERIFY] ✓ Connection state verified for {peer}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"[VERIFY] Connection state verification failed: {str(e)}")
+            return False
+
+    async def initialize_quantum_components(self):
+        """Initialize quantum components for node."""
+        try:
+            self.logger.info("[QUANTUM] Initializing quantum components...")
+            
+            if not hasattr(self, 'quantum_sync') or self.quantum_sync is None:
+                self.quantum_sync = QuantumEntangledSync(self.node_id)
+                
+            # Get initial state data
+            initial_data = {
+                'wallets': [w.to_dict() for w in self.blockchain.get_wallets()] if self.blockchain else [],
+                'transactions': [tx.to_dict() for tx in self.blockchain.get_recent_transactions(limit=100)] if self.blockchain else [],
+                'blocks': [block.to_dict() for block in self.blockchain.chain] if self.blockchain else [],
+                'mempool': [tx.to_dict() for tx in self.blockchain.mempool] if hasattr(self.blockchain, 'mempool') else []
+            }
+
+            await self.quantum_sync.initialize_quantum_state(initial_data)
+            self.quantum_initialized = True
+            self.logger.info("[QUANTUM] ✓ Quantum components initialized")
+            
             return True
 
-        except asyncio.TimeoutError:
-            logger.error(f"Handshake timed out with {peer}")
-            return False
         except Exception as e:
-            logger.error(f"Handshake failed with {peer}: {str(e)}")
-            logger.error(traceback.format_exc())
+            self.logger.error(f"[QUANTUM] Initialization error: {str(e)}")
+            return False
+
+
+    async def establish_quantum_entanglement(self, peer: str) -> bool:
+        """Establish quantum entanglement with peer."""
+        try:
+            self.logger.info(f"\n[QUANTUM] {'='*20} Establishing Entanglement {'='*20}")
+            self.logger.info(f"[QUANTUM] Initiating quantum entanglement with {peer}")
+
+            # Ensure quantum components are initialized
+            if not self.quantum_initialized:
+                await self.initialize_quantum_components()
+
+            # Get current state for entanglement
+            current_state = {
+                'wallets': [w.to_dict() for w in self.blockchain.get_wallets()],
+                'transactions': [tx.to_dict() for tx in self.blockchain.get_recent_transactions()],
+                'blocks': [block.to_dict() for block in self.blockchain.chain],
+                'mempool': [tx.to_dict() for tx in self.blockchain.mempool]
+            }
+
+            # Create and send entanglement request
+            request_message = Message(
+                type=MessageType.QUANTUM_ENTANGLEMENT_REQUEST.value,
+                payload={
+                    'node_id': self.node_id,
+                    'state_data': current_state,
+                    'timestamp': time.time()
+                }
+            )
+
+            # Wait for response with timeout
+            response = await self.send_and_wait_for_response(peer, request_message)
+            
+            if not response or response.type != MessageType.QUANTUM_ENTANGLEMENT_RESPONSE.value:
+                self.logger.error(f"[QUANTUM] Failed to receive entanglement response from {peer}")
+                return False
+
+            # Create quantum entanglement
+            peer_state = response.payload.get('state_data', {})
+            peer_register = await self.quantum_sync.entangle_with_peer(peer, peer_state)
+            
+            if not peer_register:
+                self.logger.error(f"[QUANTUM] Failed to create quantum register with {peer}")
+                return False
+
+            # Generate and store Bell pair
+            bell_pair = self.quantum_sync._generate_bell_pair()
+            self.quantum_sync.bell_pairs[peer] = bell_pair
+
+            # Start quantum monitoring
+            asyncio.create_task(self.monitor_peer_quantum_state(peer))
+            asyncio.create_task(self.send_quantum_heartbeats(peer))
+
+            self.logger.info(f"[QUANTUM] ✓ Quantum entanglement established with {peer}")
+            self.logger.info(f"[QUANTUM] {'='*50}\n")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[QUANTUM] Error establishing entanglement: {str(e)}")
+            return False
+    async def handle_successful_challenge(self, peer: str):
+        """Handle successful challenge verification and initialize quantum components."""
+        try:
+            peer_normalized = self.normalize_peer_address(peer)
+            
+            # Update peer state
+            async with self.peer_lock:
+                self.peer_states[peer_normalized] = "verified"
+                self.connected_peers.add(peer_normalized)
+                
+            # Initialize quantum components if needed
+            if not self.quantum_initialized:
+                await self.initialize_quantum_components()
+                
+            # Establish quantum entanglement
+            if await self.establish_quantum_entanglement(peer_normalized):
+                self.peer_states[peer_normalized] = "quantum_ready"
+                self.logger.info(f"[QUANTUM] Node {peer_normalized} is quantum-ready")
+            else:
+                self.logger.warning(f"[QUANTUM] Failed to establish quantum entanglement with {peer_normalized}")
+                # Continue even if quantum setup fails
+                
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error in post-challenge handling: {str(e)}")
+            return False
+
+
+    async def monitor_peer_tasks(self, peer: str, tasks: List[asyncio.Task]):
+        """Monitor peer-specific tasks and restart them if they fail."""
+        while peer in self.connected_peers:
+            try:
+                for task in tasks[:]:  # Copy list to avoid modification during iteration
+                    if task.done():
+                        try:
+                            await task
+                        except Exception as e:
+                            self.logger.error(f"Task {task.get_name()} failed for peer {peer}: {str(e)}")
+                            # Restart the failed task
+                            if task.get_name().startswith('quantum_monitor'):
+                                new_task = asyncio.create_task(self.monitor_peer_quantum_state(peer))
+                            elif task.get_name().startswith('message_handler'):
+                                new_task = asyncio.create_task(self.handle_messages(self.peers[peer], peer))
+                            elif task.get_name().startswith('keepalive'):
+                                new_task = asyncio.create_task(self.keep_connection_alive(peer))
+                            elif task.get_name().startswith('quantum_heartbeat'):
+                                new_task = asyncio.create_task(self.send_quantum_heartbeats(peer))
+                            
+                            tasks.remove(task)
+                            tasks.append(new_task)
+                            self.logger.info(f"Restarted failed task {task.get_name()} for peer {peer}")
+                
+                await asyncio.sleep(5)  # Check every 5 seconds
+                
+            except Exception as e:
+                self.logger.error(f"Error monitoring tasks for peer {peer}: {str(e)}")
+                await asyncio.sleep(5)
+    async def get_initial_quantum_state(self):
+        """Get initial state for quantum initialization"""
+        try:
+            return {
+                'wallets': [w.to_dict() for w in self.blockchain.get_wallets()],
+                'transactions': [tx.to_dict() for tx in self.blockchain.get_recent_transactions()],
+                'blocks': [block.to_dict() for block in self.blockchain.chain],
+                'mempool': [tx.to_dict() for tx in self.blockchain.mempool]
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting initial quantum state: {str(e)}")
+            return {
+                'wallets': {},
+                'transactions': {},
+                'blocks': {},
+                'mempool': {}
+            }
+    async def maintain_quantum_states(self):
+        """Periodically check and maintain quantum states"""
+        while True:
+            try:
+                for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                    fidelity = await self.quantum_sync.measure_sync_state(component)
+                    
+                    if fidelity < self.quantum_sync.decoherence_threshold:
+                        self.logger.warning(f"Low fidelity detected for {component}: {fidelity}")
+                        
+                        # Attempt recovery
+                        success = await self.recover_quantum_state(component)
+                        if success:
+                            self.logger.info(f"Successfully recovered {component} quantum state")
+                        else:
+                            self.logger.error(f"Failed to recover {component} quantum state")
+                            
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+            except Exception as e:
+                self.logger.error(f"Error in quantum state maintenance: {str(e)}")
+                await asyncio.sleep(30)
+
+
+    async def recover_quantum_state(self, component: str) -> bool:
+        try:
+            self.logger.info(f"Starting quantum state recovery for {component}")
+            
+            # Find highest fidelity peer
+            best_peer = None
+            best_fidelity = 0
+            
+            for peer_id in self.quantum_sync.entangled_peers:
+                fidelity = await self.quantum_sync.measure_sync_state(component, peer_id)
+                if fidelity > best_fidelity:
+                    best_fidelity = fidelity
+                    best_peer = peer_id
+                    
+            if not best_peer:
+                return False
+                
+            # Request state update from best peer
+            state_data = await self.request_component_state(best_peer, component)
+            if not state_data:
+                return False
+                
+            # Update local quantum state
+            await self.quantum_sync.update_component_state(component, state_data)
+            
+            # Verify recovery
+            new_fidelity = await self.quantum_sync.measure_sync_state(component)
+            return new_fidelity >= self.quantum_sync.decoherence_threshold
+            
+        except Exception as e:
+            self.logger.error(f"Error in quantum state recovery: {str(e)}")
+            return False
+
+
+    async def validate_block_with_quantum_consensus(self, block: QuantumBlock) -> bool:
+        try:
+            # First check traditional validation
+            if not self.blockchain.validate_block(block):
+                return False
+                
+            # Verify quantum consensus before accepting block
+            block_consensus = await self.quantum_consensus.check_quantum_consensus('blocks')
+            if not block_consensus:
+                self.logger.warning(f"Quantum consensus verification failed for block {block.hash}")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error in quantum block validation: {str(e)}")
+            return False
+
+    async def initialize_quantum_sync(self, initial_data: dict):
+        """Initialize quantum synchronization with current blockchain state"""
+        try:
+            if not self.quantum_sync:
+                self.quantum_sync = QuantumEntangledSync(self.node_id)
+                
+            await self.quantum_sync.initialize_quantum_state(initial_data)
+            self.quantum_initialized = True
+            self.logger.info("✓ Quantum state initialized with current blockchain state")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize quantum sync: {str(e)}")
+            raise
+
+    async def establish_quantum_entanglement(self, peer: str) -> bool:
+        """Establish quantum entanglement with a peer."""
+        try:
+            self.logger.info(f"\n[QUANTUM] {'='*20} Establishing Entanglement {'='*20}")
+            self.logger.info(f"[QUANTUM] Initiating quantum entanglement with {peer}")
+
+            # Ensure quantum components are initialized
+            if not self.quantum_initialized:
+                await self.initialize_quantum_components()
+
+            # Get current state for entanglement
+            current_state = {
+                'wallets': [w.to_dict() for w in self.blockchain.get_wallets()],
+                'transactions': [tx.to_dict() for tx in self.blockchain.get_recent_transactions()],
+                'blocks': [block.to_dict() for block in self.blockchain.chain],
+                'mempool': [tx.to_dict() for tx in self.blockchain.mempool]
+            }
+
+            # Create entanglement request
+            request_message = Message(
+                type=MessageType.QUANTUM_ENTANGLEMENT_REQUEST.value,
+                payload={
+                    'node_id': self.node_id,
+                    'state_data': current_state,
+                    'timestamp': time.time()
+                }
+            )
+
+            # Send request and wait for response
+            response = await self.send_and_wait_for_response(peer, request_message)
+
+            if not response or response.type != MessageType.QUANTUM_ENTANGLEMENT_RESPONSE.value:
+                self.logger.error(f"[QUANTUM] Failed to receive entanglement response from {peer}")
+                return False
+
+            # Create entanglement
+            peer_state = response.payload.get('state_data', {})
+            peer_register = await self.quantum_sync.entangle_with_peer(peer, peer_state)
+            
+            if not peer_register:
+                self.logger.error(f"[QUANTUM] Failed to create quantum register with {peer}")
+                return False
+
+            # Generate and store Bell pair
+            bell_pair = self.quantum_sync._generate_bell_pair()
+            self.quantum_sync.bell_pairs[peer] = bell_pair
+
+            # Start quantum monitoring
+            asyncio.create_task(self.monitor_peer_quantum_state(peer))
+            asyncio.create_task(self.send_quantum_heartbeats(peer))
+
+            self.logger.info(f"[QUANTUM] ✓ Quantum entanglement established with {peer}")
+            self.logger.info(f"[QUANTUM] {'='*50}\n")
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[QUANTUM] Error establishing entanglement: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return False
+
+
+
+    async def initialize_quantum_entanglement(self, peer: str) -> bool:
+        """Initialize quantum entanglement after successful security handshake"""
+        try:
+            self.logger.info(f"[QUANTUM] Initializing quantum entanglement with {peer}")
+
+            # Wait for any pending security operations to complete
+            async with self.peer_lock:
+                if self.peer_states.get(peer) != "connected":
+                    self.logger.warning(f"Cannot initialize quantum entanglement - peer {peer} not fully connected")
+                    return False
+
+            # Get current node state for entanglement
+            current_state = await self.get_node_state_data()
+            
+            # Create and send quantum entanglement request
+            entangle_message = Message(
+                type=MessageType.QUANTUM_ENTANGLEMENT_REQUEST.value,
+                payload={
+                    'node_id': self.node_id,
+                    'state_data': current_state,
+                    'timestamp': time.time()
+                }
+            )
+
+            # Wait for entanglement response with timeout
+            response = await self.send_and_wait_for_response(peer, entangle_message, timeout=30.0)
+            
+            if not response or response.type != MessageType.QUANTUM_ENTANGLEMENT_RESPONSE.value:
+                self.logger.warning(f"Failed to receive quantum entanglement response from {peer}")
+                return False
+
+            # Initialize quantum sync if not already done
+            if not hasattr(self, 'quantum_sync'):
+                self.quantum_sync = QuantumEntangledSync(self.node_id)
+                self.quantum_sync_initialized = False
+
+            if not self.quantum_sync_initialized:
+                await self.initialize_quantum_sync(current_state)
+
+            # Establish quantum entanglement with peer
+            peer_state = response.payload.get('state_data', {})
+            peer_register = await self.quantum_sync.entangle_with_peer(peer, peer_state)
+            
+            if not peer_register:
+                self.logger.warning(f"Failed to establish quantum entanglement with {peer}")
+                return False
+
+            self.logger.info(f"[QUANTUM] Successfully established quantum entanglement with {peer}")
+            
+            # Start quantum state monitoring for this peer
+            asyncio.create_task(self.monitor_peer_quantum_state(peer))
+            
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error in quantum entanglement initialization with {peer}: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return False
+    async def finalize_connection_quantum(self, peer: str):
+        """Complete connection setup with quantum synchronization"""
+        try:
+            self.logger.info(f"[FINALIZE] Finalizing quantum-enhanced connection with {peer}")
+            
+            # Update peer state
+            async with self.peer_lock:
+                self.peer_states[peer] = "entangled"
+                self.connected_peers.add(peer)
+            
+            # Verify initial quantum sync
+            await self.verify_initial_quantum_sync(peer)
+            
+            # Start quantum sync monitoring
+            asyncio.create_task(self.monitor_quantum_sync())
+            
+            self.logger.info(f"[FINALIZE] Connection with quantum sync completed for {peer}")
+            
+        except Exception as e:
+            self.logger.error(f"Error finalizing quantum connection with {peer}: {str(e)}")
+            raise
+
+    async def verify_initial_quantum_sync(self, peer: str):
+        """Verify initial quantum synchronization with peer"""
+        try:
+            components = ['wallets', 'transactions', 'blocks', 'mempool']
+            sync_status = {}
+            
+            for component in components:
+                fidelity = await self.quantum_sync.measure_sync_state(component)
+                sync_status[component] = {
+                    'fidelity': fidelity,
+                    'synced': fidelity >= self.quantum_sync.decoherence_threshold
+                }
+                
+                if not sync_status[component]['synced']:
+                    self.logger.warning(
+                        f"Initial quantum sync verification failed for {component} "
+                        f"with peer {peer} (fidelity: {fidelity:.3f})"
+                    )
+            
+            self.logger.info(f"Initial quantum sync verification results for {peer}:")
+            for component, status in sync_status.items():
+                self.logger.info(
+                    f"  {component}: fidelity={status['fidelity']:.3f}, "
+                    f"synced={status['synced']}"
+                )
+                
+            return all(status['synced'] for status in sync_status.values())
+            
+        except Exception as e:
+            self.logger.error(f"Error verifying initial quantum sync: {str(e)}")
+            return False
+    async def handle_quantum_decoherence(self, peer: str, components: List[str]):
+        """Handle quantum decoherence with peer"""
+        try:
+            self.logger.info(f"[QUANTUM] Handling decoherence with peer {peer}")
+            
+            # Request resynchronization for decoherent components
+            resync_message = Message(
+                type=MessageType.QUANTUM_RESYNC_REQUEST.value,
+                payload={
+                    'components': components,
+                    'node_id': self.node_id,
+                    'timestamp': time.time()
+                }
+            )
+            
+            response = await self.send_and_wait_for_response(peer, resync_message)
+            
+            if response and response.type == MessageType.QUANTUM_RESYNC_RESPONSE.value:
+                # Re-establish quantum entanglement for decoherent components
+                for component in components:
+                    state_data = response.payload.get(f'{component}_data')
+                    if state_data:
+                        await self.quantum_sync.update_component_state(component, state_data)
+                        self.logger.info(f"Re-established quantum sync for {component} with {peer}")
+                    else:
+                        self.logger.warning(f"Missing state data for {component} from {peer}")
+            
+            else:
+                self.logger.warning(f"Failed to resynchronize quantum state with {peer}")
+                
+        except Exception as e:
+            self.logger.error(f"Error handling quantum decoherence: {str(e)}")
+            raise
+    async def handle_resync_request(self, message: Message, sender: str):
+        """Handle quantum resynchronization request"""
+        try:
+            components = message.payload.get('components', [])
+            response_data = {}
+            
+            # Gather current state data for requested components
+            for component in components:
+                if component == 'wallets':
+                    response_data['wallets_data'] = [w.to_dict() for w in self.blockchain.get_wallets()]
+                elif component == 'transactions':
+                    response_data['transactions_data'] = [tx.to_dict() for tx in self.blockchain.get_recent_transactions()]
+                elif component == 'blocks':
+                    response_data['blocks_data'] = [block.to_dict() for block in self.blockchain.chain]
+                elif component == 'mempool':
+                    response_data['mempool_data'] = [tx.to_dict() for tx in self.blockchain.mempool]
+            
+            # Send response with current state data
+            response = Message(
+                type=MessageType.QUANTUM_RESYNC_RESPONSE.value,
+                payload=response_data
+            )
+            
+            await self.send_message(sender, response)
+            
+        except Exception as e:
+            self.logger.error(f"Error handling resync request: {str(e)}")
+            raise
+
+    async def monitor_peer_quantum_state(self, peer: str):
+        """Monitor quantum synchronization with a peer"""
+        while peer in self.connected_peers:
+            try:
+                # Measure fidelity for all components
+                fidelities = {}
+                decoherent_components = []
+                
+                for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                    fidelity = await self.quantum_sync.measure_sync_state(component)
+                    fidelities[component] = fidelity
+                    
+                    if fidelity < self.quantum_sync.decoherence_threshold:
+                        decoherent_components.append(component)
+
+                # Handle any decoherent components
+                if decoherent_components:
+                    self.logger.warning(
+                        f"[QUANTUM] Decoherence detected with {peer} for components: "
+                        f"{decoherent_components}"
+                    )
+                    await self.request_quantum_resync(peer, decoherent_components)
+                
+                await asyncio.sleep(5)  # Check every 5 seconds
+
+            except Exception as e:
+                self.logger.error(f"Error monitoring quantum state for {peer}: {str(e)}")
+                await asyncio.sleep(5)
+
+    async def request_quantum_resync(self, peer: str, components: List[str]):
+        """Request resynchronization of quantum states"""
+        try:
+            self.logger.info(f"[QUANTUM] Requesting resync from {peer} for: {components}")
+            
+            resync_message = Message(
+                type=MessageType.QUANTUM_RESYNC_REQUEST.value,
+                payload={
+                    'components': components,
+                    'node_id': self.node_id,
+                    'timestamp': time.time()
+                }
+            )
+
+            response = await self.send_and_wait_for_response(peer, resync_message)
+            
+            if response and response.type == MessageType.QUANTUM_RESYNC_RESPONSE.value:
+                # Update quantum states with received data
+                for component in components:
+                    state_data = response.payload.get(f'{component}_data')
+                    if state_data:
+                        await self.quantum_sync.update_component_state(
+                            component,
+                            state_data
+                        )
+                        self.logger.info(f"✓ Resynced quantum state for {component}")
+                    else:
+                        self.logger.warning(f"Missing state data for {component}")
+
+            else:
+                self.logger.warning(f"Failed to resync quantum states with {peer}")
+
+        except Exception as e:
+            self.logger.error(f"Error requesting quantum resync: {str(e)}")
+            raise
+
+
+    async def perform_handshake(self, websocket, peer: str) -> bool:
+        """Perform complete handshake with quantum initialization preparation."""
+        try:
+            peer_normalized = self.normalize_peer_address(peer)
+            self.logger.info(f"\n[HANDSHAKE] {'='*20} Starting Handshake {'='*20}")
+            self.logger.info(f"[HANDSHAKE] Peer: {peer_normalized}")
+            
+            # Initialize tracking structures
+            if not hasattr(self, 'peer_info'):
+                self.peer_info = {}
+            if not hasattr(self, 'challenges'):
+                self.challenges = {}
+            if not hasattr(self, 'peer_states'):
+                self.peer_states = {}
+            if not hasattr(self, 'peer_public_keys'):
+                self.peer_public_keys = {}
+                
+            # Initialize handshake state
+            async with self.peer_lock:
+                self.peer_states[peer_normalized] = "handshake_started"
+                self.peer_info[peer_normalized] = {
+                    'handshake_start': time.time(),
+                    'attempts': 0,
+                    'last_activity': time.time(),
+                    'quantum_ready': False
+                }
+            
+            exchange_timeout = 120  # 2 minutes total timeout
+            start_time = time.time()
+
+            # Step 1: Send our public key with quantum capabilities
+            try:
+                public_key_pem = self.public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                ).decode()
+                
+                key_exchange_message = Message(
+                    type=MessageType.PUBLIC_KEY_EXCHANGE.value,
+                    payload={
+                        "public_key": public_key_pem,
+                        "node_id": self.node_id,
+                        "version": "1.0",
+                        "quantum_capable": True if hasattr(self, 'quantum_sync') else False
+                    }
+                )
+                await self.send_raw_message(peer_normalized, key_exchange_message)
+                self.logger.debug(f"[HANDSHAKE] Public key sent to {peer_normalized}")
+                self.peer_info[peer_normalized]['last_activity'] = time.time()
+                
+            except Exception as key_send_error:
+                self.logger.error(f"[HANDSHAKE] Error sending public key: {str(key_send_error)}")
+                return False
+
+            # Step 2: Wait for and verify peer's public key
+            try:
+                peer_key_exchange = await self.wait_for_message(websocket, MessageType.PUBLIC_KEY_EXCHANGE.value, timeout=30.0)
+                if not peer_key_exchange:
+                    raise ValueError("No public key exchange received")
+
+                peer_key_pem = peer_key_exchange.payload.get("public_key")
+                if not peer_key_pem:
+                    raise ValueError("Missing public key in exchange message")
+                    
+                peer_public_key = serialization.load_pem_public_key(
+                    peer_key_pem.encode(),
+                    backend=default_backend()
+                )
+                if not isinstance(peer_public_key, rsa.RSAPublicKey):
+                    raise ValueError("Invalid public key type")
+                    
+                self.peer_public_keys[peer_normalized] = peer_public_key
+                self.peer_info[peer_normalized].update({
+                    'node_id': peer_key_exchange.payload.get('node_id'),
+                    'version': peer_key_exchange.payload.get('version'),
+                    'quantum_capable': peer_key_exchange.payload.get('quantum_capable', False),
+                    'last_activity': time.time()
+                })
+                
+                self.logger.info(f"[HANDSHAKE] ✓ Public key exchange completed")
+                
+            except Exception as key_error:
+                self.logger.error(f"[HANDSHAKE] Public key exchange failed: {str(key_error)}")
+                return False
+
+            # Step 3: Generate and send encrypted challenge
+            try:
+                challenge = os.urandom(32).hex()
+                challenge_id = str(uuid.uuid4())
+                
+                self.challenges.setdefault(peer_normalized, {})[challenge_id] = {
+                    'data': challenge,
+                    'timestamp': time.time()
+                }
+                
+                encrypted_challenge = self.encrypt_message(challenge, self.peer_public_keys[peer_normalized])
+                
+                challenge_message = Message(
+                    type=MessageType.CHALLENGE.value,
+                    payload={'challenge': encrypted_challenge},
+                    challenge_id=challenge_id
+                )
+                
+                await self.send_raw_message(peer_normalized, challenge_message)
+                self.logger.info(f"[HANDSHAKE] ✓ Challenge sent")
+                
+            except Exception as challenge_error:
+                self.logger.error(f"[HANDSHAKE] Challenge creation failed: {str(challenge_error)}")
+                return False
+
+            # Step 4: Verify challenge response
+            try:
+                if not await self.wait_for_challenge_response(peer_normalized, challenge_id, timeout=30.0):
+                    raise ValueError("Challenge verification failed")
+                    
+                self.logger.info(f"[HANDSHAKE] ✓ Challenge verified")
+                
+                # Clean up the challenge
+                self.challenges[peer_normalized].pop(challenge_id, None)
+                if not self.challenges[peer_normalized]:
+                    del self.challenges[peer_normalized]
+                    
+            except Exception as verify_error:
+                self.logger.error(f"[HANDSHAKE] Challenge verification failed: {str(verify_error)}")
+                return False
+
+            # Step 5: Initialize quantum components if both peers are capable
+            if (self.peer_info[peer_normalized].get('quantum_capable') and 
+                hasattr(self, 'quantum_sync')):
+                try:
+                    self.logger.info(f"[HANDSHAKE] Both peers quantum capable, initializing...")
+                    async with self.peer_lock:
+                        self.peer_states[peer_normalized] = "quantum_initializing"
+                    
+                    if await self.initialize_quantum_components() and \
+                       await self.establish_quantum_entanglement(peer_normalized):
+                        self.peer_states[peer_normalized] = "quantum_ready"
+                        self.peer_info[peer_normalized]['quantum_ready'] = True
+                        self.logger.info(f"[HANDSHAKE] ✓ Quantum entanglement established")
+                    else:
+                        self.logger.warning(f"[HANDSHAKE] Quantum initialization failed, continuing with classical connection")
+                except Exception as qe:
+                    self.logger.error(f"[HANDSHAKE] Quantum initialization error: {str(qe)}")
+                    # Continue with classical connection
+
+            # Finalize handshake
+            handshake_time = time.time() - start_time
+            self.logger.info(f"[HANDSHAKE] ✓ Handshake completed in {handshake_time:.2f}s")
+            self.logger.info(f"[HANDSHAKE] State: {self.peer_states[peer_normalized]}")
+            self.logger.info(f"[HANDSHAKE] {'='*50}\n")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[HANDSHAKE] Error during handshake with {peer_normalized}: {str(e)}")
+            self.logger.error(traceback.format_exc())
             return False
 
 
@@ -3882,83 +8384,357 @@ class P2PNode:
     def get_peer_count(self):
         return len(self.peers)
     async def start_server(self):
+        """Start the WebSocket server with proper message handling."""
         try:
-            self.server = await websockets.serve(self.handle_connection, self.host, self.port)
-            logger.info(f"P2P node listening on {self.host}:{self.port}")
+            self.server = await websockets.serve(
+                self.handle_websocket_connection,  # Use the connection handler
+                self.host,
+                self.port
+            )
+            self.logger.info(f"P2P node listening on {self.host}:{self.port}")
+            
         except Exception as e:
-            logger.error(f"Failed to start server: {str(e)}")
-            logger.error(traceback.format_exc())
-    async def maintain_connections(self):
-        while True:
-            try:
-                for peer in list(self.peers.keys()):
-                    if not await self.is_connection_alive(peer):
-                        self.logger.warning(f"Connection to {peer} lost, attempting to reconnect")
-                        await self.handle_disconnection(peer)
-                
-                if len(self.peers) < self.target_peer_count:
-                    await self.find_and_connect_to_new_peers()
-                
-                await asyncio.sleep(60)  # Check every minute
-            except Exception as e:
-                self.logger.error(f"Error in maintain_connections: {str(e)}")
-                await asyncio.sleep(60)
+            self.logger.error(f"Failed to start server: {str(e)}")
+            self.logger.error(traceback.format_exc())
 
+    async def handle_websocket_connection(self, websocket: websockets.WebSocketServerProtocol, path: str):
+        """Handle new WebSocket connections."""
+        try:
+            self.logger.info(f"New WebSocket connection from {websocket.remote_address}")
+            
+            async for message in websocket:
+                await self.handle_websocket_message(websocket, message)
+                
+        except websockets.exceptions.ConnectionClosed:
+            self.logger.info(f"WebSocket connection closed with {websocket.remote_address}")
+        except Exception as e:
+            self.logger.error(f"Error in WebSocket connection handler: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
+    async def find_available_port(self, start_port: int, max_attempts: int = 10) -> int:
+        """Find an available port starting from start_port."""
+        for port in range(start_port, start_port + max_attempts):
+            try:
+                # Create a temporary socket to test if port is available
+                test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_socket.settimeout(1)
+                test_socket.bind(('0.0.0.0', port))
+                test_socket.close()
+                self.logger.info(f"Found available port: {port}")
+                return port
+            except OSError:
+                self.logger.debug(f"Port {port} is in use, trying next port")
+                continue
+        raise RuntimeError(f"No available ports found in range {start_port}-{start_port + max_attempts}")
     async def find_and_connect_to_new_peers(self):
-        self.logger.info("[FIND_PEERS] Starting search for new peers")
+        """Find and connect to new peers with enhanced error handling."""
         try:
             self.logger.info("[FIND_PEERS] Attempting to find and connect to new peers")
             nodes = await self.find_node(self.node_id)
+            
+            if nodes is None:
+                self.logger.warning("[FIND_PEERS] No nodes found in network")
+                return
+                
+            if not isinstance(nodes, list):
+                self.logger.warning(f"[FIND_PEERS] Invalid nodes response type: {type(nodes)}")
+                return
+                
             self.logger.info(f"[FIND_PEERS] Found {len(nodes)} potential new peers")
+            
+            connected_count = 0
             for node in nodes:
-                self.logger.info(f"[FIND_PEERS] Considering peer: {node.id}")
-                if node.id not in self.peers and len(self.peers) < self.target_peer_count:
-                    self.logger.info(f"[FIND_PEERS] Attempting to connect to new peer: {node.id}")
-                    success = await self.connect_to_peer(node)
-                    if success:
-                        self.logger.info(f"[FIND_PEERS] Successfully connected to new peer: {node.id}")
-                    else:
-                        self.logger.warning(f"[FIND_PEERS] Failed to connect to new peer: {node.id}")
-                else:
-                    self.logger.info(f"[FIND_PEERS] Skipping peer {node.id} (already connected or peer limit reached)")
-            self.logger.info(f"[FIND_PEERS] Finished attempt to find new peers. Current peer count: {len(self.peers)}")
+                try:
+                    if not isinstance(node, KademliaNode):
+                        self.logger.warning(f"Invalid node type: {type(node)}")
+                        continue
+                        
+                    if node.id not in self.peers and len(self.peers) < self.target_peer_count:
+                        self.logger.info(f"[FIND_PEERS] Attempting to connect to new peer: {node.id}")
+                        success = await self.connect_to_peer(node)
+                        if success:
+                            connected_count += 1
+                            self.logger.info(f"[FIND_PEERS] Successfully connected to new peer: {node.id}")
+                        else:
+                            self.logger.warning(f"[FIND_PEERS] Failed to connect to new peer: {node.id}")
+                except Exception as e:
+                    self.logger.error(f"[FIND_PEERS] Error connecting to peer {node.id}: {str(e)}")
+                    continue
+
+            self.logger.info(f"[FIND_PEERS] Connected to {connected_count} new peers")
+            self.logger.info(f"[FIND_PEERS] Current peer count: {len(self.peers)}")
+            
         except Exception as e:
             self.logger.error(f"[FIND_PEERS] Error finding new peers: {str(e)}")
             self.logger.error(traceback.format_exc())
-        self.logger.info("[FIND_PEERS] Finished search for new peers")
+        finally:
+            self.logger.info("[FIND_PEERS] Finished search for new peers")
 
     async def run(self):
+        """Run the P2P node with enhanced task management and monitoring."""
         try:
+            # Initialize core services
             await self.start_server()
             await self.join_network()
             await self.announce_to_network()
             
+            self.is_running = True
             self.logger.info("Starting periodic tasks...")
-            tasks = [
-                asyncio.create_task(self.process_message_queue()),
-                asyncio.create_task(self.periodic_peer_discovery()),
-                asyncio.create_task(self.periodic_data_republish()),
-                asyncio.create_task(self.send_heartbeats()),
-                asyncio.create_task(self.periodic_logo_sync()),
-                asyncio.create_task(self.periodic_connection_check()),
-                asyncio.create_task(self.maintain_peer_connections()),
-                asyncio.create_task(self.connection_monitor()),
-                asyncio.create_task(self.maintain_connections()),
-                asyncio.create_task(self.periodic_peer_check())
+
+            # Define task configurations with name, coroutine function (not called), and interval
+            task_configs = [
+                ('Message Queue', self.process_message_queue, 1),
+                ('Peer Discovery', self.periodic_peer_discovery, 300),
+                ('Data Republish', self.periodic_data_republish, 3600),
+                ('Heartbeat', self.send_heartbeats, 15),
+                ('Logo Sync', self.periodic_logo_sync, 300),
+                ('Connection Check', self.periodic_connection_check, 60),
+                ('Peer Maintenance', self.maintain_peer_connections, 30),
+                ('Connection Monitor', self.connection_monitor, 30),
+                ('Peer Check', self.periodic_peer_check, 30),
+                ('Sync Monitor', self.monitor_sync_status, 10),
+                ('Resource Monitor', self.monitor_resources, 60)
             ]
+
+            # Create monitored tasks
+            running_tasks = []
+            for task_name, task_func, interval in task_configs:
+                # Create a wrapper task that uses run_monitored_task
+                task = asyncio.create_task(
+                    self.run_monitored_task(task_name, task_func, interval)
+                )
+                task.set_name(task_name)
+                running_tasks.append(task)
+                self.logger.info(f"Started monitored task: {task_name}")
+
+            # Start status monitoring
+            status_task = asyncio.create_task(self.update_node_status())
+            status_task.set_name("Status Monitor")
+            running_tasks.append(status_task)
+
+            self.logger.info("P2P node is now running with monitored tasks")
             
-            for i, task in enumerate(tasks):
-                self.logger.info(f"Started task {i+1}: {task.get_name()}")
-            
-            self.logger.info("P2P node is now running")
-            
-            # Keep the node running
-            while True:
-                await asyncio.sleep(3600)  # Sleep for an hour, or use some other condition to keep the node running
-                
+            # Main monitoring loop
+            while self.is_running:
+                try:
+                    # Check task status
+                    for task in running_tasks[:]:  # Use slice to avoid modification during iteration
+                        if task.done():
+                            if exception := task.exception():
+                                self.logger.error(f"Task {task.get_name()} failed with error: {exception}")
+                                # Find the original config for the failed task
+                                task_config = next(
+                                    (tc for tc in task_configs if tc[0] == task.get_name()),
+                                    None
+                                )
+                                if task_config:
+                                    # Restart the failed task
+                                    self.logger.info(f"Restarting failed task: {task_config[0]}")
+                                    new_task = asyncio.create_task(
+                                        self.run_monitored_task(
+                                            task_config[0],
+                                            task_config[1],
+                                            task_config[2]
+                                        )
+                                    )
+                                    new_task.set_name(task_config[0])
+                                    running_tasks.remove(task)
+                                    running_tasks.append(new_task)
+                                    self.logger.info(f"Restarted task: {task_config[0]}")
+
+                    # Log current task metrics
+                    if hasattr(self, 'task_metrics'):
+                        self.logger.info("\n=== Task Metrics ===")
+                        for task_name, metrics in self.task_metrics.items():
+                            avg_time = metrics['total_time'] / metrics['count'] if metrics['count'] > 0 else 0
+                            self.logger.info(f"Task: {task_name}")
+                            self.logger.info(f"  Count: {metrics['count']}")
+                            self.logger.info(f"  Avg Time: {avg_time:.3f}s")
+                            self.logger.info(f"  Max Time: {metrics['max_time']:.3f}s")
+                            self.logger.info(f"  Min Time: {metrics['min_time']:.3f}s")
+
+                    await asyncio.sleep(60)  # Check every minute
+
+                except Exception as e:
+                    self.logger.error(f"Error in task monitoring loop: {str(e)}")
+                    self.logger.error(traceback.format_exc())
+                    await asyncio.sleep(5)  # Brief pause before continuing
+
         except Exception as e:
-            self.logger.error(f"Error in P2P node run method: {str(e)}")
+            self.logger.error(f"Fatal error in P2P node run method: {str(e)}")
             self.logger.error(traceback.format_exc())
+        finally:
+            # Cleanup
+            self.logger.info("Shutting down P2P node...")
+            self.is_running = False
+            
+            # Cancel all tasks
+            for task in running_tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait for tasks to complete
+            if running_tasks:
+                self.logger.info("Waiting for tasks to complete...")
+                await asyncio.gather(*running_tasks, return_exceptions=True)
+            
+            self.logger.info("P2P node shutdown complete")
+
+    async def update_node_status(self):
+        """Periodic node status updates."""
+        while self.is_running:
+            try:
+                status = {
+                    'connected_peers': len(self.connected_peers),
+                    'active_tasks': len([t for t in asyncio.all_tasks() if not t.done()]),
+                    'blockchain_height': len(self.blockchain.chain) if self.blockchain else 0,
+                    'mempool_size': len(self.mempool),
+                    'sync_status': {k: v.is_syncing for k, v in self.sync_states.items()}
+                }
+                self.logger.info(f"\n=== Node Status ===\n{json.dumps(status, indent=2)}\n==================")
+                await asyncio.sleep(60)
+            except Exception as e:
+                self.logger.error(f"Error updating node status: {str(e)}")
+                await asyncio.sleep(5)
+    async def run_monitored_task(self, name: str, task_func, interval: int):
+        """Run a task with monitoring and error handling."""
+        while self.is_running:
+            start_time = time.time()
+            try:
+                if asyncio.iscoroutinefunction(task_func):
+                    await task_func()
+                else:
+                    await asyncio.to_thread(task_func)
+                
+                # Calculate task metrics
+                execution_time = time.time() - start_time
+                self.update_task_metrics(name, execution_time)
+                
+                # Wait for next interval, accounting for execution time
+                wait_time = max(0, interval - execution_time)
+                await asyncio.sleep(wait_time)
+                
+            except Exception as e:
+                self.logger.error(f"Error in task {name}: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                await asyncio.sleep(5)  # Brief pause before retry
+
+    async def monitor_resources(self):
+        """Monitor system resources used by the node."""
+        process = psutil.Process()
+        cpu_percent = process.cpu_percent()
+        memory_info = process.memory_info()
+        
+        self.logger.info(f"Resource usage - CPU: {cpu_percent}%, Memory: {memory_info.rss / 1024 / 1024:.1f}MB")
+
+    async def monitor_sync_status(self):
+        """Monitor synchronization status and state across the network."""
+        while self.is_running:  # Make sure we only run while the node is active
+            try:
+                # Log sync states for each component
+                self.logger.info("\n=== Synchronization Status ===")
+                for component_name, sync_state in self.sync_states.items():
+                    self.logger.info(f"Component: {component_name}")
+                    self.logger.info(f"  Is Syncing: {sync_state.is_syncing}")
+                    self.logger.info(f"  Last Sync: {time.time() - sync_state.last_sync:.2f}s ago")
+                    self.logger.info(f"  Current Hash: {sync_state.current_hash}")
+                    self.logger.info(f"  Sync Progress: {sync_state.sync_progress}%")
+                    self.logger.info(f"  Last Validated: {time.time() - sync_state.last_validated:.2f}s ago")
+
+                # Log network state
+                mempool_size = len(self.blockchain.mempool) if self.blockchain else 0
+                chain_height = len(self.blockchain.chain) if self.blockchain else 0
+                self.logger.info("\n=== Network State ===")
+                self.logger.info(f"Connected Peers: {len(self.connected_peers)}")
+                self.logger.info(f"Active Peers: {[peer for peer in self.connected_peers]}")
+                self.logger.info(f"Chain Height: {chain_height}")
+                self.logger.info(f"Mempool Size: {mempool_size}")
+
+                # Check for out-of-sync components
+                for component_name, sync_state in self.sync_states.items():
+                    if time.time() - sync_state.last_sync > 300:  # 5 minutes
+                        self.logger.warning(f"Component {component_name} hasn't been synced in 5 minutes")
+                        # Trigger sync with a random peer if available
+                        if self.connected_peers:
+                            random_peer = random.choice(list(self.connected_peers))
+                            self.logger.info(f"Initiating sync of {component_name} with {random_peer}")
+                            await self.start_sync(random_peer, component_name)
+
+                self.logger.info("================================\n")
+                await asyncio.sleep(10)  # Wait 10 seconds before next check
+
+            except Exception as e:
+                self.logger.error(f"Error in sync status monitoring: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                await asyncio.sleep(10)  # Wait before retrying
+
+    async def update_node_status(self):
+        """Update and log overall node status."""
+        status = {
+            'connected_peers': len(self.connected_peers),
+            'active_tasks': len([t for t in asyncio.all_tasks() if not t.done()]),
+            'blockchain_height': len(self.blockchain.chain) if self.blockchain else 0,
+            'mempool_size': len(self.mempool),
+            'sync_status': {k: v.is_syncing for k, v in self.sync_states.items()}
+        }
+        self.logger.info(f"Node status: {status}")
+
+    def update_task_metrics(self, task_name: str, execution_time: float):
+        """Update metrics for task execution."""
+        if not hasattr(self, 'task_metrics'):
+            self.task_metrics = {}
+        
+        if task_name not in self.task_metrics:
+            self.task_metrics[task_name] = {
+                'count': 0,
+                'total_time': 0,
+                'max_time': 0,
+                'min_time': float('inf')
+            }
+        
+        metrics = self.task_metrics[task_name]
+        metrics['count'] += 1
+        metrics['total_time'] += execution_time
+        metrics['max_time'] = max(metrics['max_time'], execution_time)
+        metrics['min_time'] = min(metrics['min_time'], execution_time)
+
+    async def shutdown(self, sig=None):
+        """Gracefully shutdown the node."""
+        if sig:
+            self.logger.info(f"Received exit signal {sig.name}...")
+        
+        self.is_running = False
+        
+        # Cancel all tasks
+        for task in asyncio.all_tasks():
+            if task is not asyncio.current_task():
+                task.cancel()
+        
+        # Wait for tasks to complete
+        await asyncio.gather(*asyncio.all_tasks(), return_exceptions=True)
+        
+        # Close connections
+        for peer in list(self.peers.keys()):
+            await self.remove_peer(peer)
+        
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+        
+        self.logger.info("Node shutdown complete")
+
+    async def cleanup_expired_states(self):
+        """Clean up expired states and resources."""
+        # Clean up seen messages
+        current_time = time.time()
+        self.seen_messages = {
+            msg_hash: timestamp 
+            for msg_hash, timestamp in self.seen_messages.items()
+            if current_time - timestamp < self.message_expiry
+        }
+        
+        # Clean up other expired states
+        await self.cleanup_challenges()
     async def periodic_logo_sync(self):
         while True:
             try:
@@ -3997,18 +8773,104 @@ class P2PNode:
                 logger.error(traceback.format_exc())
 
     async def send_heartbeats(self):
+        """Send both regular and quantum heartbeats to all peers"""
         while self.is_running:
             try:
-                peers = list(self.peers.keys())
+                peers = list(self.connected_peers)
+                self.logger.info(f"\n[HEARTBEAT] {'='*20} Heartbeat Round {'='*20}")
+                self.logger.info(f"[HEARTBEAT] Sending heartbeats to {len(peers)} peers")
+
                 for peer in peers:
                     try:
-                        await self.send_heartbeat(peer)
+                        # First send regular heartbeat
+                        await self.send_message(
+                            peer, 
+                            Message(
+                                type=MessageType.HEARTBEAT.value,
+                                payload={'timestamp': time.time()}
+                            )
+                        )
+                        self.logger.debug(f"[HEARTBEAT] Regular heartbeat sent to {peer}")
+
+                        # Then send quantum heartbeat if peer is quantum-entangled
+                        if (hasattr(self, 'quantum_sync') and 
+                            self.quantum_sync and 
+                            peer in self.quantum_sync.entangled_peers):
+                            
+                            self.logger.info(f"[QUANTUM] Sending quantum heartbeat to {peer}")
+                            # Get current quantum states and fidelities
+                            quantum_states = {}
+                            fidelities = {}
+                            
+                            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                                try:
+                                    qubit = getattr(self.quantum_sync.register, component)
+                                    quantum_states[component] = qubit.value
+                                    fidelity = await self.quantum_sync.measure_sync_state(component)
+                                    fidelities[component] = fidelity
+                                    self.logger.debug(f"[QUANTUM] {component} fidelity: {fidelity:.3f}")
+                                except Exception as e:
+                                    self.logger.error(f"[QUANTUM] Error getting state for {component}: {str(e)}")
+                                    continue
+
+                            # Get Bell pair
+                            bell_pair = self.quantum_sync.bell_pairs.get(peer)
+                            if bell_pair:
+                                bell_pair_id = self.quantum_notifier._get_bell_pair_id(bell_pair)
+                                
+                                # Create quantum heartbeat
+                                heartbeat = QuantumHeartbeat(
+                                    node_id=self.node_id,
+                                    timestamp=time.time(),
+                                    quantum_states=quantum_states,
+                                    fidelities=fidelities,
+                                    bell_pair_id=bell_pair_id,
+                                    nonce=os.urandom(16).hex()
+                                )
+
+                                # Sign heartbeat
+                                message_str = (
+                                    f"{heartbeat.node_id}:{heartbeat.timestamp}:"
+                                    f"{heartbeat.bell_pair_id}:{heartbeat.nonce}"
+                                ).encode()
+                                
+                                signature = self.private_key.sign(
+                                    message_str,
+                                    padding.PSS(
+                                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                                        salt_length=padding.PSS.MAX_LENGTH
+                                    ),
+                                    hashes.SHA256()
+                                )
+                                heartbeat.signature = base64.b64encode(signature).decode()
+
+                                # Send quantum heartbeat
+                                await self.send_message(
+                                    peer,
+                                    Message(
+                                        type=MessageType.QUANTUM_HEARTBEAT.value,
+                                        payload=heartbeat.to_dict()
+                                    )
+                                )
+                                self.logger.info(f"[QUANTUM] ✓ Quantum heartbeat sent to {peer}")
+                                self.logger.debug(f"[QUANTUM] Current fidelities: {fidelities}")
+                                
+                                # Update tracking
+                                self.last_quantum_heartbeat[peer] = time.time()
+                            else:
+                                self.logger.warning(f"[QUANTUM] No Bell pair found for peer {peer}")
+
                     except Exception as e:
-                        logger.error(f"Error sending heartbeat to {peer}: {str(e)}")
+                        self.logger.error(f"Error sending heartbeats to {peer}: {str(e)}")
                         await self.remove_peer(peer)
+
+                self.logger.info(f"[HEARTBEAT] {'='*50}\n")
                 await asyncio.sleep(self.heartbeat_interval)
+
             except Exception as e:
-                logger.error(f"Error in send_heartbeats: {str(e)}")
+                self.logger.error(f"Error in heartbeat loop: {str(e)}")
+                await asyncio.sleep(self.heartbeat_interval)
+
 
     async def send_heartbeat(self, peer: str):
         heartbeat_message = json.dumps({"type": "heartbeat", "timestamp": time.time()})
@@ -4325,60 +9187,169 @@ class P2PNode:
         except Exception as e:
             logger.error(f"Public/private key pair integrity verification failed: {str(e)}")
             return False
-    async def handle_challenge(self, peer, challenge_message, challenge_id):
+    async def handle_challenge(self, peer: str, challenge_message: str, challenge_id: str):
+        """Handle incoming challenge with better connection state management."""
+        peer_normalized = None
         try:
+            # Normalize peer address
             peer_normalized = self.normalize_peer_address(peer)
-            self.logger.debug(f"Handling challenge for normalized peer {peer_normalized}")
-            self.logger.debug(f"Challenge message: {challenge_message}")
-            self.logger.debug(f"Challenge ID: {challenge_id}")
+            self.logger.info(f"\n[CHALLENGE] {'='*50}")
+            self.logger.info(f"[CHALLENGE] Processing challenge from peer {peer_normalized}")
 
-            # Extract challenge data
-            if isinstance(challenge_message, dict):
-                challenge_data = challenge_message.get('challenge', '')
-            elif isinstance(challenge_message, str):
-                challenge_data = challenge_message
-            else:
-                raise ValueError(f"Unexpected challenge message type: {type(challenge_message)}")
+            # Get websocket with state verification
+            websocket = self.peers.get(peer_normalized)
+            if not websocket:
+                raise ValueError(f"No connection found for peer {peer_normalized}")
 
-            # Extract just the challenge data (remove the challenge ID)
-            challenge_data = challenge_data.split(':', 1)[1] if ':' in challenge_data else challenge_data
+            # Check connection state
+            if websocket.closed:
+                await self.remove_peer(peer_normalized)
+                raise ValueError(f"Connection to {peer_normalized} is already closed")
 
-            self.logger.debug(f"Challenge data extracted: {challenge_data}")
+            # Extract and validate challenge data
+            try:
+                if isinstance(challenge_message, dict):
+                    challenge_data = challenge_message.get('challenge', '')
+                elif isinstance(challenge_message, str):
+                    challenge_data = challenge_message
+                else:
+                    raise ValueError(f"Invalid challenge message type: {type(challenge_message)}")
 
-            # Generate signature for the challenge using the private key
-            signature = self.private_key.sign(
-                challenge_data.encode('utf-8'),
-                padding.PSS(
-                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    salt_length=padding.PSS.MAX_LENGTH
-                ),
-                hashes.SHA256()
-            )
-            self.logger.debug(f"Generated signature for challenge: {signature.hex()}")
+                if ':' in challenge_data:
+                    received_id, challenge_data = challenge_data.split(':', 1)
+                    if received_id != challenge_id:
+                        self.logger.warning(f"[CHALLENGE] Challenge ID mismatch")
 
-            # Store the challenge data for later verification
+                if not challenge_data:
+                    raise ValueError("Empty challenge data")
+
+                self.logger.debug(f"[CHALLENGE] Extracted challenge data: {challenge_data[:32]}...")
+
+            except Exception as e:
+                raise ValueError(f"Challenge data extraction failed: {str(e)}")
+
+            # Generate signature
+            try:
+                challenge_bytes = challenge_data.encode('utf-8')
+                signature = self.private_key.sign(
+                    challenge_bytes,
+                    padding.PSS(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH
+                    ),
+                    hashes.SHA256()
+                )
+                signature_hex = signature.hex()
+                self.logger.debug(f"[CHALLENGE] Generated signature: {signature_hex[:32]}...")
+
+            except Exception as e:
+                raise ValueError(f"Signature generation failed: {str(e)}")
+
+            # Store challenge data
             if peer_normalized not in self.challenges:
                 self.challenges[peer_normalized] = {}
-            self.challenges[peer_normalized][challenge_id] = challenge_data
-            self.logger.debug(f"Stored challenge data for peer {peer_normalized} with challenge ID {challenge_id}")
+            
+            self.challenges[peer_normalized][challenge_id] = {
+                'data': challenge_data,
+                'timestamp': time.time()
+            }
+            self.logger.debug(f"[CHALLENGE] Challenge data stored for verification")
 
-            # Create and send the challenge response message
+            # Create response message
             response_message = Message(
                 type=MessageType.CHALLENGE_RESPONSE.value,
-                payload={"signature": signature.hex()},
+                payload={"signature": signature_hex},
                 challenge_id=challenge_id
             )
-            self.logger.debug(f"Challenge response created for {peer_normalized}: {response_message.to_json()}")
 
-            # Send the challenge response to the peer
-            await self.send_raw_message(peer, response_message)
-            self.logger.info(f"Challenge successfully handled and response sent to peer {peer_normalized}")
+            # Send response with connection state check
+            try:
+                if not websocket.closed:
+                    async with self.peer_lock:
+                        self.peer_states[peer_normalized] = "sending_challenge_response"
+                        try:
+                            await asyncio.wait_for(
+                                websocket.send(response_message.to_json()),
+                                timeout=5.0
+                            )
+                            self.peer_states[peer_normalized] = "challenge_response_sent"
+                            self.logger.info(f"[CHALLENGE] ✓ Response sent to {peer_normalized}")
+                            return True
+                        except asyncio.TimeoutError:
+                            raise ValueError("Challenge response send timeout")
+                else:
+                    raise ValueError("Connection closed before sending response")
+
+            except websockets.exceptions.ConnectionClosed as e:
+                if e.code == 1000:  # Normal closure
+                    self.logger.warning(f"[CHALLENGE] Peer {peer_normalized} closed connection normally")
+                    await self.initiate_reconnection(peer_normalized)
+                else:
+                    self.logger.error(f"[CHALLENGE] Connection closed abnormally: {e.code}")
+                raise ValueError(f"Connection closed: {str(e)}")
+            except Exception as e:
+                raise ValueError(f"Failed to send challenge response: {str(e)}")
 
         except Exception as e:
-            self.logger.error(f"Error handling challenge from peer {peer_normalized}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            raise
+            error_msg = f"Challenge handling failed for peer {peer_normalized or peer}: {str(e)}"
+            self.logger.error(f"[CHALLENGE] {error_msg}")
+            
+            if peer_normalized:
+                await self.remove_peer(peer_normalized)
+                
+            raise ValueError(error_msg)
 
+        finally:
+            # Cleanup challenge data if needed
+            if peer_normalized in self.challenges and challenge_id in self.challenges[peer_normalized]:
+                del self.challenges[peer_normalized][challenge_id]
+                if not self.challenges[peer_normalized]:
+                    del self.challenges[peer_normalized]
+
+    async def initiate_reconnection(self, peer: str):
+        """Attempt to reconnect to a peer with proper cleanup first."""
+        try:
+            self.logger.info(f"[RECONNECT] Initiating reconnection to {peer}")
+            
+            # Ensure proper cleanup before reconnecting
+            await self.remove_peer(peer)
+            
+            # Get original peer info
+            peer_ip, peer_port = peer.split(':')
+            
+            # Create new node object
+            node = KademliaNode(
+                id=self.generate_node_id(),
+                ip=peer_ip,
+                port=int(peer_port),
+                magnet_link=None
+            )
+            
+            # Attempt reconnection with backoff
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    # Wait before retry with exponential backoff
+                    if attempt > 0:
+                        wait_time = 2 ** attempt
+                        self.logger.info(f"[RECONNECT] Waiting {wait_time}s before attempt {attempt + 1}")
+                        await asyncio.sleep(wait_time)
+                    
+                    # Attempt connection
+                    if await self.connect_to_peer(node):
+                        self.logger.info(f"[RECONNECT] ✓ Successfully reconnected to {peer}")
+                        return True
+                        
+                except Exception as e:
+                    self.logger.error(f"[RECONNECT] Attempt {attempt + 1} failed: {str(e)}")
+                    if attempt == max_attempts - 1:
+                        raise
+                    
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"[RECONNECT] Failed to reconnect to {peer}: {str(e)}")
+            return False
     def clear_peer_public_key(self, peer: str):
         normalized_peer = self.normalize_peer_address(peer)
         if normalized_peer in self.peer_public_keys:
@@ -4418,57 +9389,104 @@ class P2PNode:
                 self.logger.error(f"Public/private key pair integrity verification failed: {str(e)}")
                 return False
     async def verify_challenge_response(self, peer: str, challenge_id: str, response_data: dict) -> bool:
+        """Verify challenge response with improved state handling and quantum initialization."""
         try:
             peer_normalized = self.normalize_peer_address(peer)
-            self.logger.debug(f"Verifying challenge response from peer {peer_normalized} for challenge ID {challenge_id}")
-            
+            self.logger.info(f"\n[VERIFY] Verifying challenge response from {peer_normalized}")
+            self.logger.info(f"[VERIFY] Challenge ID: {challenge_id}")
+
+            # Verify peer state
+            current_state = self.peer_states.get(peer_normalized)
+            if current_state in ["verified", "quantum_initializing", "quantum_ready"]:
+                self.logger.debug(f"[VERIFY] Peer {peer_normalized} already verified")
+                return True
+
+            # Verify challenge exists
             if peer_normalized not in self.challenges:
-                self.logger.error(f"No pending challenges found for peer {peer_normalized}")
+                self.logger.error(f"[VERIFY] No challenges found for {peer_normalized}")
                 return False
 
-            challenge = self.challenges[peer_normalized].get(challenge_id)
-            if not challenge:
-                self.logger.error(f"Challenge ID {challenge_id} not found for peer {peer_normalized}")
+            challenge_data = self.challenges[peer_normalized].get(challenge_id)
+            if not challenge_data:
+                self.logger.error(f"[VERIFY] Challenge ID {challenge_id} not found")
                 return False
 
+            # Get challenge data
+            if isinstance(challenge_data, dict):
+                challenge = challenge_data.get('data')
+            else:
+                challenge = challenge_data
+
+            # Get and verify public key
             peer_public_key = self.peer_public_keys.get(peer_normalized)
             if not peer_public_key:
-                self.logger.error(f"No public key found for peer {peer_normalized}")
+                self.logger.error(f"[VERIFY] No public key found for {peer_normalized}")
                 return False
 
-            signature = bytes.fromhex(response_data['signature'])
-            self.logger.debug(f"Challenge: {challenge}")
-            self.logger.debug(f"Signature (hex): {signature.hex()}")
-            self.logger.debug(f"Public key: {peer_public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()}")
-
-            # Extract just the challenge data (remove the challenge ID)
-            challenge_data = challenge.split(':', 1)[1] if ':' in challenge else challenge
-
             try:
+                # Verify signature
+                signature = bytes.fromhex(response_data['signature'])
                 peer_public_key.verify(
                     signature,
-                    challenge_data.encode('utf-8'),
+                    challenge.encode(),
                     padding.PSS(
                         mgf=padding.MGF1(algorithm=hashes.SHA256()),
                         salt_length=padding.PSS.MAX_LENGTH
                     ),
                     hashes.SHA256()
                 )
-                self.logger.info(f"Successfully verified challenge response from peer {peer_normalized}")
-                del self.challenges[peer_normalized][challenge_id]
+
+                self.logger.info(f"[VERIFY] ✓ Signature verification successful")
+
+                # Clean up the challenge
+                self.challenges[peer_normalized].pop(challenge_id, None)
                 if not self.challenges[peer_normalized]:
                     del self.challenges[peer_normalized]
+
+                # Update peer state and initialize quantum components
+                async with self.peer_lock:
+                    self.peer_states[peer_normalized] = "quantum_initializing"
+                    self.connected_peers.add(peer_normalized)
+
+                # Initialize quantum components
+                if not self.quantum_initialized:
+                    if await self.initialize_quantum_components():
+                        self.logger.info("[VERIFY] ✓ Quantum components initialized")
+                    else:
+                        self.logger.error("[VERIFY] Failed to initialize quantum components")
+                        return False
+
+                # Establish quantum entanglement
+                try:
+                    if await self.establish_quantum_entanglement(peer_normalized):
+                        async with self.peer_lock:
+                            self.peer_states[peer_normalized] = "quantum_ready"
+                        self.logger.info(f"[VERIFY] ✓ Quantum entanglement established with {peer_normalized}")
+                    else:
+                        self.logger.warning(f"[VERIFY] Failed to establish quantum entanglement with {peer_normalized}")
+                        # Still return True as basic verification succeeded
+                except Exception as qe:
+                    self.logger.error(f"[VERIFY] Quantum initialization error: {str(qe)}")
+                    # Still return True as basic verification succeeded
+
+                # Start quantum monitoring if entanglement was successful
+                if self.peer_states.get(peer_normalized) == "quantum_ready":
+                    asyncio.create_task(self.monitor_peer_quantum_state(peer_normalized))
+                    asyncio.create_task(self.send_quantum_heartbeats(peer_normalized))
+                    self.logger.info(f"[VERIFY] ✓ Quantum monitoring started for {peer_normalized}")
+                
+                self.logger.info(f"[VERIFY] ={'='*50}")
                 return True
-            except InvalidSignature:
-                self.logger.warning(f"Invalid signature from peer {peer_normalized}")
-                self.logger.debug(f"Verification failed for challenge: {challenge_data}")
-                self.logger.debug(f"Challenge encoded: {challenge_data.encode('utf-8').hex()}")
+
+            except Exception as e:
+                self.logger.error(f"[VERIFY] Verification failed: {str(e)}")
                 return False
 
         except Exception as e:
-            self.logger.error(f"Error verifying challenge response from peer {peer_normalized}: {str(e)}")
+            self.logger.error(f"[VERIFY] Error in verification process: {str(e)}")
             self.logger.error(traceback.format_exc())
             return False
+
     async def handle_challenge_response(self, peer: str, message: Message):
         try:
             peer_normalized = self.normalize_peer_address(peer)
@@ -4526,25 +9544,21 @@ class P2PNode:
             logger.error(f"Error handling challenge response from peer {peer}: {str(e)}")
             logger.error(traceback.format_exc())
             return False
-    async def cleanup_challenges(self):
-        while True:
-            try:
-                current_time = time.time()
-                for peer, challenges in list(self.pending_challenges.items()):
-                    for challenge_id, challenge_data in list(challenges.items()):
-                        if isinstance(challenge_data, dict) and 'timestamp' in challenge_data:
-                            if current_time - challenge_data['timestamp'] > 300:  # 5 minutes timeout
-                                del challenges[challenge_id]
-                        elif isinstance(challenge_data, str):
-                            # For backwards compatibility, assume old challenges are expired
-                            del challenges[challenge_id]
-                    if not challenges:
-                        del self.pending_challenges[peer]
-                await asyncio.sleep(60)  # Run every minute
-            except Exception as e:
-                logger.error(f"Error in cleanup_challenges: {str(e)}")
-                logger.error(traceback.format_exc())
-                await asyncio.sleep(60)
+    def cleanup_challenges(self):
+        """Safely cleanup old challenges"""
+        try:
+            current_time = time.time()
+            for peer_id in list(self.challenges.keys()):
+                peer_challenges = self.challenges[peer_id]
+                for ch_id in list(peer_challenges.keys()):
+                    challenge_data = peer_challenges[ch_id]
+                    if isinstance(challenge_data, dict) and current_time - challenge_data.get('timestamp', 0) > 300:
+                        del peer_challenges[ch_id]
+                if not peer_challenges:
+                    del self.challenges[peer_id]
+        except Exception as e:
+            self.logger.error(f"Error cleaning up challenges: {str(e)}")
+
     def serialize_proof(self, proof):
         if isinstance(proof, tuple) and len(proof) == 2:
             return [self.serialize_proof(p) for p in proof]
@@ -4568,6 +9582,25 @@ class P2PNode:
             if await self.verify_proof(len(data["value"]), data["proof"]):
                 return data["value"]
         return None
+    async def handle_new_block(self, block_data: dict, sender: str):
+        try:
+            new_block = QuantumBlock.from_dict(block_data)
+            
+            if self.blockchain.validate_block(new_block):
+                # Add to blockchain
+                success = await self.blockchain.add_block(new_block)
+                if success:
+                    # Immediately propagate to other peers
+                    await self.broadcast(Message(
+                        type=MessageType.BLOCK.value,
+                        payload=block_data
+                    ), exclude=sender)
+                    
+                    # Update sync state
+                    self.sync_states[SyncComponent.BLOCKS].current_hash = await self.calculate_state_hash(SyncComponent.BLOCKS)
+                    
+        except Exception as e:
+            self.logger.error(f"Error handling new block: {str(e)}")
 
     async def handle_transaction(self, transaction_data: dict, sender: str):
         try:
@@ -4592,147 +9625,262 @@ class P2PNode:
         except Exception as e:
             logger.error(f"Failed to handle transaction: {str(e)}")
             logger.error(traceback.format_exc())
-            
+def enhance_p2p_node(node: P2PNode) -> P2PNode:
+    """Enhance P2P node with additional functionality"""
+    try:
+        logger.debug("Starting enhancement of P2P node.")
 
-def enhance_p2p_node(node: P2PNode) -> 'P2PNode':
-    """
-    Enhance a P2PNode instance with additional sync functionality.
-    Should be called after P2PNode instantiation.
-    """
-    # Add sync states
-    node.sync_states = {
-        SyncComponent.WALLETS: SyncStatus(),
-        SyncComponent.TRANSACTIONS: SyncStatus(),
-        SyncComponent.BLOCKS: SyncStatus(),
-        SyncComponent.MEMPOOL: SyncStatus()
-    }
-    
-    # Define the state hash calculation method
-    async def calculate_state_hash(self, component: SyncComponent) -> str:
-        """Calculate hash of current state for a component."""
-        try:
-            if component == SyncComponent.WALLETS:
-                wallets = await self.blockchain.get_wallets()
-                data = sorted([w.to_dict() for w in wallets], key=lambda x: x['address'])
-            elif component == SyncComponent.TRANSACTIONS:
-                txs = self.blockchain.get_recent_transactions()
-                data = sorted([tx.to_dict() for tx in txs], key=lambda x: x['id'])
-            elif component == SyncComponent.BLOCKS:
-                block = self.blockchain.get_latest_block()
-                return block.hash if block else '0' * 64
-            elif component == SyncComponent.MEMPOOL:
-                data = sorted([tx.to_dict() for tx in self.blockchain.mempool], key=lambda x: x['id'])
-            
-            return hashlib.sha256(json.dumps(data).encode()).hexdigest()
-            
-        except Exception as e:
-            self.logger.error(f"Error calculating state hash for {component}: {str(e)}")
-            return None
+        # Add sync states
+        node.sync_states = {
+            SyncComponent.WALLETS: SyncStatus(),
+            SyncComponent.TRANSACTIONS: SyncStatus(),
+            SyncComponent.BLOCKS: SyncStatus(),
+            SyncComponent.MEMPOOL: SyncStatus()
+        }
+        logger.debug("Added sync states to P2P node.")
 
-    # Bind the calculation method to the node instance
-    node.calculate_state_hash = types.MethodType(calculate_state_hash, node)
+        async def initialize_quantum_components(self):
+            """Initialize quantum components without requiring a peer."""
+            try:
+                self.logger.info("[QUANTUM] Initializing quantum components...")
+                
+                if not hasattr(self, 'quantum_sync') or self.quantum_sync is None:
+                    self.quantum_sync = QuantumEntangledSync(self.node_id)
+                    logger.debug("Quantum sync initialized.")
 
-    # Enhance the heartbeat functionality
-    original_send_heartbeat = node.send_heartbeat
+                initial_data = {
+                    'wallets': [w.to_dict() for w in self.blockchain.get_wallets()] if self.blockchain else [],
+                    'transactions': [tx.to_dict() for tx in self.blockchain.get_recent_transactions(limit=100)] if self.blockchain else [],
+                    'blocks': [block.to_dict() for block in self.blockchain.chain] if self.blockchain else [],
+                    'mempool': [tx.to_dict() for tx in self.blockchain.mempool] if hasattr(self.blockchain, 'mempool') else []
+                }
 
-    async def enhanced_send_heartbeat(self, peer: str):
-        """Enhanced heartbeat with sync information."""
-        try:
-            # Get current state hashes
-            sync_status = {component.value: await self.calculate_state_hash(component) for component in SyncComponent}
+                await self.quantum_sync.initialize_quantum_state(initial_data)
+                logger.debug("Quantum state initialized with blockchain data.")
 
-            # Create enhanced heartbeat data
-            heartbeat_data = {
-                "type": "heartbeat",
-                "timestamp": time.time(),
-                "sync_status": sync_status,
-                "blockchain_height": len(self.blockchain.chain) if self.blockchain else 0
-            }
+                if not hasattr(self, 'quantum_notifier'):
+                    self.quantum_notifier = QuantumStateNotifier(self)
+                    logger.debug("Quantum notifier initialized.")
+                
+                if not hasattr(self, 'quantum_monitor'):
+                    self.quantum_monitor = QuantumNetworkMonitor(self)
+                    logger.debug("Quantum monitor initialized.")
+                    
+                if not hasattr(self, 'quantum_consensus'):
+                    self.quantum_consensus = QuantumConsensusManager(self)
+                    logger.debug("Quantum consensus manager initialized.")
 
-            # Call original heartbeat method and send sync status
-            await original_send_heartbeat(peer)
-            await self.send_message(peer, Message(
-                type=MessageType.SYNC_STATUS.value,
-                payload=heartbeat_data
-            ))
-            
-        except Exception as e:
-            self.logger.error(f"Error sending enhanced heartbeat to {peer}: {str(e)}")
+                if not hasattr(self, 'quantum_heartbeats'):
+                    self.quantum_heartbeats = {}
+                if not hasattr(self, 'last_quantum_heartbeat'):
+                    self.last_quantum_heartbeat = {}
+                    
+                self.quantum_initialized = True
+                asyncio.create_task(self.monitor_quantum_state())
+                
+                self.logger.info("[QUANTUM] ✓ Quantum components initialized successfully")
+                return True
 
-    # Replace the send_heartbeat method with enhanced version
-    node.send_heartbeat = types.MethodType(enhanced_send_heartbeat, node)
+            except Exception as e:
+                self.logger.error(f"[QUANTUM] Error initializing quantum components: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                raise
+
+        async def establish_quantum_entanglement(self, peer: str) -> bool:
+            """Establish quantum entanglement with a peer."""
+            try:
+                self.logger.info(f"[QUANTUM] Establishing Entanglement with {peer}")
+                
+                if not self.quantum_initialized:
+                    await self.initialize_quantum_components()
+
+                current_state = {
+                    'wallets': [w.to_dict() for w in self.blockchain.get_wallets()],
+                    'transactions': [tx.to_dict() for tx in self.blockchain.get_recent_transactions()],
+                    'blocks': [block.to_dict() for block in self.blockchain.chain],
+                    'mempool': [tx.to_dict() for tx in self.blockchain.mempool]
+                }
+
+                request_message = Message(
+                    type=MessageType.QUANTUM_ENTANGLEMENT_REQUEST.value,
+                    payload={'node_id': self.node_id, 'state_data': current_state, 'timestamp': time.time()}
+                )
+
+                response = await self.send_and_wait_for_response(peer, request_message)
+
+                if not response or response.type != MessageType.QUANTUM_ENTANGLEMENT_RESPONSE.value:
+                    self.logger.error(f"[QUANTUM] Failed to receive entanglement response from {peer}")
+                    return False
+
+                peer_state = response.payload.get('state_data', {})
+                peer_register = await self.quantum_sync.entangle_with_peer(peer, peer_state)
+                
+                if not peer_register:
+                    self.logger.error(f"[QUANTUM] Failed to create quantum register with {peer}")
+                    return False
+
+                bell_pair = self.quantum_sync._generate_bell_pair()
+                self.quantum_sync.bell_pairs[peer] = bell_pair
+
+                asyncio.create_task(self.monitor_peer_quantum_state(peer))
+                asyncio.create_task(self.send_quantum_heartbeats(peer))
+
+                self.logger.info(f"[QUANTUM] ✓ Quantum entanglement established with {peer}")
+                return True
+
+            except Exception as e:
+                self.logger.error(f"[QUANTUM] Error establishing entanglement: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                return False
+
+        # Assigning enhanced methods to node
+        node.initialize_quantum_components = types.MethodType(initialize_quantum_components, node)
+        node.establish_quantum_entanglement = types.MethodType(establish_quantum_entanglement, node)
+        logger.debug("Quantum methods assigned to P2P node.")
+
+        # Add enhanced start
+        original_start = node.start
+        async def enhanced_start(self):
+            await original_start()
+            asyncio.create_task(node.process_sync_queue())
+            node.logger.info("Enhanced sync system started.")
+        
+        node.start = types.MethodType(enhanced_start, node)
+        logger.debug("Enhanced start method assigned.")
+
+        # Return the fully enhanced node
+        logger.debug("P2P node enhancement completed successfully.")
+        return node
+
+    except Exception as e:
+        logger.error(f"Error enhancing P2P node: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+
 
     # Define sync status handling method
     async def handle_sync_status(self, peer: str, data: dict):
-        """Handle incoming sync status."""
+        """Handle incoming sync status with improved error handling."""
         try:
             peer_sync_status = data.get('sync_status', {})
             peer_height = data.get('blockchain_height', 0)
 
-            for component in SyncComponent:
-                our_hash = await self.calculate_state_hash(component)
-                peer_hash = peer_sync_status.get(component.value)
+            # Compare sync status for each component
+            for component in [SyncComponent.WALLETS, SyncComponent.TRANSACTIONS, 
+                             SyncComponent.BLOCKS, SyncComponent.MEMPOOL]:
+                try:
+                    our_hash = await self.calculate_state_hash(component)
+                    peer_hash = peer_sync_status.get(str(component))
 
-                if peer_hash and peer_hash != our_hash:
-                    if not self.sync_states[component].is_syncing:
-                        self.logger.info(f"State mismatch detected for {component.value} with {peer}")
-                        await self.start_sync(peer, component)
+                    if peer_hash and peer_hash != our_hash:
+                        if not self.sync_states[component].is_syncing:
+                            self.logger.info(f"State mismatch detected for {component} with {peer}")
+                            self.logger.debug(f"Our hash: {our_hash}")
+                            self.logger.debug(f"Peer hash: {peer_hash}")
+                            await self.start_sync(peer, component)
+                except Exception as comp_error:
+                    self.logger.error(f"Error checking sync for component {component}: {str(comp_error)}")
 
-            # Special handling for blockchain height
-            our_height = len(self.blockchain.chain) if self.blockchain else 0
-            if peer_height > our_height:
-                if not self.sync_states[SyncComponent.BLOCKS].is_syncing:
-                    self.logger.info(f"Chain height mismatch detected with {peer}")
-                    await self.start_sync(peer, SyncComponent.BLOCKS)
+            # Handle blockchain height synchronization
+            try:
+                our_height = len(self.blockchain.chain) if self.blockchain else 0
+                if peer_height > our_height:
+                    if not self.sync_states[SyncComponent.BLOCKS].is_syncing:
+                        self.logger.info(f"Chain height mismatch detected with {peer} "
+                                       f"(our height: {our_height}, peer height: {peer_height})")
+                        await self.start_sync(peer, SyncComponent.BLOCKS)
+            except Exception as height_error:
+                self.logger.error(f"Error handling blockchain height sync: {str(height_error)}")
 
         except Exception as e:
             self.logger.error(f"Error handling sync status from {peer}: {str(e)}")
-
-    node.handle_sync_status = types.MethodType(handle_sync_status, node)
-
-    # Update message handling to include sync status
-    original_handle_message = node.handle_message
-
-    async def enhanced_handle_message(self, message: Message, sender: str):
-        """Enhanced message handler with sync support."""
-        if message.type == MessageType.SYNC_STATUS.value:
-            await self.handle_sync_status(sender, message.payload)
-        else:
-            await original_handle_message(message, sender)
-
-    node.handle_message = types.MethodType(enhanced_handle_message, node)
-
-    # Define sync operation method
+            self.logger.debug(traceback.format_exc())
     async def start_sync(self, peer: str, component: SyncComponent):
-        """Start synchronization of a component with a peer."""
+        """Start synchronization process for a specific component."""
         try:
+            if self.sync_states[component].is_syncing:
+                self.logger.debug(f"Sync already in progress for {component}")
+                return
+
             self.sync_states[component].is_syncing = True
-            self.logger.info(f"Starting sync of {component.value} with {peer}")
-
-            if component == SyncComponent.BLOCKS:
-                await self.sync_blocks_with_peer(peer)
-            elif component == SyncComponent.WALLETS:
-                await self.sync_wallets_with_peer(peer)
-            elif component == SyncComponent.TRANSACTIONS:
-                await self.sync_transactions_with_peer(peer)
-            elif component == SyncComponent.MEMPOOL:
-                await self.sync_mempool_with_peer(peer)
-
-            # Update sync status
             self.sync_states[component].last_sync = time.time()
-            self.sync_states[component].is_syncing = False
-            self.sync_states[component].current_hash = await self.calculate_state_hash(component)
 
-            self.logger.info(f"Completed sync of {component.value} with {peer}")
+            try:
+                if component == SyncComponent.WALLETS:
+                    await self.sync_wallets(peer)
+                elif component == SyncComponent.TRANSACTIONS:
+                    await self.sync_transactions(peer)
+                elif component == SyncComponent.BLOCKS:
+                    await self.sync_blocks(peer)
+                elif component == SyncComponent.MEMPOOL:
+                    await self.sync_mempool(peer)
+
+                self.logger.info(f"Successfully completed sync of {component} with {peer}")
+                
+            except Exception as sync_error:
+                self.logger.error(f"Error during sync of {component} with {peer}: {str(sync_error)}")
+                self.logger.debug(traceback.format_exc())
+                
+            finally:
+                self.sync_states[component].is_syncing = False
+                self.sync_states[component].last_sync = time.time()
 
         except Exception as e:
-            self.logger.error(f"Error during sync of {component.value} with {peer}: {str(e)}")
+            self.logger.error(f"Error in start_sync for {component} with {peer}: {str(e)}")
+            self.logger.debug(traceback.format_exc())
             self.sync_states[component].is_syncing = False
 
-    node.start_sync = types.MethodType(start_sync, node)
+    async def enhanced_handle_message(self, message: Message, sender: str):
+        """Enhanced message handler with sync and detailed logging."""
+        try:
+            # First handle sync-related messages
+            if message.type == MessageType.SYNC_STATUS.value:
+                self.logger.info(f"[SYNC] Received sync status from {sender}")
+                await self.handle_sync_status(sender, message.payload)
+                return
 
-    # Update periodic tasks for sync monitoring
-    original_periodic_tasks = node.periodic_tasks
+            # Handle different message types with detailed logging
+            if message.type == MessageType.TRANSACTION.value:
+                self.logger.info(f"[TRANSACTION] ===============================")
+                self.logger.info(f"[TRANSACTION] Received from {sender}")
+                if isinstance(message.payload, dict):
+                    tx_type = message.payload.get('type', 'regular')
+                    amount = message.payload.get('amount', 'unknown')
+                    self.logger.info(f"[TRANSACTION] Type: {tx_type}")
+                    self.logger.info(f"[TRANSACTION] Amount: {amount}")
+                await self.handle_transaction(message.payload, sender)
+                self.logger.info(f"[TRANSACTION] ===============================")
+
+            elif message.type == MessageType.BLOCK.value:
+                self.logger.info(f"[BLOCK] ===============================")
+                self.logger.info(f"[BLOCK] Received from {sender}")
+                await self.handle_block(message.payload, sender)
+                self.logger.info(f"[BLOCK] ===============================")
+
+            elif message.type == MessageType.GET_TRANSACTIONS.value:
+                self.logger.info(f"[SYNC] Transactions requested by {sender}")
+                await self.handle_get_transactions(sender)
+
+            elif message.type == MessageType.GET_WALLETS.value:
+                self.logger.info(f"[SYNC] Wallets requested by {sender}")
+                await self.handle_get_wallets(sender)
+
+            elif message.type == MessageType.GET_MEMPOOL.value:
+                self.logger.info(f"[SYNC] Mempool requested by {sender}")
+                await self.handle_get_mempool(sender)
+
+            # Handle other message types through original handler
+            else:
+                await self.handle_message(message, sender)
+
+            # After handling any message, check if sync is needed
+            await self.check_sync_needs(sender)
+
+        except Exception as e:
+            self.logger.error(f"Error in enhanced message handler: {str(e)}")
+            self.logger.error(traceback.format_exc())
 
     async def enhanced_periodic_tasks(self):
         await original_periodic_tasks(self)
@@ -4746,9 +9894,368 @@ def enhance_p2p_node(node: P2PNode) -> 'P2PNode':
                         await self.start_sync(peer, component)
             await asyncio.sleep(60)
 
-    node.periodic_tasks = types.MethodType(enhanced_periodic_tasks, node)
 
-    return node
+        return node
+    
+    
+    async def broadcast_new_wallet(self, wallet_data: dict):
+        """Broadcast new wallet creation to the network."""
+        try:
+            self.logger.info(f"[BROADCAST] Broadcasting new wallet: {wallet_data['address']}")
+            message = Message(
+                type=MessageType.NEW_WALLET.value,
+                payload={
+                    'wallet': wallet_data,
+                    'timestamp': time.time()
+                }
+            )
+            await self.broadcast(message)
+            self.logger.debug(f"Successfully broadcast new wallet to {len(self.connected_peers)} peers")
+        except Exception as e:
+            self.logger.error(f"Error broadcasting new wallet: {str(e)}")
+
+    async def broadcast_new_transaction(self, transaction: Transaction):
+        """Broadcast new transaction to the network with enhanced logging."""
+        try:
+            self.logger.info(f"[BROADCAST] Broadcasting new transaction: {transaction.tx_hash}")
+            message = Message(
+                type=MessageType.TRANSACTION.value,
+                payload=transaction.to_dict()
+            )
+            
+            # Track transaction propagation
+            self.transaction_tracker.add_transaction(transaction.tx_hash, self.node_id)
+            
+            # Broadcast to peers
+            peers = list(self.connected_peers)
+            self.logger.info(f"Broadcasting transaction to {len(peers)} peers")
+            
+            broadcast_tasks = []
+            for peer in peers:
+                task = asyncio.create_task(self.send_transaction_to_peer(peer, message))
+                broadcast_tasks.append(task)
+            
+            # Wait for all broadcasts with timeout
+            results = await asyncio.gather(*broadcast_tasks, return_exceptions=True)
+            successful = sum(1 for r in results if r and not isinstance(r, Exception))
+            self.logger.info(f"Transaction broadcast completed: {successful}/{len(peers)} successful")
+            
+        except Exception as e:
+            self.logger.error(f"Error broadcasting transaction: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
+    async def send_transaction_to_peer(self, peer: str, message: Message) -> bool:
+        """Send transaction to a specific peer with timeout and error handling."""
+        try:
+            await asyncio.wait_for(self.send_message(peer, message), timeout=5.0)
+            self.logger.debug(f"Successfully sent transaction to peer {peer}")
+            return True
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Timeout sending transaction to peer {peer}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error sending transaction to peer {peer}: {str(e)}")
+            return False
+
+    async def broadcast_new_block(self, block: QuantumBlock):
+        """Broadcast new mined block to the network with comprehensive logging."""
+        try:
+            self.logger.info(f"\n[BLOCK] ========= Broadcasting New Block =========")
+            self.logger.info(f"[BLOCK] Block Hash: {block.hash}")
+            self.logger.info(f"[BLOCK] Block Height: {len(self.blockchain.chain)}")
+            self.logger.info(f"[BLOCK] Transaction Count: {len(block.transactions)}")
+            
+            message = Message(
+                type=MessageType.BLOCK.value,
+                payload=block.to_dict()
+            )
+
+            # Track active peers before broadcast
+            active_peers = list(self.connected_peers)
+            self.logger.info(f"[BLOCK] Broadcasting to {len(active_peers)} peers")
+
+            # Broadcast to all peers concurrently
+            broadcast_tasks = []
+            for peer in active_peers:
+                task = asyncio.create_task(self.send_block_to_peer(peer, message))
+                broadcast_tasks.append(task)
+
+            # Wait for all broadcasts with timeout
+            results = await asyncio.gather(*broadcast_tasks, return_exceptions=True)
+            successful = sum(1 for r in results if r and not isinstance(r, Exception))
+
+            self.logger.info(f"[BLOCK] Broadcast completed:")
+            self.logger.info(f"[BLOCK] - Successful: {successful}")
+            self.logger.info(f"[BLOCK] - Failed: {len(active_peers) - successful}")
+            self.logger.info(f"[BLOCK] =======================================\n")
+
+        except Exception as e:
+            self.logger.error(f"Error broadcasting block: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
+    async def handle_new_wallet(self, data: dict):
+        """Handle incoming new wallet with verification."""
+        try:
+            self.logger.info(f"[WALLET] Processing new wallet: {data['wallet']['address']}")
+            
+            # Verify wallet data
+            wallet_data = data['wallet']
+            if not self.verify_wallet_data(wallet_data):
+                self.logger.warning(f"Invalid wallet data received")
+                return
+
+            # Add to blockchain
+            await self.blockchain.add_wallet(wallet_data)
+            
+            # Update sync state
+            self.sync_states[SyncComponent.WALLETS].current_hash = (
+                await self.calculate_state_hash(SyncComponent.WALLETS)
+            )
+            
+            self.logger.info(f"Successfully processed new wallet")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling new wallet: {str(e)}")
+
+    async def handle_new_transaction(self, transaction_data: dict, sender: str):
+        """Handle incoming new transaction with enhanced validation and propagation tracking."""
+        try:
+            self.logger.info(f"\n[TRANSACTION] ======= New Transaction =======")
+            self.logger.info(f"[TRANSACTION] Received from: {sender}")
+            
+            # Create transaction object
+            transaction = Transaction.from_dict(transaction_data)
+            self.logger.info(f"[TRANSACTION] Hash: {transaction.tx_hash}")
+            self.logger.info(f"[TRANSACTION] Amount: {transaction.amount}")
+
+            # Check if we've seen this transaction before
+            if transaction.tx_hash in self.transaction_tracker.transactions:
+                self.logger.debug(f"Transaction {transaction.tx_hash} already known")
+                return
+
+            # Validate transaction
+            if not await self.blockchain.validate_transaction(transaction):
+                self.logger.warning(f"Invalid transaction received: {transaction.tx_hash}")
+                return
+
+            # Add to blockchain
+            await self.blockchain.add_transaction(transaction)
+            
+            # Update tracking and sync state
+            self.transaction_tracker.add_transaction(transaction.tx_hash, sender)
+            self.sync_states[SyncComponent.TRANSACTIONS].current_hash = (
+                await self.calculate_state_hash(SyncComponent.TRANSACTIONS)
+            )
+
+            # Propagate to other peers
+            await self.propagate_transaction(transaction, sender)
+            
+            self.logger.info(f"[TRANSACTION] Successfully processed and propagated")
+            self.logger.info(f"[TRANSACTION] =============================\n")
+
+        except Exception as e:
+            self.logger.error(f"Error handling transaction: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
+    async def handle_new_block(self, block_data: dict, sender: str):
+        """Handle incoming new block with comprehensive validation and chain updates."""
+        try:
+            self.logger.info(f"\n[BLOCK] ========= Processing New Block =========")
+            self.logger.info(f"[BLOCK] Received from: {sender}")
+            
+            # Deserialize and validate block
+            new_block = QuantumBlock.from_dict(block_data)
+            self.logger.info(f"[BLOCK] Hash: {new_block.hash}")
+            self.logger.info(f"[BLOCK] Transactions: {len(new_block.transactions)}")
+            
+            if not self.blockchain.validate_block(new_block):
+                self.logger.warning(f"Invalid block received: {new_block.hash}")
+                return
+
+            # Check if we already have this block
+            if self.blockchain.has_block(new_block.hash):
+                self.logger.debug(f"Block {new_block.hash} already in chain")
+                return
+
+            # Process block's transactions
+            for tx in new_block.transactions:
+                if not tx.tx_hash in self.transaction_tracker.transactions:
+                    self.transaction_tracker.add_transaction(tx.tx_hash, sender)
+
+            # Add block to chain
+            success = await self.blockchain.add_block(new_block)
+            if success:
+                self.logger.info(f"[BLOCK] Successfully added to chain")
+                
+                # Update sync state
+                self.sync_states[SyncComponent.BLOCKS].current_hash = (
+                    await self.calculate_state_hash(SyncComponent.BLOCKS)
+                )
+                
+                # Propagate to other peers
+                await self.propagate_block(new_block, sender)
+                
+                # Remove included transactions from mempool
+                await self.update_mempool_after_block(new_block)
+            else:
+                self.logger.warning(f"[BLOCK] Failed to add block to chain")
+
+            self.logger.info(f"[BLOCK] ====================================\n")
+
+        except Exception as e:
+            self.logger.error(f"Error handling new block: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
+    async def propagate_transaction(self, transaction: Transaction, exclude_peer: str = None):
+        """Propagate transaction to peers with retry logic."""
+        peers = [p for p in self.connected_peers if p != exclude_peer]
+        if not peers:
+            return
+
+        message = Message(
+            type=MessageType.TRANSACTION.value,
+            payload=transaction.to_dict()
+        )
+
+        for peer in peers:
+            try:
+                await asyncio.wait_for(
+                    self.send_message(peer, message),
+                    timeout=5.0
+                )
+                self.transaction_tracker.update_transaction(
+                    transaction.tx_hash,
+                    peer,
+                    "propagated"
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to propagate transaction to {peer}: {str(e)}")
+
+    async def update_mempool_after_block(self, block: QuantumBlock):
+        """Update mempool after new block is added."""
+        try:
+            # Remove transactions included in the block
+            tx_hashes = {tx.tx_hash for tx in block.transactions}
+            self.blockchain.mempool = [
+                tx for tx in self.blockchain.mempool 
+                if tx.tx_hash not in tx_hashes
+            ]
+            
+            # Update mempool sync state
+            self.sync_states[SyncComponent.MEMPOOL].current_hash = (
+                await self.calculate_state_hash(SyncComponent.MEMPOOL)
+            )
+            
+            self.logger.info(f"Updated mempool after block {block.hash}")
+            self.logger.info(f"Remaining mempool size: {len(self.blockchain.mempool)}")
+            
+        except Exception as e:
+            self.logger.error(f"Error updating mempool: {str(e)}")
+
+    def verify_wallet_data(self, wallet_data: dict) -> bool:
+        """Verify wallet data structure and format."""
+        required_fields = {'address', 'public_key'}
+        return all(field in wallet_data for field in required_fields)
+    def _start_sync_queue_processor(self):
+        """Start the sync queue processor"""
+        try:
+            asyncio.create_task(self.process_sync_queue())
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.error(f"Failed to start sync queue processor: {str(e)}")
+            else:
+                print(f"Failed to start sync queue processor: {str(e)}")
+            raise
+
+    async def process_sync_queue(self):
+        """Process items in the sync queue"""
+        while True:
+            try:
+                if not hasattr(self, 'sync_queue'):
+                    self.logger.error("Sync queue not initialized")
+                    await asyncio.sleep(1)
+                    continue
+
+                # Get sync operation from queue
+                sync_op = await self.sync_queue.get()
+                
+                # Process the sync operation
+                await self.perform_sync_operation(sync_op)
+                
+                # Mark task as done
+                self.sync_queue.task_done()
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                if hasattr(self, 'logger'):
+                    self.logger.error(f"Error processing sync queue: {str(e)}")
+                else:
+                    print(f"Error processing sync queue: {str(e)}")
+                await asyncio.sleep(1)
+
+    async def perform_sync_operation(self, sync_op: dict):
+        """Perform a specific sync operation"""
+        try:
+            component = sync_op['component']
+            peer = sync_op['peer']
+            
+            if component not in self.sync_states:
+                self.logger.error(f"Invalid sync component: {component}")
+                return
+                
+            # Check if we're already syncing this component
+            if self.sync_states[component].is_syncing:
+                self.logger.debug(f"Sync already in progress for {component}")
+                return
+            
+            # Set sync state
+            self.sync_states[component].is_syncing = True
+            self.sync_states[component].last_sync = time.time()
+            
+            try:
+                # Perform appropriate sync based on component
+                if component == SyncComponent.BLOCKS:
+                    await self.sync_blocks(peer)
+                elif component == SyncComponent.WALLETS:
+                    await self.sync_wallets(peer)
+                elif component == SyncComponent.TRANSACTIONS:
+                    await self.sync_transactions(peer)
+                elif component == SyncComponent.MEMPOOL:
+                    await self.sync_mempool(peer)
+                
+                # Update sync state
+                self.sync_states[component].is_syncing = False
+                self.sync_states[component].last_sync = time.time()
+                self.sync_states[component].sync_progress = 100
+                
+            except Exception as sync_error:
+                self.logger.error(f"Error syncing {component} with {peer}: {str(sync_error)}")
+                # Update retry count and reset sync state
+                self.sync_retry_count[component] = self.sync_retry_count.get(component, 0) + 1
+                self.sync_states[component].is_syncing = False
+                
+        except Exception as e:
+            self.logger.error(f"Error performing sync operation: {str(e)}")
+
+    async def queue_sync_operation(self, peer: str, component: str):
+        """Queue a sync operation"""
+        try:
+            if not hasattr(self, 'sync_queue'):
+                self.sync_queue = asyncio.Queue()
+                
+            if not self.sync_states[component].is_syncing:
+                await self.sync_queue.put({
+                    'peer': peer,
+                    'component': component,
+                    'timestamp': time.time()
+                })
+                self.logger.debug(f"Queued sync operation for {component} with {peer}")
+                
+        except Exception as e:
+            self.logger.error(f"Error queuing sync operation: {str(e)}")
+
+
 async def create_enhanced_p2p_node(ip_address: str, p2p_port: int) -> P2PNode:
     """
     Create and initialize an enhanced P2P node.
@@ -4772,6 +10279,2193 @@ async def create_enhanced_p2p_node(ip_address: str, p2p_port: int) -> P2PNode:
         logger.error(f"Error initializing enhanced P2P node: {str(e)}")
         logger.error(traceback.format_exc())
         return None
+
+class QuantumNetworkMonitor:
+    """Monitors quantum network health and performance"""
+    
+    def __init__(self, node: P2PNode):
+        self.node = node
+        self.logger = logging.getLogger("QuantumMonitor")
+        self.metrics = defaultdict(list)
+        self.alert_thresholds = {
+            'fidelity': 0.7,
+            'latency': 1.0,  # seconds
+            'consensus_time': 5.0,  # seconds
+            'peer_stability': 0.2     # Maximum acceptable peer count standard deviation ratio
+
+        }
+        self.monitoring_interval = 10  # seconds
+    async def analyze_trends(self):
+        """Analyze quantum network trends and identify patterns."""
+        try:
+            # Get recent metrics, minimum window size of 10
+            if len(self.metrics['network_state']) < 10:
+                return
+
+            recent_metrics = self.metrics['network_state'][-10:]
+            
+            # Analyze each component's trends
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                try:
+                    # Get fidelity trends
+                    fidelities = [m['fidelities'].get(component, 0) for m in recent_metrics]
+                    latencies = [m['latencies'].get(component, 0) for m in recent_metrics]
+                    
+                    # Calculate trend statistics
+                    avg_fidelity = sum(fidelities) / len(fidelities)
+                    avg_latency = sum(latencies) / len(latencies)
+                    fidelity_trend = self.calculate_trend(fidelities)
+                    latency_trend = self.calculate_trend(latencies)
+                    
+                    self.logger.debug(f"[QUANTUM] {component} trend analysis:")
+                    self.logger.debug(f"  - Average fidelity: {avg_fidelity:.3f}")
+                    self.logger.debug(f"  - Average latency: {avg_latency:.3f}s")
+                    self.logger.debug(f"  - Fidelity trend: {fidelity_trend:+.3f}")
+                    self.logger.debug(f"  - Latency trend: {latency_trend:+.3f}")
+                    
+                    # Check for concerning trends
+                    if fidelity_trend < -0.05:  # Declining fidelity
+                        await self.handle_declining_fidelity(component, avg_fidelity, fidelity_trend)
+                    elif latency_trend > 0.1:  # Increasing latency
+                        await self.handle_increasing_latency(component, avg_latency, latency_trend)
+                        
+                except Exception as comp_error:
+                    self.logger.error(f"Error analyzing {component} trends: {str(comp_error)}")
+                    continue
+
+            # Analyze peer stability
+            peer_counts = [m.get('peers', 0) for m in recent_metrics]
+            if self.is_peer_count_unstable(peer_counts):
+                await self.handle_unstable_peer_count(peer_counts)
+
+        except Exception as e:
+            self.logger.error(f"Error analyzing trends: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
+    def calculate_trend(self, values: List[float]) -> float:
+        """Calculate linear trend in a series of values."""
+        try:
+            if not values:
+                return 0.0
+                
+            n = len(values)
+            if n < 2:
+                return 0.0
+                
+            x = list(range(n))
+            x_mean = sum(x) / n
+            y_mean = sum(values) / n
+            
+            # Calculate slope using least squares
+            numerator = sum((x[i] - x_mean) * (values[i] - y_mean) for i in range(n))
+            denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
+            
+            return numerator / denominator if denominator != 0 else 0.0
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating trend: {str(e)}")
+            return 0.0
+
+    def is_peer_count_unstable(self, peer_counts: List[int]) -> bool:
+        """Check if peer count is unstable."""
+        if not peer_counts or len(peer_counts) < 2:
+            return False
+            
+        # Calculate standard deviation
+        mean = sum(peer_counts) / len(peer_counts)
+        variance = sum((x - mean) ** 2 for x in peer_counts) / len(peer_counts)
+        std_dev = variance ** 0.5
+        
+        # Consider unstable if std dev is more than 20% of mean
+        return std_dev > (mean * 0.2)
+
+    async def handle_declining_fidelity(self, component: str, avg_fidelity: float, trend: float):
+        """Handle declining fidelity trend."""
+        self.logger.warning(f"[QUANTUM] Declining fidelity detected for {component}")
+        self.logger.warning(f"  - Average fidelity: {avg_fidelity:.3f}")
+        self.logger.warning(f"  - Trend: {trend:+.3f}")
+        
+        # Try to recover quantum state
+        try:
+            # Find highest fidelity peer
+            best_peer = await self.node.find_highest_fidelity_peer(component)
+            if best_peer:
+                self.logger.info(f"[QUANTUM] Attempting recovery using peer {best_peer}")
+                await self.node.request_quantum_resync(best_peer, [component])
+        except Exception as e:
+            self.logger.error(f"Error in fidelity recovery: {str(e)}")
+
+    async def handle_increasing_latency(self, component: str, avg_latency: float, trend: float):
+        """Handle increasing latency trend."""
+        self.logger.warning(f"[QUANTUM] Increasing latency detected for {component}")
+        self.logger.warning(f"  - Average latency: {avg_latency:.3f}s")
+        self.logger.warning(f"  - Trend: {trend:+.3f}")
+        
+        # Alert network about latency issues
+        alert_message = Message(
+            type=MessageType.QUANTUM_ALERT.value,
+            payload={
+                'type': 'high_latency',
+                'component': component,
+                'latency': avg_latency,
+                'trend': trend,
+                'timestamp': time.time()
+            }
+        )
+        await self.node.broadcast(alert_message)
+
+    async def handle_unstable_peer_count(self, peer_counts: List[int]):
+        """Handle unstable peer count."""
+        self.logger.warning("[QUANTUM] Unstable peer count detected")
+        self.logger.warning(f"  - Recent counts: {peer_counts}")
+        
+        try:
+            # Request peer list refresh from stable peers
+            stable_peers = await self.node.get_stable_peers()
+            if stable_peers:
+                self.logger.info(f"[QUANTUM] Refreshing peer list using {len(stable_peers)} stable peers")
+                for peer in stable_peers:
+                    await self.node.request_peer_list(peer)
+        except Exception as e:
+            self.logger.error(f"Error handling unstable peer count: {str(e)}")
+
+    async def generate_status_report(self) -> dict:
+        """Generate comprehensive quantum network status report."""
+        try:
+            report = {
+                'timestamp': time.time(),
+                'network_size': len(self.node.quantum_sync.entangled_peers),
+                'components': {},
+                'alerts': [],
+                'recommendations': []
+            }
+
+            # Analyze each component
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                metrics = await self.get_component_metrics(component)
+                report['components'][component] = metrics
+
+                # Generate recommendations based on metrics
+                if metrics['fidelity'] < self.alert_thresholds['fidelity']:
+                    report['recommendations'].append({
+                        'component': component,
+                        'action': 'increase_sync_frequency',
+                        'reason': f"Low fidelity: {metrics['fidelity']:.3f}"
+                    })
+
+                if metrics['latency'] > self.alert_thresholds['latency']:
+                    report['recommendations'].append({
+                        'component': component,
+                        'action': 'optimize_network',
+                        'reason': f"High latency: {metrics['latency']:.3f}s"
+                    })
+
+            return report
+
+        except Exception as e:
+            self.logger.error(f"Error generating status report: {str(e)}")
+            return {'error': str(e)}
+    async def start_monitoring(self):
+        """Start continuous network monitoring"""
+        try:
+            while True:
+                await self.collect_metrics()
+                await self.analyze_metrics()
+                await self.generate_report()
+                await asyncio.sleep(self.monitoring_interval)
+        except Exception as e:
+            self.logger.error(f"Error in monitoring loop: {str(e)}")
+
+    async def collect_metrics(self):
+        """Collect quantum network metrics"""
+        try:
+            metrics = {
+                'timestamp': time.time(),
+                'peers': len(self.node.quantum_sync.entangled_peers),
+                'fidelities': {},
+                'latencies': {},
+                'consensus_times': {}
+            }
+
+            # Measure fidelity for each component
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                start_time = time.time()
+                fidelity = await self.node.quantum_sync.measure_sync_state(component)
+                metrics['fidelities'][component] = fidelity
+                metrics['latencies'][component] = time.time() - start_time
+
+            self.metrics['network_state'].append(metrics)
+            
+            # Trim old metrics
+            if len(self.metrics['network_state']) > 1000:
+                self.metrics['network_state'] = self.metrics['network_state'][-1000:]
+
+        except Exception as e:
+            self.logger.error(f"Error collecting metrics: {str(e)}")
+
+    async def analyze_metrics(self):
+        """Analyze collected metrics and detect issues"""
+        try:
+            latest_metrics = self.metrics['network_state'][-1]
+
+            # Check fidelity thresholds
+            for component, fidelity in latest_metrics['fidelities'].items():
+                if fidelity < self.alert_thresholds['fidelity']:
+                    await self.handle_low_fidelity_alert(component, fidelity)
+
+            # Check latency thresholds
+            for component, latency in latest_metrics['latencies'].items():
+                if latency > self.alert_thresholds['latency']:
+                    await self.handle_high_latency_alert(component, latency)
+
+            # Analyze trends
+            if len(self.metrics['network_state']) >= 10:
+                await self.analyze_trends()
+
+        except Exception as e:
+            self.logger.error(f"Error analyzing metrics: {str(e)}")
+
+    async def handle_low_fidelity_alert(self, component: str, fidelity: float):
+        """Handle low fidelity alert"""
+        self.logger.warning(
+            f"Low quantum fidelity detected for {component}: {fidelity:.3f}"
+        )
+        
+        # Trigger recovery
+        await self.node.quantum_sync.trigger_recovery(component)
+        
+        # Notify network
+        alert_message = Message(
+            type=MessageType.QUANTUM_ALERT.value,
+            payload={
+                'type': 'low_fidelity',
+                'component': component,
+                'value': fidelity,
+                'timestamp': time.time()
+            }
+        )
+        await self.node.broadcast(alert_message)
+
+    async def generate_report(self):
+        """Generate quantum network health report"""
+        try:
+            report = {
+                'timestamp': time.time(),
+                'network_size': len(self.node.quantum_sync.entangled_peers),
+                'components': {},
+                'alerts': [],
+                'recommendations': []
+            }
+
+            # Analyze each component
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                metrics = await self.get_component_metrics(component)
+                report['components'][component] = metrics
+
+                # Generate recommendations based on metrics
+                if metrics['fidelity'] < 0.9:
+                    report['recommendations'].append({
+                        'component': component,
+                        'action': 'increase_sync_frequency',
+                        'reason': f"Low fidelity: {metrics['fidelity']:.3f}"
+                    })
+
+            # Save report
+            report_file = f"quantum_network_report_{int(time.time())}.json"
+            with open(report_file, 'w') as f:
+                json.dump(report, f, indent=2)
+
+            self.logger.info(f"Generated quantum network report: {report_file}")
+            return report
+
+        except Exception as e:
+            self.logger.error(f"Error generating report: {str(e)}")
+            return None
+
+    async def get_component_metrics(self, component: str) -> dict:
+        """Get detailed metrics for a component with enhanced error handling."""
+        try:
+            metrics = {
+                'fidelity': 0.0,
+                'avg_latency': 0.0,
+                'fidelity_trend': 0.0,
+                'sync_failures': 0
+            }
+            
+            try:
+                fidelity = await self.node.quantum_sync.measure_sync_state(component)
+                metrics['fidelity'] = fidelity if fidelity is not None else 0.0
+            except Exception as e:
+                self.logger.error(f"Error measuring fidelity for {component}: {str(e)}")
+                
+            # Get recent metrics with error handling
+            try:
+                recent_metrics = [
+                    m for m in self.metrics['network_state'][-100:]
+                    if component in m['fidelities']
+                ]
+                
+                if recent_metrics:
+                    # Calculate average latency
+                    latencies = [m['latencies'].get(component, 0) for m in recent_metrics]
+                    metrics['avg_latency'] = sum(latencies) / len(latencies) if latencies else 0
+                    
+                    # Calculate fidelity trend safely
+                    fidelities = [m['fidelities'].get(component, 0) for m in recent_metrics]
+                    if len(fidelities) > 1:
+                        try:
+                            coeffs = np.polyfit(range(len(fidelities)), fidelities, 1)
+                            metrics['fidelity_trend'] = coeffs[0]
+                        except Exception as e:
+                            self.logger.error(f"Error calculating fidelity trend: {str(e)}")
+                            metrics['fidelity_trend'] = 0.0
+                    
+                    # Count sync failures
+                    metrics['sync_failures'] = sum(
+                        1 for m in recent_metrics
+                        if m['fidelities'].get(component, 0) < self.node.quantum_sync.decoherence_threshold
+                    )
+                    
+            except Exception as e:
+                self.logger.error(f"Error processing recent metrics: {str(e)}")
+
+            return metrics
+
+        except Exception as e:
+            self.logger.error(f"Error getting component metrics: {str(e)}")
+            # Return default metrics instead of raising
+            return {
+                'fidelity': 0.0,
+                'avg_latency': 0.0,
+                'fidelity_trend': 0.0,
+                'sync_failures': 0
+            }
+class QuantumP2PTestHandler:
+    """Handler for P2P test messages with quantum features"""
+    
+    def __init__(self, node: 'P2PNode'):
+        self.node = node
+        self.logger = logging.getLogger("QuantumP2PTest")
+
+    async def handle_test_message(self, websocket: websockets.WebSocketServerProtocol, data: dict) -> dict:
+        """Handle P2P test messages with comprehensive error handling"""
+        try:
+            action = data.get('action')
+            if not action:
+                return {"status": "error", "message": "No action specified"}
+
+            handler_map = {
+                'test_consensus': self.handle_consensus_test,
+                'test_peer_connection': self.handle_peer_connection_test,
+                'test_quantum_entanglement': self.handle_quantum_entanglement_test,
+                'test_transaction_propagation': self.handle_transaction_propagation_test,
+                'get_network_metrics': self.handle_network_metrics
+            }
+
+            handler = handler_map.get(action)
+            if not handler:
+                return {"status": "error", "message": f"Unknown action: {action}"}
+
+            return await handler(data)
+
+        except Exception as e:
+            self.logger.error(f"Error handling test message: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return {"status": "error", "message": str(e)}
+
+    async def handle_consensus_test(self, data: dict) -> dict:
+        """Handle DAGKnight consensus test"""
+        try:
+            params = data.get('params', {})
+            
+            # Initialize DAGKnight consensus
+            self.node.dagknight = DAGKnightConsensus(
+                min_k_cluster=params.get('min_k_cluster', 10),
+                max_latency_ms=params.get('max_latency_ms', 1000)
+            )
+
+            # Create test blocks
+            blocks = []
+            for i in range(5):
+                block = QuantumBlock(
+                    index=len(self.node.blockchain.chain),
+                    previous_hash=self.node.blockchain.get_latest_block().hash,
+                    timestamp=int(time.time() * 1000),
+                    transactions=[],
+                    quantum_enabled=True
+                )
+                blocks.append(block)
+
+            # Track consensus metrics
+            metrics = {
+                'consensus_time': 0,
+                'final_agreement': 0,
+                'quantum_verification': False,
+                'k_clusters': [],
+                'latencies': [],
+                'confirmation_scores': []
+            }
+
+            start_time = time.time()
+
+            # Process blocks through consensus
+            for block in blocks:
+                network_latency = random.uniform(100, 500)  # Simulated network latency
+                confirmable = await self.node.dagknight.add_block(block, network_latency)
+                
+                if confirmable:
+                    metrics['confirmation_scores'].append(1.0)
+                    metrics['k_clusters'].append(
+                        len(self.node.dagknight.k_clusters)
+                    )
+                    metrics['latencies'].append(network_latency)
+
+            metrics['consensus_time'] = time.time() - start_time
+            metrics['final_agreement'] = len([s for s in metrics['confirmation_scores'] if s >= 0.8]) / len(blocks)
+            metrics['quantum_verification'] = all(block.quantum_enabled for block in blocks)
+
+            return {
+                "status": "success",
+                "consensus_metrics": metrics,
+                "block_hash": blocks[-1].hash if blocks else None
+            }
+
+        except Exception as e:
+            self.logger.error(f"Consensus test failed: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return {"status": "error", "message": str(e)}
+
+    async def handle_peer_connection_test(self, data: dict) -> dict:
+        """Handle peer connection test"""
+        try:
+            peer_address = data.get('peer_address')
+            if not peer_address:
+                return {"status": "error", "message": "No peer address provided"}
+
+            # Attempt connection
+            start_time = time.time()
+            connected = await self.node.connect_to_peer(
+                KademliaNode(
+                    id=self.node.generate_node_id(),
+                    ip=peer_address.split(':')[0],
+                    port=int(peer_address.split(':')[1])
+                )
+            )
+            connection_time = time.time() - start_time
+
+            if connected:
+                return {
+                    "status": "success",
+                    "connection_status": "connected",
+                    "message_exchange": True,
+                    "peer_info": {
+                        "latency": connection_time,
+                        "quantum_ready": peer_address in self.node.quantum_sync.entangled_peers
+                    }
+                }
+            else:
+                return {"status": "error", "message": "Connection failed"}
+
+        except Exception as e:
+            self.logger.error(f"Peer connection test failed: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    async def handle_quantum_entanglement_test(self, data: dict) -> dict:
+        """Handle quantum entanglement test"""
+        try:
+            peer_address = data.get('peer_address')
+            if not peer_address:
+                return {"status": "error", "message": "No peer address provided"}
+
+            # Establish quantum entanglement
+            success = await self.node.establish_quantum_entanglement(peer_address)
+            if not success:
+                return {"status": "error", "message": "Failed to establish quantum entanglement"}
+
+            # Measure fidelities
+            fidelities = {}
+            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                fidelity = await self.node.quantum_sync.measure_sync_state(component)
+                fidelities[component] = fidelity
+
+            return {
+                "status": "success",
+                "entanglement_status": "established",
+                "fidelities": fidelities,
+                "quantum_metrics": {
+                    "sync_quality": sum(fidelities.values()) / len(fidelities),
+                    "entanglement_time": time.time()
+                }
+            }
+
+        except Exception as e:
+            self.logger.error(f"Quantum entanglement test failed: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    async def handle_transaction_propagation_test(self, data: dict) -> dict:
+        """Handle transaction propagation test"""
+        try:
+            # Create test transaction
+            tx = Transaction(
+                sender=data.get('sender', 'test_sender'),
+                receiver=data.get('receiver', 'test_receiver'),
+                amount=Decimal(data.get('amount', '1.0')),
+                quantum_enabled=data.get('quantum_enabled', False)
+            )
+
+            start_time = time.time()
+            await self.node.broadcast_transaction(tx)
+            propagation_time = time.time() - start_time
+
+            # Calculate network coverage
+            reached_peers = len([p for p in self.node.connected_peers 
+                               if tx.tx_hash in self.node.transaction_tracker.transactions])
+            coverage = reached_peers / len(self.node.connected_peers) if self.node.connected_peers else 0
+
+            return {
+                "status": "success",
+                "tx_hash": tx.tx_hash,
+                "propagation_metrics": {
+                    "propagation_time": propagation_time,
+                    "network_coverage": coverage,
+                    "reached_peers": reached_peers
+                }
+            }
+
+        except Exception as e:
+            self.logger.error(f"Transaction propagation test failed: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    async def handle_network_metrics(self, data: dict) -> dict:
+        """Handle network metrics request"""
+        try:
+            return {
+                "status": "success",
+                "network_metrics": {
+                    "peer_metrics": {
+                        "total_peers": len(self.node.peers),
+                        "active_peers": len(self.node.connected_peers)
+                    },
+                    "quantum_metrics": {
+                        "average_fidelity": await self.calculate_average_fidelity(),
+                        "decoherence_events": self.get_decoherence_events()
+                    },
+                    "consensus_metrics": {
+                        "network_status": await self.get_consensus_status()
+                    },
+                    "transaction_metrics": {
+                        "confirmation_rate": self.calculate_confirmation_rate()
+                    }
+                }
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error getting network metrics: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    async def calculate_average_fidelity(self) -> float:
+        """Calculate average quantum fidelity across all components"""
+        fidelities = []
+        for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+            try:
+                fidelity = await self.node.quantum_sync.measure_sync_state(component)
+                fidelities.append(fidelity)
+            except Exception as e:
+                self.logger.error(f"Error measuring fidelity for {component}: {str(e)}")
+        
+        return sum(fidelities) / len(fidelities) if fidelities else 0.0
+
+    def get_decoherence_events(self) -> List[dict]:
+        """Get list of recent decoherence events"""
+        return [
+            {
+                "component": event["component"],
+                "timestamp": event["timestamp"],
+                "fidelity": event["fidelity"]
+            }
+            for event in self.node.quantum_monitor.decoherence_events[-10:]
+        ]
+
+    async def get_consensus_status(self) -> dict:
+        """Get current consensus status"""
+        if hasattr(self.node, 'dagknight'):
+            status = await self.node.dagknight.get_network_status()
+            return {
+                "consensus_level": status.get('final_agreement', 0),
+                "k_clusters": len(status.get('k_clusters', [])),
+                "average_latency": status.get('average_latency', 0)
+            }
+        return {"consensus_level": 0, "k_clusters": 0, "average_latency": 0}
+
+    def calculate_confirmation_rate(self) -> float:
+        """Calculate transaction confirmation rate"""
+        if not self.node.transaction_tracker.transactions:
+            return 1.0
+        
+        confirmed = sum(1 for tx in self.node.transaction_tracker.transactions.values()
+                       if tx.status == "confirmed")
+        return confirmed / len(self.node.transaction_tracker.transactions)
+class DAGKnightConsensus:
+    """Implementation of DAGKnight consensus protocol."""
+    
+    def __init__(self, min_k_cluster: int = 10, max_latency_ms: int = 1000):
+        self.min_k_cluster = min_k_cluster
+        self.max_latency_ms = max_latency_ms
+        self.block_dag = {}  # DAG structure: block_hash -> {parents: [], children: [], timestamp: float}
+        self.network_latencies = {}  # peer -> {timestamp: latency}
+        self.k_clusters = {}  # cluster_id -> {blocks: [], latency: float}
+        self.confirmed_blocks = set()
+        self.logger = logging.getLogger("DAGKnight")
+
+    async def add_block(self, block: QuantumBlock, network_latency: float) -> bool:
+        """Add a new block to the DAG with network latency information."""
+        try:
+            block_hash = block.hash
+            
+            # Add block to DAG
+            self.block_dag[block_hash] = {
+                'parents': block.parent_hashes,
+                'children': [],
+                'timestamp': block.timestamp,
+                'latency': network_latency
+            }
+            
+            # Update parent-child relationships
+            for parent_hash in block.parent_hashes:
+                if parent_hash in self.block_dag:
+                    self.block_dag[parent_hash]['children'].append(block_hash)
+            
+            # Update k-clusters
+            await self.update_k_clusters(block_hash)
+            
+            # Check if block can be confirmed
+            confirmable = await self.verify_block_confirmability(block_hash)
+            
+            if confirmable:
+                self.confirmed_blocks.add(block_hash)
+                self.logger.info(f"Block {block_hash[:8]} confirmed with latency {network_latency:.2f}ms")
+            
+            return confirmable
+            
+        except Exception as e:
+            self.logger.error(f"Error adding block: {str(e)}")
+            return False
+
+    async def update_k_clusters(self, new_block_hash: str):
+        """Update k-clusters after new block addition."""
+        try:
+            # Find all k-clusters containing the new block
+            current_blocks = {new_block_hash}
+            cluster_blocks = set()
+            
+            # Expand cluster by following parent and child links
+            while len(current_blocks) < self.min_k_cluster:
+                next_blocks = set()
+                
+                for block_hash in current_blocks:
+                    block_data = self.block_dag[block_hash]
+                    next_blocks.update(block_data['parents'])
+                    next_blocks.update(block_data['children'])
+                
+                if not next_blocks - cluster_blocks:
+                    break
+                    
+                cluster_blocks.update(current_blocks)
+                current_blocks = next_blocks - cluster_blocks
+            
+            # Calculate cluster latency
+            cluster_latency = max(
+                self.block_dag[block_hash]['latency']
+                for block_hash in cluster_blocks
+            )
+            
+            # Store new k-cluster
+            cluster_id = hashlib.sha256(
+                ''.join(sorted(cluster_blocks)).encode()
+            ).hexdigest()
+            
+            self.k_clusters[cluster_id] = {
+                'blocks': cluster_blocks,
+                'latency': cluster_latency
+            }
+            
+            # Remove old clusters
+            self._cleanup_old_clusters()
+            
+        except Exception as e:
+            self.logger.error(f"Error updating k-clusters: {str(e)}")
+
+    async def verify_block_confirmability(self, block_hash: str) -> bool:
+        """Verify if a block can be confirmed based on k-cluster analysis."""
+        try:
+            # Get all k-clusters containing this block
+            relevant_clusters = [
+                cluster for cluster in self.k_clusters.values()
+                if block_hash in cluster['blocks']
+            ]
+            
+            if not relevant_clusters:
+                return False
+                
+            # Sort clusters by latency
+            sorted_clusters = sorted(
+                relevant_clusters,
+                key=lambda c: c['latency']
+            )
+            
+            # Find median cluster latency
+            median_cluster = sorted_clusters[len(sorted_clusters) // 2]
+            median_latency = median_cluster['latency']
+            
+            # Check if block is confirmable
+            block_age = time.time() - self.block_dag[block_hash]['timestamp']
+            return block_age >= 2 * median_latency
+            
+        except Exception as e:
+            self.logger.error(f"Error verifying block confirmability: {str(e)}")
+            return False
+
+    def _cleanup_old_clusters(self):
+        """Remove outdated k-clusters."""
+        current_time = time.time()
+        old_clusters = [
+            cluster_id
+            for cluster_id, cluster in self.k_clusters.items()
+            if all(
+                current_time - self.block_dag[block_hash]['timestamp'] > self.max_latency_ms
+                for block_hash in cluster['blocks']
+            )
+        ]
+        
+        for cluster_id in old_clusters:
+            del self.k_clusters[cluster_id]
+
+    async def get_network_status(self) -> dict:
+        """Get current network status and metrics."""
+        try:
+            current_time = time.time()
+            
+            # Calculate network statistics
+            confirmed_count = len(self.confirmed_blocks)
+            pending_count = len(self.block_dag) - confirmed_count
+            
+            # Calculate average confirmation latency
+            recent_latencies = [
+                self.block_dag[block_hash]['latency']
+                for block_hash in self.confirmed_blocks
+                if current_time - self.block_dag[block_hash]['timestamp'] < 3600  # Last hour
+            ]
+            
+            avg_latency = sum(recent_latencies) / len(recent_latencies) if recent_latencies else 0
+            
+            # Get k-cluster statistics
+            cluster_stats = {
+                'count': len(self.k_clusters),
+                'avg_size': sum(len(c['blocks']) for c in self.k_clusters.values()) / len(self.k_clusters) if self.k_clusters else 0,
+                'avg_latency': sum(c['latency'] for c in self.k_clusters.values()) / len(self.k_clusters) if self.k_clusters else 0
+            }
+            
+            return {
+                'confirmed_blocks': confirmed_count,
+                'pending_blocks': pending_count,
+                'average_latency': avg_latency,
+                'k_clusters': cluster_stats,
+                'timestamp': current_time
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting network status: {str(e)}")
+            return {}
+
+    async def analyze_network_security(self) -> dict:
+        """Analyze network security based on k-cluster distribution."""
+        try:
+            if not self.k_clusters:
+                return {'status': 'insufficient_data'}
+                
+            # Calculate latency distribution
+            latencies = [cluster['latency'] for cluster in self.k_clusters.values()]
+            latencies.sort()
+            
+            # Find 50th percentile latency
+            median_latency = latencies[len(latencies) // 2]
+            
+            # Calculate network coverage at different latency thresholds
+            coverage_analysis = {}
+            for threshold in [0.5, 1.0, 1.5, 2.0]:
+                max_latency = median_latency * threshold
+                covered_blocks = set()
+                
+                for cluster in self.k_clusters.values():
+                    if cluster['latency'] <= max_latency:
+                        covered_blocks.update(cluster['blocks'])
+                
+                coverage_analysis[f'{threshold}x_median'] = {
+                    'latency': max_latency,
+                    'coverage': len(covered_blocks) / len(self.block_dag) if self.block_dag else 0
+                }
+            
+            return {
+                'status': 'secure' if coverage_analysis['1.0x_median']['coverage'] >= 0.5 else 'warning',
+                'median_latency': median_latency,
+                'coverage_analysis': coverage_analysis,
+                'timestamp': time.time()
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error analyzing network security: {str(e)}")
+            return {'status': 'error', 'error': str(e)}
+    def extend_p2p_node():
+        """Extend P2PNode with enhanced sync and consensus functionality"""
+        
+        # Add new attributes to P2PNode.__init__
+        original_init = P2PNode.__init__
+        
+        def enhanced_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            
+            # Initialize consensus handler
+            self.consensus_handler = ConsensusMessageHandler(self)
+            
+            # Update message handlers to include consensus
+            self.message_handlers = {
+                'mining': self.handle_mining_message,
+                'transaction': self.handle_transaction_message,
+                'wallet': self.handle_wallet_message,
+                'consensus': self.consensus_handler.handle_message
+            }
+            
+            # Initialize DAGKnight consensus
+            asyncio.create_task(self.initialize_dagknight())
+            
+        P2PNode.__init__ = enhanced_init
+
+        # Add DAGKnight initialization method
+        async def initialize_dagknight(self):
+            """Initialize DAGKnight consensus system."""
+            self.dagknight = DAGKnightConsensus(
+                min_k_cluster=10,
+                max_latency_ms=1000
+            )
+            self.logger.info("DAGKnight consensus system initialized")
+
+        P2PNode.initialize_dagknight = initialize_dagknight
+
+    # Add enhanced heartbeat methods
+    async def send_enhanced_heartbeat(self, peer: str):
+        """Send enhanced heartbeat with sync information"""
+        try:
+            heartbeat_data = {
+                'timestamp': time.time(),
+                'node_state': await self.get_node_state_data(),
+                'sync_status': await self.get_sync_status(),
+                'chain_height': len(self.blockchain.chain) if self.blockchain else 0,
+                'mempool_size': len(self.blockchain.mempool) if self.blockchain else 0
+            }
+
+            message = Message(
+                type=MessageType.HEARTBEAT.value,
+                payload={
+                    'heartbeat': heartbeat_data,
+                    'sync_request': await self.check_sync_needs()
+                }
+            )
+            await self.send_message(peer, message)
+            self.logger.debug(f"Enhanced heartbeat sent to {peer}")
+
+        except Exception as e:
+            self.logger.error(f"Error sending enhanced heartbeat to {peer}: {str(e)}")
+
+    P2PNode.send_enhanced_heartbeat = send_enhanced_heartbeat
+
+    async def handle_enhanced_heartbeat(self, peer: str, data: dict):
+        """Handle incoming enhanced heartbeat messages"""
+        try:
+            # Update peer's last seen time
+            self.last_heartbeat_data[peer] = data
+            
+            # Check for sync needs
+            if 'sync_request' in data:
+                await self.handle_sync_request(peer, data['sync_request'])
+            
+            # Compare states and trigger sync if needed
+            peer_state = data['node_state']
+            await self.check_and_trigger_sync(peer, peer_state)
+            
+        except Exception as e:
+            self.logger.error(f"Error handling enhanced heartbeat from {peer}: {str(e)}")
+
+    P2PNode.handle_enhanced_heartbeat = handle_enhanced_heartbeat
+
+    # Add sync management methods
+    async def check_sync_needs(self, peer: str):
+        """Check if sync is needed after handling a message."""
+        try:
+            current_state = {
+                SyncComponent.WALLETS: await self.calculate_state_hash(SyncComponent.WALLETS),
+                SyncComponent.TRANSACTIONS: await self.calculate_state_hash(SyncComponent.TRANSACTIONS),
+                SyncComponent.BLOCKS: await self.calculate_state_hash(SyncComponent.BLOCKS),
+                SyncComponent.MEMPOOL: await self.calculate_state_hash(SyncComponent.MEMPOOL)
+            }
+
+            # Request peer's state
+            response = await self.send_and_wait_for_response(
+                peer,
+                Message(
+                    type=MessageType.SYNC_STATUS.value,
+                    payload={"state_hashes": current_state}
+                )
+            )
+
+            if response and response.type == MessageType.SYNC_STATUS.value:
+                peer_state = response.payload.get("state_hashes", {})
+                
+                # Compare states and trigger sync if needed
+                for component in SyncComponent.__dict__.values():
+                    if isinstance(component, str):  # Filter actual components
+                        our_hash = current_state.get(component)
+                        peer_hash = peer_state.get(component)
+                        
+                        if peer_hash and peer_hash != our_hash:
+                            self.logger.info(f"[SYNC] State mismatch detected for {component}")
+                            self.logger.info(f"[SYNC] Our hash: {our_hash}")
+                            self.logger.info(f"[SYNC] Peer hash: {peer_hash}")
+                            await self.start_sync(peer, component)
+
+        except Exception as e:
+            self.logger.error(f"Error checking sync needs: {str(e)}")
+    
+    async def check_and_trigger_sync(self, peer: str, peer_state: dict):
+        """Compare states and trigger sync if needed"""
+        try:
+            # Check blockchain height
+            local_height = len(self.blockchain.chain) if self.blockchain else 0
+            peer_height = peer_state.get('blockchain_height', 0)
+            
+            if peer_height > local_height:
+                await self.queue_sync_operation(peer, 'blocks')
+            
+            # Check wallet differences
+            local_wallet_hash = await self.calculate_wallet_hash()
+            peer_wallet_hash = peer_state.get('wallet_hash')
+            
+            if peer_wallet_hash and peer_wallet_hash != local_wallet_hash:
+                await self.queue_sync_operation(peer, 'wallets')
+            
+            # Check transaction differences
+            local_tx_hash = await self.calculate_transaction_hash()
+            peer_tx_hash = peer_state.get('transaction_hash')
+            
+            if peer_tx_hash and peer_tx_hash != local_tx_hash:
+                await self.queue_sync_operation(peer, 'transactions')
+                
+        except Exception as e:
+            self.logger.error(f"Error checking and triggering sync with {peer}: {str(e)}")
+
+    P2PNode.check_and_trigger_sync = check_and_trigger_sync
+
+    async def queue_sync_operation(self, peer: str, component: str):
+        """Queue a sync operation"""
+        try:
+            if not self.sync_states[component].in_progress:
+                await self.sync_queue.put({
+                    'peer': peer,
+                    'component': component,
+                    'timestamp': time.time()
+                })
+                self.sync_states[component].in_progress = True
+                self.sync_states[component].last_attempt = time.time()
+                
+        except Exception as e:
+            self.logger.error(f"Error queuing sync operation: {str(e)}")
+
+    P2PNode.queue_sync_operation = queue_sync_operation
+
+    # Add main sync processing loop
+    async def process_sync_queue(self):
+        """Process queued sync operations"""
+        while True:
+            try:
+                if not self.sync_queue.empty():
+                    sync_op = await self.sync_queue.get()
+                    await self.perform_sync_operation(sync_op)
+                await asyncio.sleep(1)
+            except Exception as e:
+                self.logger.error(f"Error processing sync queue: {str(e)}")
+                await asyncio.sleep(5)
+
+    P2PNode.process_sync_queue = process_sync_queue
+
+    async def perform_sync_operation(self, sync_op: dict):
+        """Perform a specific sync operation"""
+        peer = sync_op['peer']
+        component = sync_op['component']
+        
+        try:
+            self.logger.info(f"Starting sync operation: {component} with peer {peer}")
+            
+            if component == 'blocks':
+                await self.sync_blocks_with_peer(peer)
+            elif component == 'wallets':
+                await self.sync_wallets_with_peer(peer)
+            elif component == 'transactions':
+                await self.sync_transactions_with_peer(peer)
+                
+            # Update sync state
+            self.sync_states[component].status = "synced"
+            self.sync_states[component].last_update = time.time()
+            self.sync_states[component].in_progress = False
+            self.sync_states[component].peers_synced.add(peer)
+            
+        except Exception as e:
+            self.logger.error(f"Error performing sync operation {component} with {peer}: {str(e)}")
+            self.sync_states[component].status = "failed"
+            self.sync_states[component].in_progress = False
+            self.sync_states[component].retry_count += 1
+
+    P2PNode.perform_sync_operation = perform_sync_operation
+
+    # Modify existing heartbeat method to use enhanced version
+    async def send_heartbeats(self):
+        """Send both regular and quantum heartbeats to all peers"""
+        while self.is_running:
+            try:
+                peers = list(self.connected_peers)
+                self.logger.info(f"\n[HEARTBEAT] {'='*20} Heartbeat Round {'='*20}")
+                self.logger.info(f"[HEARTBEAT] Sending heartbeats to {len(peers)} peers")
+
+                for peer in peers:
+                    try:
+                        # First send regular heartbeat
+                        await self.send_message(
+                            peer, 
+                            peer, 
+                            Message(
+                                type=MessageType.HEARTBEAT.value,
+                                payload={'timestamp': time.time()}
+                            )
+                        )
+                        self.logger.debug(f"[HEARTBEAT] Regular heartbeat sent to {peer}")
+
+                        # Then send quantum heartbeat if peer is quantum-entangled
+                        if (hasattr(self, 'quantum_sync') and 
+                            self.quantum_sync and 
+                            peer in self.quantum_sync.entangled_peers):
+                            
+                            self.logger.info(f"[QUANTUM] Sending quantum heartbeat to {peer}")
+                            # Get current quantum states and fidelities
+                            quantum_states = {}
+                            fidelities = {}
+                            
+                            for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                                try:
+                                    qubit = getattr(self.quantum_sync.register, component)
+                                    quantum_states[component] = qubit.value
+                                    fidelity = await self.quantum_sync.measure_sync_state(component)
+                                    fidelities[component] = fidelity
+                                    self.logger.debug(f"[QUANTUM] {component} fidelity: {fidelity:.3f}")
+                                except Exception as e:
+                                    self.logger.error(f"[QUANTUM] Error getting state for {component}: {str(e)}")
+                                    continue
+
+                            # Get Bell pair
+                            bell_pair = self.quantum_sync.bell_pairs.get(peer)
+                            if bell_pair:
+                                bell_pair_id = self.quantum_notifier._get_bell_pair_id(bell_pair)
+                                
+                                # Create quantum heartbeat
+                                heartbeat = QuantumHeartbeat(
+                                    node_id=self.node_id,
+                                    timestamp=time.time(),
+                                    quantum_states=quantum_states,
+                                    fidelities=fidelities,
+                                    bell_pair_id=bell_pair_id,
+                                    nonce=os.urandom(16).hex()
+                                )
+
+                                # Sign heartbeat
+                                message_str = (
+                                    f"{heartbeat.node_id}:{heartbeat.timestamp}:"
+                                    f"{heartbeat.bell_pair_id}:{heartbeat.nonce}"
+                                ).encode()
+                                
+                                signature = self.private_key.sign(
+                                    message_str,
+                                    padding.PSS(
+                                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                                        salt_length=padding.PSS.MAX_LENGTH
+                                    ),
+                                    hashes.SHA256()
+                                )
+                                heartbeat.signature = base64.b64encode(signature).decode()
+
+                                # Send quantum heartbeat
+                                await self.send_message(
+                                    peer,
+                                    Message(
+                                        type=MessageType.QUANTUM_HEARTBEAT.value,
+                                        payload=heartbeat.to_dict()
+                                    )
+                                )
+                                self.logger.info(f"[QUANTUM] ✓ Quantum heartbeat sent to {peer}")
+                                self.logger.debug(f"[QUANTUM] Current fidelities: {fidelities}")
+                                
+                                # Update tracking
+                                self.last_quantum_heartbeat[peer] = time.time()
+                            else:
+                                self.logger.warning(f"[QUANTUM] No Bell pair found for peer {peer}")
+
+                    except Exception as e:
+                        self.logger.error(f"Error sending heartbeats to {peer}: {str(e)}")
+                        await self.remove_peer(peer)
+
+                self.logger.info(f"[HEARTBEAT] {'='*50}\n")
+                await asyncio.sleep(self.heartbeat_interval)
+
+            except Exception as e:
+                self.logger.error(f"Error in heartbeat loop: {str(e)}")
+                await asyncio.sleep(self.heartbeat_interval)
+
+
+    P2PNode.send_heartbeats = send_heartbeats
+
+    # Start the sync processing when the node starts
+    original_start = P2PNode.start
+    async def handle_consensus_message(self, data: dict) -> dict:
+        """
+        Route consensus messages to the consensus handler
+        """
+        try:
+            self.logger.info(f"[CONSENSUS] Processing consensus message: {data}")
+            if not self.consensus_handler:
+                return {
+                    'status': 'error',
+                    'message': 'Consensus handler not initialized'
+                }
+
+            response = await self.consensus_handler.handle_message(data)
+            self.logger.debug(f"[CONSENSUS] Handler response: {response}")
+            return response
+            
+        except Exception as e:
+            self.logger.error(f"Error handling consensus message: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return {
+                'status': 'error',
+                'message': f'Internal error: {str(e)}'
+            }
+
+    P2PNode.handle_consensus_message = handle_consensus_message
+
+
+
+        # Enhanced start method without passing `self` to original_start
+    def enhance_p2p_node(node: P2PNode) -> P2PNode:
+        """Enhance P2P node with additional functionality"""
+        try:
+            # Add systemd journal handling
+            node.systemd_journal = systemd.journal.JournalHandler()
+            node.logger.addHandler(node.systemd_journal)
+            
+            # Add NetworkOptimizer
+            node.network_optimizer = NetworkOptimizer(node)
+            
+            # Add other enhancements from the original implementation...
+            
+            # Add sync states
+            node.sync_states = {
+                SyncComponent.WALLETS: SyncStatus(),
+                SyncComponent.TRANSACTIONS: SyncStatus(),
+                SyncComponent.BLOCKS: SyncStatus(),
+                SyncComponent.MEMPOOL: SyncStatus()
+            }
+            
+            # Add monitoring tasks list
+            node._monitoring_tasks = []
+            
+            return node
+
+        except Exception as e:
+            logger.error(f"Error enhancing P2P node: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+
+
+class QuantumConsensusManager:
+    """Manages quantum consensus across the P2P network"""
+    
+    def __init__(self, node: P2PNode, consensus_threshold: float = 0.8):
+        self.node = node
+        self.consensus_threshold = consensus_threshold
+        self.logger = logging.getLogger("QuantumConsensus")
+        self.consensus_states: Dict[str, Dict[str, float]] = {}
+        self.last_consensus_check = defaultdict(float)
+        self.consensus_cache: Dict[str, bool] = {}
+        self.consensus_lock = asyncio.Lock()
+
+    async def check_quantum_consensus(self, component: str) -> bool:
+        """Check quantum consensus for a specific component"""
+        try:
+            async with self.consensus_lock:
+                current_time = time.time()
+                
+                # Use cached result if recent
+                if component in self.consensus_cache:
+                    if current_time - self.last_consensus_check[component] < 5:
+                        return self.consensus_cache[component]
+
+                consensus_achieved = False
+                peer_states = {}
+                
+                # Collect quantum states from all entangled peers
+                for peer_id in self.node.quantum_sync.entangled_peers:
+                    try:
+                        fidelity = await self.node.quantum_sync.measure_sync_state(
+                            component, peer_id
+                        )
+                        peer_states[peer_id] = fidelity
+                    except Exception as e:
+                        self.logger.error(f"Error measuring state for {peer_id}: {str(e)}")
+
+                if peer_states:
+                    # Calculate consensus metrics
+                    avg_fidelity = np.mean(list(peer_states.values()))
+                    min_fidelity = min(peer_states.values())
+                    max_fidelity = max(peer_states.values())
+                    
+                    # Log consensus metrics
+                    self.logger.info(f"Consensus metrics for {component}:")
+                    self.logger.info(f"  Average fidelity: {avg_fidelity:.3f}")
+                    self.logger.info(f"  Min fidelity: {min_fidelity:.3f}")
+                    self.logger.info(f"  Max fidelity: {max_fidelity:.3f}")
+                    
+                    # Check if consensus is achieved
+                    consensus_achieved = (
+                        avg_fidelity >= self.consensus_threshold and
+                        min_fidelity >= self.consensus_threshold * 0.9
+                    )
+
+                # Update cache
+                self.consensus_cache[component] = consensus_achieved
+                self.last_consensus_check[component] = current_time
+
+                return consensus_achieved
+
+        except Exception as e:
+            self.logger.error(f"Error checking quantum consensus: {str(e)}")
+            return False
+            
+class ConsensusMessageHandler:
+    """Handler for DAGKnight consensus messages"""
+    
+    def __init__(self, node: 'P2PNode'):  # Note the quotes around P2PNode for forward reference
+        self.node = node
+        self.logger = logging.getLogger("ConsensusHandler")
+
+
+    async def handle_message(self, message: dict) -> dict:
+        """Handle incoming consensus messages"""
+        try:
+            action = message.get('action')
+            if not action:
+                return {'status': 'error', 'message': 'No action specified'}
+            if action == 'initialize':
+                return await self.handle_initialize(message)
+
+            handler = getattr(self, f'handle_{action}', None)
+            if not handler:
+                return {'status': 'error', 'message': f'Unknown action: {action}'}
+
+            return await handler(message)
+
+        except Exception as e:
+            self.logger.error(f"Error handling consensus message: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_initialize(self, message: dict) -> dict:
+        """Initialize DAGKnight consensus"""
+        try:
+            params = message.get('params', {})
+            min_k_cluster = params.get('min_k_cluster', 10)
+            max_latency_ms = params.get('max_latency_ms', 1000)
+            quantum_threshold = params.get('quantum_threshold', 0.85)
+
+            # Initialize DAGKnight consensus
+            self.node.dagknight = DAGKnightConsensus(
+                min_k_cluster=min_k_cluster,
+                max_latency_ms=max_latency_ms
+            )
+
+            self.logger.info(f"DAGKnight consensus initialized with parameters:")
+            self.logger.info(f"  Min K-Cluster: {min_k_cluster}")
+            self.logger.info(f"  Max Latency: {max_latency_ms}ms")
+            self.logger.info(f"  Quantum Threshold: {quantum_threshold}")
+
+            return {
+                'status': 'success',
+                'message': 'DAGKnight consensus initialized'
+            }
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize consensus: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_submit_block(self, message: dict) -> dict:
+        """Submit block to DAGKnight consensus"""
+        try:
+            block_data = message.get('block')
+            if not block_data:
+                return {'status': 'error', 'message': 'No block data provided'}
+
+            # Create QuantumBlock from data
+            block = QuantumBlock.from_dict(block_data)
+            
+            # Calculate network latency (simulated or real)
+            network_latency = time.time() - block.timestamp
+
+            # Add block to DAGKnight
+            confirmation_status = await self.node.dagknight.add_block(
+                block, 
+                network_latency
+            )
+
+            return {
+                'status': 'success',
+                'confirmation_status': confirmation_status,
+                'block_hash': block.hash
+            }
+
+        except Exception as e:
+            self.logger.error(f"Failed to submit block: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_get_block_metrics(self, message: dict) -> dict:
+        """Get metrics for a specific block"""
+        try:
+            block_hash = message.get('block_hash')
+            if not block_hash:
+                return {'status': 'error', 'message': 'No block hash provided'}
+
+            # Get block metrics from DAGKnight
+            metrics = await self.node.dagknight.get_network_status()
+            
+            # Get specific block metrics
+            block_metrics = {
+                'confirmation_score': metrics.get('confirmation_scores', {}).get(block_hash, 0),
+                'latency': metrics.get('latencies', {}).get(block_hash, 0),
+                'security_level': self._determine_security_level(
+                    metrics.get('confirmation_scores', {}).get(block_hash, 0)
+                ),
+                'k_clusters': len(metrics.get('k_clusters', [])),
+                'quantum_metrics': {
+                    'quantum_strength': metrics.get('quantum_strengths', {}).get(block_hash, 0),
+                    'entanglement_count': metrics.get('entanglement_counts', {}).get(block_hash, 0)
+                }
+            }
+
+            return {
+                'status': 'success',
+                'metrics': block_metrics
+            }
+
+        except Exception as e:
+            self.logger.error(f"Failed to get block metrics: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    def _determine_security_level(self, confirmation_score: float) -> str:
+        """Determine security level based on confirmation score"""
+        if confirmation_score >= 0.95:
+            return "MAXIMUM"
+        elif confirmation_score >= 0.85:
+            return "VERY_HIGH"
+        elif confirmation_score >= 0.75:
+            return "HIGH"
+        elif confirmation_score >= 0.60:
+            return "MEDIUM"
+        else:
+            return "LOW"
+import systemd.daemon
+import systemd.journal
+import os
+import pwd
+import grp
+from typing import Optional
+import socket
+import fcntl
+import struct
+
+class LinuxQuantumNode(P2PNode):
+    """Enhanced P2PNode with Linux-specific optimizations"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.systemd_journal = systemd.journal.JournalHandler()
+        self.logger.addHandler(self.systemd_journal)
+        self.socket_path = "/var/run/quantum_dagknight.sock"
+        self.pid_file = "/var/run/quantum_dagknight.pid"
+        
+    async def start(self):
+        """Enhanced start method with Linux system integration"""
+        # Drop privileges if running as root
+        if os.geteuid() == 0:
+            self._drop_privileges('quantum_node')
+            
+        # Create Unix domain socket for local communication
+        self.unix_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.unix_socket.bind(self.socket_path)
+        self.unix_socket.listen(5)
+        
+        # Set up process monitoring
+        self._write_pid_file()
+        
+        # Enable systemd socket activation
+        self._setup_systemd_socket()
+        
+        # Set real-time scheduling priority
+        self._set_rt_priority()
+        
+        # Start main node operations
+        await super().start()
+        
+        # Notify systemd about successful startup
+        systemd.daemon.notify('READY=1')
+        
+    def _drop_privileges(self, user: str):
+        """Drop root privileges and switch to specified user"""
+        try:
+            pwd_entry = pwd.getpwnam(user)
+            os.setgid(pwd_entry.pw_gid)
+            os.setuid(pwd_entry.pw_uid)
+            os.umask(0o022)
+            self.logger.info(f"Dropped privileges to user {user}")
+        except Exception as e:
+            self.logger.error(f"Failed to drop privileges: {str(e)}")
+            raise
+            
+    def _setup_systemd_socket(self):
+        """Set up systemd socket activation"""
+        try:
+            # Check if running under systemd
+            if os.environ.get('LISTEN_PID', None):
+                pid = int(os.environ['LISTEN_PID'])
+                if pid == os.getpid():
+                    fds = int(os.environ['LISTEN_FDS'])
+                    self.systemd_socket = socket.fromfd(3, socket.AF_INET, socket.SOCK_STREAM)
+                    self.logger.info("Using systemd socket activation")
+        except Exception as e:
+            self.logger.error(f"Failed to setup systemd socket: {str(e)}")
+            
+    def _set_rt_priority(self):
+        """Set real-time scheduling priority for quantum operations"""
+        try:
+            # Import here to avoid issues on non-Linux systems
+            import sched_setscheduler
+            
+            # Set SCHED_FIFO with priority 50
+            sched_setscheduler.sched_setscheduler(
+                0, 
+                sched_setscheduler.SCHED_FIFO, 
+                sched_setscheduler.sched_param(50)
+            )
+            self.logger.info("Set real-time scheduling priority")
+        except Exception as e:
+            self.logger.warning(f"Failed to set RT priority: {str(e)}")
+            
+    def _write_pid_file(self):
+        """Write PID file for process management"""
+        try:
+            with open(self.pid_file, 'w') as f:
+                f.write(str(os.getpid()))
+        except Exception as e:
+            self.logger.error(f"Failed to write PID file: {str(e)}")
+            
+    async def get_network_interface_info(self, interface: str) -> dict:
+        """Get network interface information using Linux SIOCGIFADDR"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            info = fcntl.ioctl(
+                sock.fileno(),
+                0x8915,  # SIOCGIFADDR
+                struct.pack('256s', interface[:15].encode('utf-8'))
+            )
+            ip = socket.inet_ntoa(info[20:24])
+            return {'interface': interface, 'ip': ip}
+        except Exception as e:
+            self.logger.error(f"Failed to get interface info: {str(e)}")
+            return {}
+            
+    def cleanup(self):
+        """Enhanced cleanup with Linux-specific resources"""
+        try:
+            # Remove socket and PID files
+            if os.path.exists(self.socket_path):
+                os.unlink(self.socket_path)
+            if os.path.exists(self.pid_file):
+                os.unlink(self.pid_file)
+                
+            # Close systemd journal handler
+            self.systemd_journal.close()
+            
+            # Release RT scheduling
+            try:
+                import sched_setscheduler
+                sched_setscheduler.sched_setscheduler(
+                    0, 
+                    sched_setscheduler.SCHED_OTHER, 
+                    sched_setscheduler.sched_param(0)
+                )
+            except:
+                pass
+                
+            super().cleanup()
+        except Exception as e:
+            self.logger.error(f"Error during Linux cleanup: {str(e)}")
+import socket
+import fcntl
+import struct
+import os
+import subprocess
+from typing import Dict, Optional
+
+class NetworkOptimizer:
+    def __init__(self, p2p_node: 'P2PNode'):
+        self.node = p2p_node
+        self.logger = logging.getLogger("NetworkOptimizer")
+        self.metrics = {}
+        self.last_optimization = None
+        self.socket_opts = {
+            socket.TCP_NODELAY: 1,
+            socket.SO_KEEPALIVE: 1,
+            socket.SO_REUSEADDR: 1,
+            socket.SO_RCVBUF: 16777216,  # 16MB buffer
+            socket.SO_SNDBUF: 16777216
+        }
+
+    async def optimize_network(self):
+        """Apply network optimizations for quantum P2P communication."""
+        try:
+            # Configure network interface
+            interface = self.get_default_interface()
+            if interface:
+                self.set_interface_optimizations(interface)
+                self.logger.info(f"Applied interface optimizations to {interface}")
+
+            # Set socket options
+            if hasattr(self.node, 'server') and self.node.server:
+                self.apply_socket_options(self.node.server)
+                self.logger.info("Applied socket optimizations")
+
+            # Configure TCP BBR if available
+            self.enable_bbr()
+            
+            # Set process network priority
+            self.set_process_priority()
+            
+            self.last_optimization = time.time()
+            self.logger.info("Network optimizations applied successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error applying network optimizations: {str(e)}")
+
+            
+    def get_default_interface(self) -> Optional[str]:
+        """Get the default network interface."""
+        try:
+            route = subprocess.check_output(['ip', 'route', 'show', 'default']).decode()
+            interface = route.split()[4]
+            return interface
+        except Exception:
+            return None
+            
+    def set_interface_optimizations(self, interface: str):
+        """Set network interface optimizations."""
+        try:
+            # Set interface txqueuelen
+            os.system(f'ip link set {interface} txqueuelen 10000')
+            
+            # Enable jumbo frames if supported
+            os.system(f'ip link set {interface} mtu 9000')
+            
+            # Disable TCP segmentation offload for better latency
+            os.system(f'ethtool -K {interface} tso off gso off')
+            
+        except Exception as e:
+            self.logger.error(f"Error setting interface optimizations: {str(e)}")
+            
+    def apply_socket_options(self, sock: socket.socket):
+        """Apply optimized socket options."""
+        for opt, value in self.socket_opts.items():
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, opt, value)
+            except Exception as e:
+                self.logger.error(f"Error setting socket option {opt}: {str(e)}")
+                
+    def enable_bbr(self):
+        """Enable TCP BBR congestion control if available."""
+        try:
+            with open('/proc/sys/net/ipv4/tcp_congestion_control', 'w') as f:
+                f.write('bbr')
+        except Exception:
+            pass
+            
+    def set_process_priority(self):
+        """Set process scheduling priority."""
+        try:
+            os.nice(-10)  # Set high priority
+        except Exception:
+            pass
+
+    async def monitor_network_metrics(self):
+        """Monitor network performance metrics."""
+        while True:
+            try:
+                metrics = self.collect_network_metrics()
+                await self.analyze_metrics(metrics)
+                await asyncio.sleep(60)
+            except Exception as e:
+                self.logger.error(f"Error monitoring network metrics: {str(e)}")
+                await asyncio.sleep(60)
+                
+    def collect_network_metrics(self) -> Dict:
+        """Collect network performance metrics."""
+        metrics = {
+            'latency': {},
+            'bandwidth': {},
+            'packet_loss': {},
+            'connection_stats': {}
+        }
+        
+        # Add metrics collection logic here
+        return metrics
+    async def analyze_metrics(self, metrics: Dict):
+        """Analyze collected network metrics and trigger optimizations if needed."""
+        try:
+            # Calculate performance indicators
+            latency_score = self.calculate_latency_score(metrics['latency'])
+            bandwidth_score = self.calculate_bandwidth_score(metrics['bandwidth'])
+            packet_loss_score = self.calculate_packet_loss_score(metrics['packet_loss'])
+            
+            # Overall network health score
+            health_score = (latency_score + bandwidth_score + packet_loss_score) / 3
+            
+            self.logger.info(f"Network Health Score: {health_score:.2f}")
+            self.logger.debug(f"Latency Score: {latency_score:.2f}")
+            self.logger.debug(f"Bandwidth Score: {bandwidth_score:.2f}")
+            self.logger.debug(f"Packet Loss Score: {packet_loss_score:.2f}")
+            
+            # Trigger optimizations if score is too low
+            if health_score < 0.7:
+                self.logger.warning(f"Poor network health detected (score: {health_score:.2f})")
+                await self.optimize_network()
+                
+            return health_score
+            
+        except Exception as e:
+            self.logger.error(f"Error analyzing metrics: {str(e)}")
+            return 0.0
+
+    def calculate_latency_score(self, latency_metrics: Dict) -> float:
+        """Calculate score based on latency metrics (0-1)."""
+        if not latency_metrics:
+            return 1.0
+        avg_latency = sum(latency_metrics.values()) / len(latency_metrics)
+        return max(0, min(1, 1 - (avg_latency / 1000)))  # Normalize to 0-1
+
+    def calculate_bandwidth_score(self, bandwidth_metrics: Dict) -> float:
+        """Calculate score based on bandwidth metrics (0-1)."""
+        if not bandwidth_metrics:
+            return 1.0
+        avg_bandwidth = sum(bandwidth_metrics.values()) / len(bandwidth_metrics)
+        return max(0, min(1, avg_bandwidth / 1000000))  # Normalize to 0-1 (1Gbps = 1.0)
+
+    def calculate_packet_loss_score(self, packet_loss_metrics: Dict) -> float:
+        """Calculate score based on packet loss metrics (0-1)."""
+        if not packet_loss_metrics:
+            return 1.0
+        avg_loss = sum(packet_loss_metrics.values()) / len(packet_loss_metrics)
+        return max(0, min(1, 1 - (avg_loss * 10)))  # Normalize to 0-1 (10% loss = 0.0)
+
+    async def cleanup(self):
+        """Cleanup network optimizations."""
+        try:
+            # Reset interface settings if necessary
+            interface = self.get_default_interface()
+            if interface:
+                os.system(f'ip link set {interface} txqueuelen 1000')  # Reset to default
+                os.system(f'ip link set {interface} mtu 1500')  # Reset to default MTU
+            
+            # Reset process priority
+            os.nice(0)  # Reset to default priority
+            
+            self.logger.info("Network optimizations cleaned up")
+            
+        except Exception as e:
+            self.logger.error(f"Error cleaning up network optimizations: {str(e)}")
+
+    def get_default_interface(self) -> Optional[str]:
+        """Get the default network interface."""
+        try:
+            route = subprocess.check_output(['ip', 'route', 'show', 'default']).decode()
+            interface = route.split()[4]
+            return interface
+        except Exception:
+            return None
+
+
+class SystemdJournalHandler:
+    def __init__(self):
+        self.journal_handler = journal.JournalHandler()
+        self.journal_handler.setFormatter(
+            logging.Formatter('%(levelname)s: %(message)s')
+        )
+        
+    def setup_logging(self, logger_name='quantumdagknight'):
+        # Get the root logger
+        logger = logging.getLogger(logger_name)
+        
+        # Remove existing handlers
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+            
+        # Add systemd journal handler
+        logger.addHandler(self.journal_handler)
+        
+        # Set logging level
+        logger.setLevel(logging.INFO)
+        
+        return logger
+        
+    def log_startup(self, logger):
+        logger.info("QuantumDAGKnight node starting up")
+        
+    def log_shutdown(self, logger):
+        logger.info("QuantumDAGKnight node shutting down")
+
+class LinuxQuantumNode(P2PNode):
+    """Enhanced P2P Node with Linux-specific optimizations"""
+    
+    def __init__(self, blockchain=None, host='localhost', port=8000, security_level=10):
+        """Initialize LinuxQuantumNode with required components"""
+        try:
+            # Initialize parent P2PNode first
+            super().__init__(blockchain=blockchain, host=host, port=port, security_level=security_level)
+            
+            # Initialize sync queue
+            self.sync_queue = asyncio.Queue()
+            self.logger.info("Sync queue initialized")
+            
+            # Add systemd journal handler
+            self.systemd_journal = systemd.journal.JournalHandler()
+            self.logger.addHandler(self.systemd_journal)
+            self.logger.info("Systemd journal handler initialized")
+            
+            # Initialize NetworkOptimizer
+            self.network_optimizer = NetworkOptimizer(self)
+            self.logger.info("Network optimizer initialized")
+            
+            # Initialize sync states for components
+            self.sync_states = {
+                SyncComponent.WALLETS: SyncStatus(),
+                SyncComponent.TRANSACTIONS: SyncStatus(),
+                SyncComponent.BLOCKS: SyncStatus(),
+                SyncComponent.MEMPOOL: SyncStatus()
+            }
+            self.logger.info("Sync states initialized")
+            
+            # Socket and PID file paths
+            self.socket_path = "/var/run/quantum_dagknight.sock"
+            self.pid_file = "/var/run/quantum_dagknight.pid"
+            
+            # Initialize other required attributes
+            self.pending_sync_operations = {}
+            self.sync_locks = {}
+            self.sync_retry_count = {}
+            
+            # Start sync queue processing
+            self._start_sync_queue_processor()
+            
+            self.logger.info("LinuxQuantumNode initialization completed")
+            
+        except Exception as e:
+            self.logger.error(f"Error initializing LinuxQuantumNode: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            raise
+
+
+        
+    async def initialize(self):
+        """Initialize node with Linux-specific optimizations"""
+        try:
+            self.logger.info("\n=== Initializing QuantumDAGKnight Node ===")
+            
+            # Initialize base components
+            await super().initialize()
+            
+            # Apply network optimizations
+            self.logger.info("Applying network optimizations...")
+            await self.network_optimizer.optimize_network()
+            
+            # Initialize quantum components with optimized network
+            self.logger.info("Initializing quantum components...")
+            await self.initialize_quantum_components()
+            
+            # Start monitoring tasks
+            self.start_monitoring_tasks()
+            
+            self.logger.info("=== Node Initialization Complete ===\n")
+            
+        except Exception as e:
+            self.logger.error(f"Node initialization failed: {str(e)}")
+            raise
+            
+    def start_monitoring_tasks(self):
+        """Start monitoring tasks for node health and performance"""
+        self.monitoring_tasks = [
+            asyncio.create_task(self.network_optimizer.monitor_network_metrics()),
+            asyncio.create_task(self.monitor_quantum_state()),
+            asyncio.create_task(self.monitor_system_resources()),
+            asyncio.create_task(self.periodic_optimization_check())
+        ]
+        
+        for task in self.monitoring_tasks:
+            task.add_done_callback(self.handle_task_exception)
+            
+    def handle_task_exception(self, task):
+        """Handle exceptions from monitoring tasks"""
+        try:
+            exc = task.exception()
+            if exc:
+                self.logger.error(f"Task {task.get_name()} failed: {str(exc)}")
+                # Restart the failed task
+                if not task.cancelled():
+                    self.restart_monitoring_task(task)
+        except asyncio.CancelledError:
+            pass
+            
+    async def restart_monitoring_task(self, failed_task):
+        """Restart a failed monitoring task"""
+        task_name = failed_task.get_name()
+        try:
+            if task_name == 'network_metrics':
+                new_task = asyncio.create_task(
+                    self.network_optimizer.monitor_network_metrics()
+                )
+            elif task_name == 'quantum_state':
+                new_task = asyncio.create_task(self.monitor_quantum_state())
+            elif task_name == 'system_resources':
+                new_task = asyncio.create_task(self.monitor_system_resources())
+            elif task_name == 'optimization_check':
+                new_task = asyncio.create_task(self.periodic_optimization_check())
+                
+            new_task.set_name(task_name)
+            new_task.add_done_callback(self.handle_task_exception)
+            self.monitoring_tasks.append(new_task)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to restart task {task_name}: {str(e)}")
+            
+    async def monitor_quantum_state(self):
+        """Monitor quantum state with network optimization considerations"""
+        while True:
+            try:
+                # Check quantum state fidelity
+                fidelities = {}
+                for component in ['wallets', 'transactions', 'blocks', 'mempool']:
+                    fidelity = await self.quantum_sync.measure_sync_state(component)
+                    fidelities[component] = fidelity
+                    
+                    # If fidelity is low, check network performance
+                    if fidelity < self.quantum_sync.decoherence_threshold:
+                        await self.handle_low_fidelity(component, fidelity)
+                        
+                await asyncio.sleep(10)
+                
+            except Exception as e:
+                self.logger.error(f"Error in quantum state monitoring: {str(e)}")
+                await asyncio.sleep(10)
+                
+    async def handle_low_fidelity(self, component: str, fidelity: float):
+        """Handle low quantum fidelity by checking network conditions"""
+        try:
+            # Get network metrics
+            metrics = await self.network_optimizer.collect_network_metrics()
+            
+            # Check if network issues might be causing decoherence
+            if self.detect_network_issues(metrics):
+                self.logger.warning(
+                    f"Network issues detected affecting {component} fidelity: {fidelity}"
+                )
+                await self.optimize_for_component(component)
+            else:
+                # If network is fine, trigger quantum recovery
+                await self.recover_quantum_state(component)
+                
+        except Exception as e:
+            self.logger.error(f"Error handling low fidelity: {str(e)}")
+            
+    def detect_network_issues(self, metrics: Dict) -> bool:
+        """Detect network issues that might affect quantum state"""
+        try:
+            # Check various network metrics
+            high_latency = any(lat > 100 for lat in metrics['latency'].values())
+            high_packet_loss = any(loss > 0.1 for loss in metrics['packet_loss'].values())
+            low_bandwidth = any(bw < 1000000 for bw in metrics['bandwidth'].values())
+            
+            return high_latency or high_packet_loss or low_bandwidth
+            
+        except Exception as e:
+            self.logger.error(f"Error detecting network issues: {str(e)}")
+            return False
+            
+    async def optimize_for_component(self, component: str):
+        """Apply specific optimizations for a quantum component"""
+        try:
+            if component in ['blocks', 'transactions']:
+                # Optimize for higher throughput
+                await self.network_optimizer.optimize_for_throughput()
+            else:
+                # Optimize for lower latency
+                await self.network_optimizer.optimize_for_latency()
+                
+        except Exception as e:
+            self.logger.error(f"Error optimizing for {component}: {str(e)}")
+            
+    async def monitor_system_resources(self):
+        """Monitor system resources affecting node performance"""
+        while True:
+            try:
+                resources = self.get_system_resources()
+                if self.should_adjust_resources(resources):
+                    await self.adjust_resource_usage(resources)
+                await asyncio.sleep(30)
+                
+            except Exception as e:
+                self.logger.error(f"Error monitoring resources: {str(e)}")
+                await asyncio.sleep(30)
+                
+    async def periodic_optimization_check(self):
+        """Periodically check and adjust optimizations"""
+        while True:
+            try:
+                metrics = await self.network_optimizer.collect_network_metrics()
+                if self.needs_optimization(metrics):
+                    await self.network_optimizer.optimize_network()
+                await asyncio.sleep(300)  # Check every 5 minutes
+                
+            except Exception as e:
+                self.logger.error(f"Error in optimization check: {str(e)}")
+                await asyncio.sleep(300)
+
+    def needs_optimization(self, metrics: Dict) -> bool:
+        """Determine if network needs optimization based on metrics"""
+        try:
+            # Check if enough time has passed since last optimization
+            if self.last_optimization and time.time() - self.last_optimization < 3600:
+                return False
+                
+            # Check metric thresholds
+            high_latency = any(lat > 100 for lat in metrics['latency'].values())
+            high_packet_loss = any(loss > 0.1 for loss in metrics['packet_loss'].values())
+            
+            return high_latency or high_packet_loss
+            
+        except Exception as e:
+            self.logger.error(f"Error checking optimization needs: {str(e)}")
+            return False
+    def initialize_linux_monitoring(self):
+        """Initialize Linux-specific monitoring"""
+        try:
+            # Set up process monitoring
+            self._write_pid_file()
+            
+            # Monitor system resources
+            self.start_resource_monitoring()
+            
+            # Set up network interface monitoring
+            self.setup_network_monitoring()
+            
+        except Exception as e:
+            self.logger.error(f"Error initializing Linux monitoring: {str(e)}")
+            raise
+    
+    def _write_pid_file(self):
+        """Write PID file for process management"""
+        try:
+            pid = os.getpid()
+            os.makedirs(os.path.dirname(self.pid_file), exist_ok=True)
+            with open(self.pid_file, 'w') as f:
+                f.write(str(pid))
+            self.logger.info(f"PID file written: {self.pid_file}")
+        except Exception as e:
+            self.logger.error(f"Failed to write PID file: {str(e)}")
+            
+    def start_resource_monitoring(self):
+        """Start monitoring system resources"""
+        try:
+            import psutil
+            self.process = psutil.Process()
+            self.logger.info("Resource monitoring initialized")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize resource monitoring: {str(e)}")
+            
+    def setup_network_monitoring(self):
+        """Set up network interface monitoring"""
+        try:
+            default_interface = self.network_optimizer.get_default_interface()
+            if default_interface:
+                self.monitored_interface = default_interface
+                self.logger.info(f"Network monitoring set up for interface: {default_interface}")
+        except Exception as e:
+            self.logger.error(f"Failed to setup network monitoring: {str(e)}")
+    
+    async def start(self):
+        """Enhanced start method with Linux-specific features"""
+        try:
+            # Drop privileges if running as root
+            if os.geteuid() == 0:
+                self._drop_privileges('quantum_node')
+            
+            # Apply network optimizations before starting
+            await self.network_optimizer.optimize_network()
+            
+            # Create Unix domain socket
+            self.create_unix_socket()
+            
+            # Notify systemd about startup
+            systemd.daemon.notify('READY=1')
+            
+            # Start the node
+            await super().start()
+            
+        except Exception as e:
+            self.logger.error(f"Error starting LinuxQuantumNode: {str(e)}")
+            raise
+    
+    def _drop_privileges(self, user: str):
+        """Drop root privileges and switch to specified user"""
+        try:
+            pwd_entry = pwd.getpwnam(user)
+            os.setgid(pwd_entry.pw_gid)
+            os.setuid(pwd_entry.pw_uid)
+            os.umask(0o022)
+            self.logger.info(f"Dropped privileges to user {user}")
+        except Exception as e:
+            self.logger.error(f"Failed to drop privileges: {str(e)}")
+            raise
+            
+    def create_unix_socket(self):
+        """Create Unix domain socket for local communication"""
+        try:
+            if os.path.exists(self.socket_path):
+                os.unlink(self.socket_path)
+            self.unix_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.unix_socket.bind(self.socket_path)
+            self.unix_socket.listen(5)
+            self.logger.info(f"Unix domain socket created: {self.socket_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to create Unix socket: {str(e)}")
+            raise
+    def _start_sync_queue_processor(self):
+        """Start the sync queue processor"""
+        try:
+            asyncio.create_task(self.process_sync_queue())
+            self.logger.info("Sync queue processor started")
+        except Exception as e:
+            self.logger.error(f"Failed to start sync queue processor: {str(e)}")
+            raise
+
+    async def process_sync_queue(self):
+        """Process items in the sync queue"""
+        while True:
+            try:
+                # Get sync operation from queue
+                sync_op = await self.sync_queue.get()
+                
+                # Process the sync operation
+                await self.perform_sync_operation(sync_op)
+                
+                # Mark task as done
+                self.sync_queue.task_done()
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Error processing sync queue: {str(e)}")
+                await asyncio.sleep(1)  # Brief pause before next attempt
+
+    async def perform_sync_operation(self, sync_op: dict):
+        """Perform a specific sync operation"""
+        try:
+            component = sync_op['component']
+            peer = sync_op['peer']
+            
+            # Check if we're already syncing this component
+            if self.sync_states[component].is_syncing:
+                self.logger.debug(f"Sync already in progress for {component}")
+                return
+            
+            # Set sync state
+            self.sync_states[component].is_syncing = True
+            self.sync_states[component].last_sync = time.time()
+            
+            try:
+                # Perform appropriate sync based on component
+                if component == SyncComponent.BLOCKS:
+                    await self.sync_blocks_with_peer(peer)
+                elif component == SyncComponent.WALLETS:
+                    await self.sync_wallets_with_peer(peer)
+                elif component == SyncComponent.TRANSACTIONS:
+                    await self.sync_transactions_with_peer(peer)
+                elif component == SyncComponent.MEMPOOL:
+                    await self.sync_mempool_with_peer(peer)
+                
+                # Update sync state
+                self.sync_states[component].is_syncing = False
+                self.sync_states[component].last_sync = time.time()
+                self.sync_states[component].sync_progress = 100
+                
+            except Exception as sync_error:
+                self.logger.error(f"Error syncing {component} with {peer}: {str(sync_error)}")
+                # Update retry count
+                self.sync_retry_count[component] = self.sync_retry_count.get(component, 0) + 1
+                # Reset sync state
+                self.sync_states[component].is_syncing = False
+                
+        except Exception as e:
+            self.logger.error(f"Error performing sync operation: {str(e)}")
+
+    async def queue_sync_operation(self, peer: str, component: str):
+        """Queue a sync operation"""
+        try:
+            if not self.sync_states[component].is_syncing:
+                await self.sync_queue.put({
+                    'peer': peer,
+                    'component': component,
+                    'timestamp': time.time()
+                })
+                self.logger.debug(f"Queued sync operation for {component} with {peer}")
+                
+        except Exception as e:
+            self.logger.error(f"Error queuing sync operation: {str(e)}")
+
+    async def cleanup(self):
+        """Enhanced cleanup with sync queue handling"""
+        try:
+            # Wait for sync queue to be empty
+            if hasattr(self, 'sync_queue'):
+                try:
+                    await self.sync_queue.join()
+                except Exception as sync_error:
+                    self.logger.error(f"Error waiting for sync queue: {str(sync_error)}")
+            
+            # Perform standard cleanup
+            await super().cleanup()
+            
+        except Exception as e:
+            self.logger.error(f"Error during LinuxQuantumNode cleanup: {str(e)}")
+            raise
+
 
 # Usage example
 async def main():
