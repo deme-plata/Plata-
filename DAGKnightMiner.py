@@ -26,11 +26,24 @@ from DAGKnightGasSystem import EnhancedDAGKnightGasSystem,EnhancedGasTransaction
 
 logger = logging.getLogger(__name__)
 class DAGDiagnostics:
-    def __init__(self, dag_system):
-        self.dag = dag_system.dag
-        self.confirmation_cache = dag_system.confirmation_cache
-        self.quantum_scores = dag_system.quantum_scores
+    """Diagnostics system for analyzing DAG structure and health"""
+    def __init__(self, system):
+        """Initialize diagnostics with either miner or confirmation system instance"""
+        # Handle both miner and confirmation system initialization
+        if hasattr(system, 'dag'):
+            self.dag = system.dag
+            self.confirmation_system = getattr(system, 'confirmation_system', system)
+        else:
+            # Direct confirmation system initialization
+            self.dag = system.dag if hasattr(system, 'dag') else nx.DiGraph()
+            self.confirmation_system = system
+            
+        # Get quantum scores safely
+        self.quantum_scores = (getattr(self.confirmation_system, 'quantum_scores', {}) 
+                             if self.confirmation_system else {})
+        self.quantum_threshold = getattr(self.confirmation_system, 'quantum_threshold', 0.85)
         self.logger = logging.getLogger(__name__)
+
 
     def diagnose_dag_structure(self) -> dict:
         """Perform comprehensive DAG structure analysis"""
@@ -46,19 +59,66 @@ class DAGDiagnostics:
                 },
                 "connections": self._analyze_connections(),
                 "paths": self._analyze_paths(),
-                "confirmations": self._analyze_confirmations(),
+                "quantum_metrics": self._analyze_quantum_metrics(),
                 "issues": []
             }
 
-            # Identify potential issues
+            # Analyze confirmation metrics if available
+            if hasattr(self.confirmation_system, 'get_transaction_security'):
+                diagnostics["confirmations"] = {
+                    "total_confirmed": self._count_confirmed_transactions(),
+                    "unconfirmed": self._get_unconfirmed_transactions(),
+                    "confirmation_counts": {},
+                    "quantum_scores": self.quantum_scores
+                }
+
             self._check_for_issues(diagnostics)
-            
             return diagnostics
 
         except Exception as e:
             self.logger.error(f"Error in DAG diagnostics: {str(e)}")
             self.logger.error(traceback.format_exc())
-            return {"error": str(e)}
+            # Return minimal valid structure on error
+            return {
+                "structure": {
+                    "total_nodes": 0,
+                    "total_edges": 0,
+                    "is_dag": False,
+                    "blocks": 0,
+                    "transactions": 0,
+                    "isolated_nodes": []
+                },
+                "issues": [f"Diagnostics error: {str(e)}"]
+            }
+
+
+    def _analyze_quantum_metrics(self) -> dict:
+        """Analyze quantum-related metrics"""
+        try:
+            metrics = {
+                'average_score': 0.0,
+                'strong_quantum_nodes': 0,
+                'weak_quantum_nodes': 0,
+                'quantum_distribution': {}
+            }
+
+            scores = []
+            for node in self.dag.nodes():
+                score = self.quantum_scores.get(node, 0.0)
+                scores.append(score)
+                if score >= self.quantum_threshold:
+                    metrics['strong_quantum_nodes'] += 1
+                else:
+                    metrics['weak_quantum_nodes'] += 1
+
+            if scores:
+                metrics['average_score'] = sum(scores) / len(scores)
+
+            return metrics
+
+        except Exception as e:
+            self.logger.error(f"Error analyzing quantum metrics: {str(e)}")
+            return {}
 
     def _count_blocks(self) -> int:
         """Count nodes that have outgoing edges (likely blocks)"""
@@ -70,69 +130,55 @@ class DAGDiagnostics:
 
     def _analyze_connections(self) -> dict:
         """Analyze block-transaction connections"""
-        connections = {
-            "blocks_without_transactions": [],
-            "transactions_without_blocks": [],
-            "properly_connected_blocks": [],
-            "connection_counts": {}
+        return {
+            "blocks_without_transactions": [
+                node for node in self.dag.nodes()
+                if self.dag.out_degree(node) > 0 and self.dag.in_degree(node) == 0
+            ],
+            "transactions_without_blocks": [
+                node for node in self.dag.nodes()
+                if self.dag.out_degree(node) == 0 and self.dag.in_degree(node) == 0
+            ],
+            "properly_connected_blocks": [
+                node for node in self.dag.nodes()
+                if self.dag.out_degree(node) > 0 and self.dag.in_degree(node) > 0
+            ]
         }
-
-        for node in self.dag.nodes():
-            in_degree = self.dag.in_degree(node)
-            out_degree = self.dag.out_degree(node)
-            
-            if out_degree > 0:  # This is likely a block
-                tx_count = sum(1 for successor in self.dag.successors(node) 
-                             if self.dag.out_degree(successor) == 0)
-                if tx_count == 0:
-                    connections["blocks_without_transactions"].append(node)
-                else:
-                    connections["properly_connected_blocks"].append(node)
-                connections["connection_counts"][node] = tx_count
-
-            elif in_degree == 0:  # This is a transaction without confirming blocks
-                connections["transactions_without_blocks"].append(node)
-
-        return connections
 
     def _analyze_paths(self) -> dict:
-        """Analyze confirmation paths in the DAG"""
-        path_analysis = {
-            "max_path_length": 0,
-            "min_path_length": float('inf'),
-            "avg_path_length": 0,
-            "path_counts": {},
-            "broken_paths": []
-        }
+        """Analyze paths in the DAG"""
+        try:
+            paths = {
+                "max_path_length": 0,
+                "min_path_length": float('inf'),
+                "avg_path_length": 0,
+                "path_counts": {},
+                "broken_paths": []
+            }
 
-        transaction_nodes = [n for n in self.dag.nodes() if self.dag.out_degree(n) == 0]
-        block_nodes = [n for n in self.dag.nodes() if self.dag.out_degree(n) > 0]
+            if self.dag.number_of_nodes() > 1:
+                lengths = []
+                for node in self.dag.nodes():
+                    if self.dag.out_degree(node) == 0:  # End node
+                        for start in self.dag.nodes():
+                            if start != node:
+                                try:
+                                    path_length = nx.shortest_path_length(self.dag, start, node)
+                                    lengths.append(path_length)
+                                except nx.NetworkXNoPath:
+                                    paths["broken_paths"].append((start, node))
 
-        total_paths = 0
-        path_lengths = []
+                if lengths:
+                    paths["max_path_length"] = max(lengths)
+                    paths["min_path_length"] = min(lengths)
+                    paths["avg_path_length"] = sum(lengths) / len(lengths)
 
-        for tx in transaction_nodes:
-            paths = []
-            for block in block_nodes:
-                try:
-                    tx_paths = list(nx.all_simple_paths(self.dag, block, tx))
-                    paths.extend(tx_paths)
-                except (nx.NetworkXNoPath, nx.NodeNotFound) as e:
-                    path_analysis["broken_paths"].append((block, tx, str(e)))
+            return paths
 
-            if paths:
-                path_lengths.extend(len(p) for p in paths)
-                path_analysis["path_counts"][tx] = len(paths)
-                total_paths += len(paths)
-            else:
-                path_analysis["path_counts"][tx] = 0
+        except Exception as e:
+            self.logger.error(f"Error analyzing paths: {str(e)}")
+            return paths
 
-        if path_lengths:
-            path_analysis["max_path_length"] = max(path_lengths)
-            path_analysis["min_path_length"] = min(path_lengths)
-            path_analysis["avg_path_length"] = sum(path_lengths) / len(path_lengths)
-
-        return path_analysis
 
     def _analyze_confirmations(self) -> dict:
         """Analyze confirmation status of transactions"""
@@ -271,6 +317,54 @@ class DAGDiagnostics:
             
         except Exception as e:
             self.logger.error(f"Error generating DAG visualization: {str(e)}")
+    def _analyze_quantum_metrics(self) -> dict:
+        """Analyze quantum-related metrics"""
+        metrics = {
+            'average_score': 0.0,
+            'strong_quantum_nodes': 0,
+            'weak_quantum_nodes': 0,
+            'quantum_distribution': {}
+        }
+
+        if self.quantum_scores:
+            scores = []
+            for node in self.dag.nodes():
+                score = self.quantum_scores.get(node, 0.0)
+                scores.append(score)
+                if score >= self.quantum_threshold:
+                    metrics['strong_quantum_nodes'] += 1
+                else:
+                    metrics['weak_quantum_nodes'] += 1
+
+            if scores:
+                metrics['average_score'] = sum(scores) / len(scores)
+
+        return metrics
+
+    def _count_confirmed_transactions(self) -> int:
+        """Count confirmed transactions"""
+        return sum(1 for node in self.dag.nodes() 
+                  if self.dag.out_degree(node) == 0 and self.dag.in_degree(node) > 0)
+
+    def _get_unconfirmed_transactions(self) -> List[str]:
+        """Get list of unconfirmed transactions"""
+        return [node for node in self.dag.nodes() 
+                if self.dag.out_degree(node) == 0 and self.dag.in_degree(node) == 0]
+
+    def _check_for_issues(self, diagnostics: dict) -> None:
+        """Identify potential issues in the DAG structure"""
+        issues = []
+
+        if not diagnostics["structure"]["is_dag"]:
+            issues.append("Graph contains cycles - not a valid DAG")
+
+        if diagnostics["structure"]["isolated_nodes"]:
+            issues.append(f"Found {len(diagnostics['structure']['isolated_nodes'])} isolated nodes")
+
+        if not nx.is_weakly_connected(self.dag) and self.dag.number_of_nodes() > 1:
+            issues.append("DAG contains disconnected components")
+
+        diagnostics["issues"] = issues
 
 class DAGKnightMiner:
     def __init__(self, difficulty: int = 4, security_level: int = 20):
@@ -791,47 +885,84 @@ class DAGKnightMiner:
             logger.error(f"Error getting latest block: {str(e)}")
             return None
 
-    async def mine_block(self, previous_hash: str, data: str, transactions: list, 
+    async def mine_block(self, previous_hash: str, data: str, transactions: list,
                         reward: Decimal, miner_address: str) -> Optional['QuantumBlock']:
-        """Mine block with enhanced security and confirmation handling"""
+        """Mine block with proper temporal ordering and genesis handling"""
         try:
             mining_start_time = time.time()
             hash_calculations = 0
             
-            # Process transactions
+            # Initialize genesis block if needed
+            if not self.dag.nodes:
+                genesis_time = mining_start_time - 3600  # Set genesis 1 hour earlier
+                genesis_hash = "0" * 64
+                self.dag.add_node(genesis_hash, timestamp=genesis_time)
+                previous_hash = genesis_hash
+            
+            # Set block timestamp ensuring proper ordering
+            if previous_hash in self.dag:
+                prev_time = self.dag.nodes[previous_hash].get('timestamp', 0)
+                block_time = max(mining_start_time, prev_time + 1)  # Ensure strictly later timestamp
+            else:
+                block_time = mining_start_time
+            
+            # Create a copy of DAG for modifications
+            working_dag = self.dag.copy()
+            
+            # Process transactions with proper temporal ordering
             tx_list = []
-            crypto_provider = CryptoProvider()
+            tx_nodes = set()
+            base_time = block_time - 0.5  # Transactions slightly before block
+            
+            # Add transactions to working DAG
             for tx in transactions:
                 if hasattr(tx, 'tx_hash'):
-                    if not tx.signature:  # Apply security if not already applied
-                        await tx.apply_enhanced_security(crypto_provider)
+                    # Set transaction timestamp
+                    tx.timestamp = base_time
+                    if tx.tx_hash not in working_dag:
+                        working_dag.add_node(tx.tx_hash, timestamp=base_time, transaction=tx)
+                        tx_nodes.add(tx.tx_hash)
                     tx_list.append(tx)
-                    self.dag.add_node(tx.tx_hash, timestamp=time.time())
             
-            # Select parents
-            parent_hashes = await self.select_parents_with_confirmations()
-            if not parent_hashes:
-                if not self.dag.nodes:
-                    parent_hashes = ["0" * 64]
-                    self.dag.add_node(parent_hashes[0], timestamp=time.time())
-                else:
-                    parent_hashes = [previous_hash]
+            # Get parent blocks
+            parent_hashes = []
+            if previous_hash in working_dag:
+                prev_time = working_dag.nodes[previous_hash].get('timestamp', 0)
+                if block_time > prev_time:
+                    parent_hashes.append(previous_hash)
             
+            # Add additional parents while maintaining temporal ordering
+            tips = [node for node in working_dag.nodes() 
+                   if working_dag.out_degree(node) == 0 and node != previous_hash]
+            
+            for tip in sorted(tips, 
+                             key=lambda x: working_dag.nodes[x].get('timestamp', 0), 
+                             reverse=True):
+                tip_time = working_dag.nodes[tip].get('timestamp', 0)
+                if block_time > tip_time and len(parent_hashes) < 2:
+                    parent_hashes.append(tip)
+            
+            # Ensure we have at least one parent unless it's genesis
+            if not parent_hashes and previous_hash and previous_hash != "0" * 64:
+                parent_hashes = [previous_hash]
+            
+            # Mine block
             nonce = 0
-            timestamp = time.time()
+            max_mining_time = 30  # Maximum time to spend mining in seconds
             
-            while time.time() - mining_start_time < 30:
-                # Create block with quantum features
+            while mining_start_time + max_mining_time > time.time():
                 block_data = {
                     'data': data,
                     'transactions': [tx.tx_hash for tx in tx_list],
-                    'timestamp': timestamp,
-                    'nonce': nonce
+                    'timestamp': block_time,
+                    'nonce': nonce,
+                    'parent_hashes': parent_hashes
                 }
+                
                 quantum_sig = self.generate_quantum_signature(str(block_data).encode())
                 
                 block = QuantumBlock(
-                    previous_hash=parent_hashes[0],
+                    previous_hash=parent_hashes[0] if parent_hashes else "0" * 64,
                     data=data,
                     quantum_signature=quantum_sig,
                     reward=reward,
@@ -839,7 +970,7 @@ class DAGKnightMiner:
                     miner_address=miner_address,
                     nonce=nonce,
                     parent_hashes=parent_hashes,
-                    timestamp=timestamp
+                    timestamp=block_time
                 )
                 
                 block_hash = block.compute_hash()
@@ -848,52 +979,30 @@ class DAGKnightMiner:
                 if int(block_hash, 16) < self.target:
                     block.hash = block_hash
                     
-                    # Update DAG structure
-                    self.dag.add_node(block_hash, block=block, timestamp=timestamp)
-                    for parent in parent_hashes:
-                        if parent in self.dag:
-                            self.dag.add_edge(block_hash, parent)
+                    # Update the actual DAG with successful changes
+                    self.dag = working_dag.copy()
                     
-                    # Link transactions and update confirmations
-                    for tx in tx_list:
-                        self.dag.add_edge(block_hash, tx.tx_hash)
-                        self.confirmation_system.quantum_scores[tx.tx_hash] = 0.85
-                        
-                        # Update transaction confirmation data
-                        security_info = self.confirmation_system.get_transaction_security(
-                            tx.tx_hash, block_hash
-                        )
-                        tx.confirmation_data.status.confirmation_score = security_info['confirmation_score']
-                        tx.confirmation_data.status.security_level = security_info['security_level']
-                        tx.confirmation_data.metrics.path_diversity = security_info.get('path_diversity', 0.0)
-                        tx.confirmation_data.metrics.quantum_strength = security_info.get('quantum_strength', 0.0)
-                        tx.confirmations = security_info['num_confirmations']
+                    # Add block to DAG
+                    self.dag.add_node(block_hash, block=block, timestamp=block_time)
                     
-                    # Update confirmation system
-                    await self.confirmation_system.add_block_confirmation(
-                        block_hash,
-                        parent_hashes,
-                        tx_list,
-                        quantum_sig
-                    )
+                    # Connect block to parents with proper temporal ordering
+                    for parent_hash in parent_hashes:
+                        if parent_hash in self.dag:
+                            parent_time = self.dag.nodes[parent_hash].get('timestamp', 0)
+                            if block_time > parent_time:
+                                self.dag.add_edge(parent_hash, block_hash)
                     
-                    # Run DAG diagnostics
-                    logger.info("Running DAG structure diagnostics...")
-                    diagnostics = DAGDiagnostics(self.confirmation_system)
-                    results = diagnostics.diagnose_dag_structure()
-                    diagnostics.print_diagnostics(results)
+                    # Connect transactions to block
+                    for tx_hash in tx_nodes:
+                        if tx_hash in self.dag:
+                            tx_time = self.dag.nodes[tx_hash].get('timestamp', 0)
+                            if block_time > tx_time:
+                                self.dag.add_edge(tx_hash, block_hash)
                     
-                    # Generate visualization (optional)
-                    try:
-                        diagnostics.visualize_dag(f"dag_structure_{block_hash[:8]}.png")
-                    except Exception as e:
-                        logger.error(f"Failed to generate DAG visualization: {str(e)}")
-                    
-                    # Log any issues found
-                    if results.get("issues"):
-                        logger.warning("DAG structure issues found:")
-                        for issue in results["issues"]:
-                            logger.warning(f"- {issue}")
+                    # Verify DAG properties
+                    if not nx.is_directed_acyclic_graph(self.dag):
+                        logger.error("Block addition created cycles in DAG")
+                        return None
                     
                     await self._update_mining_metrics(time.time() - mining_start_time, hash_calculations)
                     return block
@@ -902,6 +1011,7 @@ class DAGKnightMiner:
                 if nonce % 100 == 0:
                     await asyncio.sleep(0)
             
+            logger.warning("Mining timed out")
             return None
             
         except Exception as e:
@@ -909,45 +1019,192 @@ class DAGKnightMiner:
             logger.error(traceback.format_exc())
             return None
 
-
-
-
-    async def select_parents_with_confirmations(self) -> List[str]:
-        """Select parent blocks considering confirmation scores"""
+    async def _get_connected_parents(self, previous_hash: str) -> List[str]:
+        """Get parent blocks ensuring DAG connectivity"""
         try:
+            if not self.dag.nodes:
+                genesis_hash = "0" * 64
+                self.dag.add_node(genesis_hash, timestamp=time.time() - 1)
+                return [genesis_hash]
+
+            # Start with specified previous hash if valid
+            parents = []
+            if previous_hash in self.dag:
+                parents.append(previous_hash)
+            
+            # Get recent blocks by timestamp
+            nodes = [(n, self.dag.nodes[n].get('timestamp', 0)) 
+                    for n in self.dag.nodes()
+                    if self.dag.in_degree(n) == 0]  # Only consider tips
+            nodes.sort(key=lambda x: x[1], reverse=True)
+            
+            # Add additional tips to maintain connectivity
+            for node, _ in nodes:
+                if node not in parents and len(parents) < 2:
+                    parents.append(node)
+            
+            if not parents and self.dag.nodes:
+                # Fallback: use most recent block
+                latest = max(self.dag.nodes(), 
+                            key=lambda n: self.dag.nodes[n].get('timestamp', 0))
+                parents.append(latest)
+                
+            return parents
+                
+        except Exception as e:
+            logger.error(f"Error getting connected parents: {str(e)}")
+            return [previous_hash]
+    def get_latest_block_hash(self) -> str:
+        """Get hash of latest block with proper reachability"""
+        try:
+            if not self.dag.nodes:
+                return "0" * 64
+                
+            # Get all blocks (nodes with no incoming edges)
             tips = [node for node in self.dag.nodes() if self.dag.out_degree(node) == 0]
             
-            if len(tips) < self.min_parents:
-                return tips if tips else []
+            if not tips:
+                # If no tips, use most recent block by timestamp
+                return max(self.dag.nodes(), 
+                          key=lambda n: self.dag.nodes[n].get('timestamp', 0))
                 
-            # Calculate confirmation scores for tips
-            scored_tips = []
-            latest_block = max(self.dag.nodes(), key=lambda n: self.dag.nodes[n]['block'].timestamp)
+            # Return most recent tip
+            return max(tips, key=lambda n: self.dag.nodes[n].get('timestamp', 0))
             
-            for tip in tips:
-                block = self.dag.nodes[tip]['block']
-                
-                # Get average confirmation score of tip's transactions
-                scores = []
-                for tx in block.transactions:
-                    security_info = self.confirmation_system.get_transaction_security(
-                        tx.hash,
-                        latest_block
-                    )
-                    scores.append(security_info['confirmation_score'])
-                
-                avg_score = sum(scores) / len(scores) if scores else 0
-                scored_tips.append((tip, avg_score))
-            
-            # Sort tips by score and select the best ones
-            scored_tips.sort(key=lambda x: x[1], reverse=True)
-            selected = [tip for tip, _ in scored_tips[:self.min_parents]]
-            
-            return selected
-
         except Exception as e:
-            logger.error(f"Error selecting parents with confirmations: {str(e)}")
+            logger.error(f"Error getting latest block: {str(e)}")
+            return "0" * 64
+
+
+    def _ensure_block_connectivity(self, block_hash: str) -> bool:
+        """Ensure block is properly connected in DAG"""
+        try:
+            if not self.dag.nodes:
+                return True
+                
+            # Check if block has proper connections
+            has_parents = any(self.dag.has_edge(p, block_hash) 
+                             for p in self.dag.predecessors(block_hash))
+                             
+            has_transactions = any(self.dag.has_edge(tx, block_hash)
+                                 for tx in self.dag.predecessors(block_hash)
+                                 if 'transaction' in self.dag.nodes[tx])
+                                 
+            return has_parents or has_transactions
+        
+        except Exception as e:
+            logger.error(f"Error checking block connectivity: {str(e)}")
+            return False
+
+    def _fix_block_connectivity(self, block_hash: str):
+        """Fix block connectivity issues"""
+        try:
+            if not self.dag.nodes:
+                return
+                
+            block_time = self.dag.nodes[block_hash].get('timestamp', 0)
+            
+            # Find potential parents (older blocks)
+            potential_parents = [
+                n for n in self.dag.nodes()
+                if (self.dag.nodes[n].get('timestamp', 0) < block_time and
+                    n != block_hash and
+                    not self.dag.has_edge(n, block_hash))
+            ]
+            
+            if potential_parents:
+                # Connect to closest parent by timestamp
+                parent = max(potential_parents,
+                            key=lambda x: self.dag.nodes[x].get('timestamp', 0))
+                self.dag.add_edge(parent, block_hash)
+                
+            # Connect any unconnected transactions
+            block = self.dag.nodes[block_hash].get('block')
+            if block and hasattr(block, 'transactions'):
+                for tx in block.transactions:
+                    if hasattr(tx, 'tx_hash') and tx.tx_hash in self.dag:
+                        if not self.dag.has_edge(tx.tx_hash, block_hash):
+                            self.dag.add_edge(tx.tx_hash, block_hash)
+        
+        except Exception as e:
+            logger.error(f"Error fixing block connectivity: {str(e)}")
+
+
+    def _verify_dag_connectivity(self) -> bool:
+        """Verify DAG is weakly connected"""
+        if self.dag.number_of_nodes() <= 1:
+            return True
+        return nx.is_weakly_connected(self.dag)
+
+    def _repair_dag_connectivity(self, block_hash: str):
+        """Repair DAG connectivity by connecting disconnected components"""
+        try:
+            components = list(nx.weakly_connected_components(self.dag))
+            if len(components) <= 1:
+                return
+                
+            # Find the component containing the new block
+            block_component = None
+            other_components = []
+            for comp in components:
+                if block_hash in comp:
+                    block_component = comp
+                else:
+                    other_components.append(comp)
+                    
+            if not block_component:
+                return
+                
+            # Find best nodes to connect components
+            block_time = self.dag.nodes[block_hash]['timestamp']
+            for component in other_components:
+                # Find oldest node in current component
+                oldest_node = min(component, 
+                                key=lambda n: self.dag.nodes[n].get('timestamp', float('inf')))
+                oldest_time = self.dag.nodes[oldest_node].get('timestamp', 0)
+                
+                if oldest_time < block_time:
+                    # Connect oldest node to new block
+                    self.dag.add_edge(oldest_node, block_hash)
+                else:
+                    # Connect new block to oldest node
+                    self.dag.add_edge(block_hash, oldest_node)
+                    
+        except Exception as e:
+            logger.error(f"Error repairing DAG connectivity: {str(e)}")
+            logger.error(traceback.format_exc())
+
+    async def select_parents_with_confirmations(self) -> List[str]:
+        """Select parent blocks with proper timestamp ordering"""
+        try:
+            if not self.dag.nodes:
+                return []
+                
+            # Get all potential tips (nodes with no successors)
+            tips = [node for node in self.dag.nodes() if self.dag.out_degree(node) == 0]
+            
+            if not tips:
+                # If no tips, use latest block by timestamp
+                nodes = list(self.dag.nodes())
+                latest = max(nodes, key=lambda n: self.dag.nodes[n].get('timestamp', 0))
+                return [latest]
+                
+            # Sort tips by timestamp (descending)
+            sorted_tips = sorted(
+                tips,
+                key=lambda n: self.dag.nodes[n].get('timestamp', 0),
+                reverse=True
+            )
+            
+            # Return most recent tip(s)
+            min_parents = min(2, len(sorted_tips))
+            return sorted_tips[:min_parents]
+            
+        except Exception as e:
+            logger.error(f"Error selecting parents: {str(e)}")
             return []
+
+
     async def update_confirmation_metrics(self, block: 'QuantumBlock'):
         """Update mining metrics with confirmation statistics"""
         try:
