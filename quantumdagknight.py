@@ -8283,6 +8283,304 @@ class ConsensusHandler:
         except Exception as e:
             self.logger.error(f"Error getting metrics: {str(e)}")
             return {'status': 'error', 'message': str(e)}
+class MiningHandler:
+    def __init__(self):
+        self.sessions = {}
+        self.confirmation_system = DAGConfirmationSystem(
+            quantum_threshold=0.85,
+            min_confirmations=6,
+            max_confirmations=100
+        )
+
+    async def handle_mining_message(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle mining-related messages"""
+        try:
+            action = data.get('action')
+            session_id = data.get('session_id')
+
+            if not action:
+                return {'status': 'error', 'message': 'No action specified'}
+
+            if not session_id:
+                return {'status': 'error', 'message': 'No session ID provided'}
+
+            # Initialize session if needed
+            if session_id not in self.sessions:
+                self.sessions[session_id] = {}
+
+            # Route to appropriate handler
+            if action == 'initialize':
+                return await self._handle_initialize(session_id, data)
+            elif action == 'start':
+                return await self._handle_start_mining(session_id, data)
+            elif action == 'stop':
+                return await self._handle_stop_mining(session_id)
+            elif action == 'get_metrics':
+                return await self._handle_get_metrics(session_id)
+            else:
+                return {'status': 'error', 'message': f'Unknown action: {action}'}
+
+        except Exception as e:
+            logger.error(f"Error in mining handler: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def _handle_initialize(self, session_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Initialize mining system"""
+        try:
+            difficulty = data.get('difficulty', 2)
+            security_level = data.get('security_level', 20)
+
+            # Create miner instance
+            miner = DAGKnightMiner(
+                difficulty=difficulty,
+                security_level=security_level
+            )
+
+            # Initialize session data
+            self.sessions[session_id] = {
+                'miner': miner,
+                'mining_task': None,
+                'mining_metrics': {
+                    'blocks_mined': 0,
+                    'total_rewards': Decimal('0'),
+                    'start_time': time.time(),
+                    'mining_times': [],
+                    'hash_rates': []
+                }
+            }
+
+            logger.info(f"Initialized mining for session {session_id}")
+            return {'status': 'success', 'message': 'Mining initialized'}
+
+        except Exception as e:
+            logger.error(f"Error initializing mining: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+
+
+    async def _mining_loop(self, session_id: str, miner_address: str):
+        """Mining loop that continuously mines blocks"""
+        try:
+            session = self.sessions[session_id]
+            miner = session['miner']
+
+            while True:
+                start_time = time.time()
+
+                # Create a new block
+                new_block = await miner.mine_block(
+                    previous_hash=miner.get_latest_block_hash(),
+                    data="",
+                    transactions=[],
+                    reward=Decimal('50'),
+                    miner_address=miner_address
+                )
+
+                if new_block:
+                    mining_time = time.time() - start_time
+
+                    # Initialize balances if needed
+                    if not hasattr(self, 'balances'):
+                        self.balances = {}
+
+                    # Update miner's balance
+                    self.balances[miner_address] = self.balances.get(miner_address, Decimal('0')) + new_block.reward
+
+                    # Update mining metrics
+                    session['mining_metrics']['blocks_mined'] += 1
+                    session['mining_metrics']['total_rewards'] += new_block.reward
+                    session['mining_metrics']['mining_times'].append(mining_time)
+                    session['mining_metrics']['hash_rates'].append(
+                        new_block.nonce / mining_time if mining_time > 0 else 0
+                    )
+
+                    logger.info(
+                        f"Block mined: {new_block.hash}\n"
+                        f"Reward: {new_block.reward}\n"
+                        f"Miner balance: {self.balances[miner_address]}"
+                    )
+
+                await asyncio.sleep(0.1)  # Small delay to prevent CPU overload
+
+        except asyncio.CancelledError:
+            logger.info("Mining task cancelled")
+        except Exception as e:
+            logger.error(f"Error in mining loop: {str(e)}")
+            logger.error(traceback.format_exc())
+
+
+
+
+    async def handle_initialize(self, session_id: str, data: dict) -> dict:
+        """Initialize mining system"""
+        try:
+            # Get initialization parameters
+            difficulty = int(data.get('difficulty', 4))
+            security_level = int(data.get('security_level', 20))
+            confirmation_params = data.get('confirmation_params', {})
+
+            # Create new miner instance
+            miner = DAGKnightMiner(
+                difficulty=difficulty,
+                security_level=security_level
+            )
+
+            # Initialize confirmation system
+            miner.confirmation_system = DAGConfirmationSystem(
+                quantum_threshold=confirmation_params.get('quantum_threshold', 0.85),
+                min_confirmations=confirmation_params.get('min_confirmations', 6),
+                max_confirmations=confirmation_params.get('max_confirmations', 100)
+            )
+
+            # Store in session
+            if session_id not in self.sessions:
+                self.sessions[session_id] = {}
+
+            self.sessions[session_id]['miner'] = miner
+            self.sessions[session_id]['mining_task'] = None
+            self.sessions[session_id]['performance_data'] = {
+                'blocks_mined': [],
+                'mining_times': [],
+                'hash_rates': [],
+                'start_time': None
+            }
+
+            logger.info(f"Initialized mining system for session {session_id}")
+            return {
+                'status': 'success',
+                'message': 'Mining system initialized',
+                'settings': {
+                    'difficulty': difficulty,
+                    'security_level': security_level,
+                    'confirmation_params': confirmation_params
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error initializing mining system: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_start(self, session_id: str, data: dict) -> dict:
+        """Start mining process"""
+        try:
+            if session_id not in self.sessions:
+                return {'status': 'error', 'message': 'Session not initialized'}
+
+            session = self.sessions[session_id]
+            if not session.get('miner'):
+                return {'status': 'error', 'message': 'Miner not initialized'}
+
+            if session.get('mining_task'):
+                return {'status': 'error', 'message': 'Mining already in progress'}
+
+            # Get mining parameters
+            miner_address = data.get('miner_address')
+            if not miner_address:
+                return {'status': 'error', 'message': 'Miner address required'}
+
+            duration = int(data.get('duration', 300))  # Default 5 minutes
+
+            # Initialize performance data
+            session['performance_data'] = {
+                'blocks_mined': [],
+                'mining_times': [],
+                'hash_rates': [],
+                'start_time': asyncio.get_event_loop().time()
+            }
+
+            # Start mining task
+            session['mining_task'] = asyncio.create_task(
+                self._mining_loop(session_id, miner_address, duration)
+            )
+
+            return {
+                'status': 'success',
+                'message': 'Mining started',
+                'duration': duration
+            }
+
+        except Exception as e:
+            logger.error(f"Error starting mining: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_stop(self, session_id: str, data: dict) -> dict:
+        """Stop mining process"""
+        try:
+            if session_id not in self.sessions:
+                return {'status': 'error', 'message': 'Session not found'}
+
+            session = self.sessions[session_id]
+            if session.get('mining_task'):
+                session['mining_task'].cancel()
+                session['mining_task'] = None
+                return {'status': 'success', 'message': 'Mining stopped'}
+
+            return {'status': 'error', 'message': 'No mining task in progress'}
+
+        except Exception as e:
+            logger.error(f"Error stopping mining: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_get_metrics(self, session_id: str, data: dict) -> dict:
+        """Get mining metrics"""
+        try:
+            if session_id not in self.sessions:
+                return {'status': 'error', 'message': 'Session not found'}
+
+            session = self.sessions[session_id]
+            perf_data = session.get('performance_data', {})
+            current_time = asyncio.get_event_loop().time()
+            start_time = perf_data.get('start_time', current_time)
+            elapsed_time = current_time - start_time
+
+            metrics = {
+                'blocks_mined': len(perf_data.get('blocks_mined', [])),
+                'average_mining_time': (
+                    sum(perf_data.get('mining_times', [])) / 
+                    len(perf_data.get('mining_times', [1])) 
+                    if perf_data.get('mining_times') else 0
+                ),
+                'hash_rate': (
+                    sum(perf_data.get('hash_rates', [])) / 
+                    len(perf_data.get('hash_rates', [1])) 
+                    if perf_data.get('hash_rates') else 0
+                ),
+                'elapsed_time': elapsed_time,
+                'mining_active': session.get('mining_task') is not None
+            }
+
+            return {
+                'status': 'success',
+                'metrics': metrics
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting mining metrics: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_get_dag_status(self, session_id: str, data: dict) -> dict:
+        """Get DAG status"""
+        try:
+            if session_id not in self.sessions:
+                return {'status': 'error', 'message': 'Session not found'}
+
+            session = self.sessions[session_id]
+            miner = session.get('miner')
+            if not miner:
+                return {'status': 'error', 'message': 'Miner not initialized'}
+
+            dag_metrics = miner.get_dag_metrics()
+            return {
+                'status': 'success',
+                'dag_metrics': dag_metrics
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting DAG status: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
 
 import networkx as nx
 
@@ -8309,6 +8607,11 @@ class QuantumBlockchainWebSocketServer:
         self._port_index = 0
         self.loop = None
         self.dagknight = None
+        self.crypto_provider = CryptoProvider()
+        self.wallets = {}
+        self._initialize_wallet_storage()
+        self.mining_handler = MiningHandler()
+        self.wallet_balances = {}  # Dictionary to store wallet balances
 
         # Initialize core components
         self.session_manager = SessionManager()
@@ -8366,102 +8669,158 @@ class QuantumBlockchainWebSocketServer:
             # ... other handlers
         }
         self.is_initialized = False
+    def _initialize_wallet_storage(self):
+        """Initialize wallet storage and balances"""
+        if not hasattr(self, 'wallets'):
+            self.wallets = {}
+        if not hasattr(self, 'wallet_balances'):
+            self.wallet_balances = {}
 
-    async def handle_wallet_message(self, data: dict) -> dict:
-        """Handle wallet-related messages."""
+    async def update_wallet_balance(self, address: str, amount: str):
+        """Update wallet balance"""
         try:
+            if address not in self.wallet_balances:
+                self.wallet_balances[address] = "0"
+            
+            current = Decimal(self.wallet_balances[address])
+            new_amount = current + Decimal(amount)
+            self.wallet_balances[address] = str(new_amount)
+            
+            logger.debug(f"Updated balance for {address}: {new_amount}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update wallet balance: {str(e)}")
+            return False
+
+    async def get_wallet_balance(self, address: str) -> str:
+        """Get wallet balance"""
+        return self.wallet_balances.get(address, "0")
+    async def handle_wallet_message(self, data: dict) -> dict:
+        """Handle wallet-related messages using Wallet class."""
+        try:
+            if not hasattr(self, 'wallets'):
+                self.wallets = {}
+
+            if not hasattr(self, 'wallet_balances'):
+                self.wallet_balances = {}  # Add balance tracking
+
             action = data.get('action')
             if not action:
                 return {'status': 'error', 'message': 'No action specified'}
 
             if action == 'create':
-                # Generate new wallet
-                private_key = self.crypto_provider.generate_private_key()
-                public_key = private_key.public_key()
-                address = self.crypto_provider.generate_address(public_key)
-                
-                wallet = {
-                    'address': address,
-                    'public_key': self.crypto_provider.public_key_to_string(public_key),
-                    'private_key': self.crypto_provider.private_key_to_string(private_key)
-                }
-                
-                self.wallets[address] = wallet
-                return {
-                    'status': 'success',
-                    'wallet': wallet
-                }
+                try:
+                    # Create new wallet using the Wallet class
+                    new_wallet = Wallet()  # This will generate keys internally
+                    
+                    # Convert wallet to dictionary for response
+                    wallet_data = {
+                        'address': new_wallet.address,
+                        'public_key': new_wallet.public_key,
+                        'private_key': new_wallet.private_key_pem()
+                    }
+                    
+                    # Store wallet and initialize balance
+                    self.wallets[new_wallet.address] = new_wallet
+                    self.wallet_balances[new_wallet.address] = "0"
+                    
+                    logger.info(f"Created new wallet with address: {new_wallet.address[:8]}...")
+                    return {
+                        'status': 'success',
+                        'wallet': wallet_data
+                    }
+                except Exception as e:
+                    logger.error(f"Wallet creation failed: {str(e)}")
+                    return {'status': 'error', 'message': str(e)}
 
             elif action == 'get_balance':
-                address = data.get('address')
-                if not address:
-                    return {'status': 'error', 'message': 'No address provided'}
+                try:
+                    address = data.get('address')
+                    if not address:
+                        return {'status': 'error', 'message': 'No address provided'}
+
+                    # First check if wallet exists
+                    if address not in self.wallets:
+                        return {'status': 'error', 'message': 'Wallet not found'}
+
+                    # Get balance from our tracking
+                    balance = self.wallet_balances.get(address, "0")
+
+                    logger.info(f"Retrieved balance for wallet {address}: {balance}")
+                    return {
+                        'status': 'success',
+                        'balance': balance
+                    }
+                except Exception as e:
+                    logger.error(f"Failed to get balance for {address}: {str(e)}")
+                    return {'status': 'error', 'message': str(e)}
+
+            elif action == 'sign_message':
+                try:
+                    address = data.get('address')
+                    message = data.get('message')
                     
-                balance = await self.blockchain.get_balance(address)
-                return {
-                    'status': 'success',
-                    'balance': str(balance)
-                }
+                    if not address or not message:
+                        return {'status': 'error', 'message': 'Address and message required'}
+                    
+                    wallet = self.wallets.get(address)
+                    if not wallet:
+                        return {'status': 'error', 'message': 'Wallet not found'}
+                    
+                    signature = wallet.sign_message(message)
+                    return {
+                        'status': 'success',
+                        'signature': signature
+                    }
+                except Exception as e:
+                    logger.error(f"Message signing failed: {str(e)}")
+                    return {'status': 'error', 'message': str(e)}
+
+            elif action == 'verify_signature':
+                try:
+                    address = data.get('address')
+                    message = data.get('message')
+                    signature = data.get('signature')
+                    
+                    if not all([address, message, signature]):
+                        return {'status': 'error', 'message': 'Address, message, and signature required'}
+                    
+                    wallet = self.wallets.get(address)
+                    if not wallet:
+                        return {'status': 'error', 'message': 'Wallet not found'}
+                    
+                    # Convert message to base64 if it's not already
+                    message_b64 = base64.b64encode(message.encode()).decode() if isinstance(message, str) else message
+                    
+                    is_valid = wallet.verify_signature(
+                        message_b64,
+                        signature,
+                        wallet.public_key
+                    )
+                    
+                    return {
+                        'status': 'success',
+                        'valid': is_valid
+                    }
+                except Exception as e:
+                    logger.error(f"Signature verification failed: {str(e)}")
+                    return {'status': 'error', 'message': str(e)}
 
             else:
                 return {'status': 'error', 'message': f'Unknown wallet action: {action}'}
 
         except Exception as e:
             logger.error(f"Error handling wallet message: {str(e)}")
+            logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
+
+        return {'status': 'error', 'message': 'Unexpected end of handler'}  # Fallback response
 
     async def handle_mining_message(self, data: dict) -> dict:
-        """Handle mining-related messages."""
-        try:
-            action = data.get('action')
-            if not action:
-                return {'status': 'error', 'message': 'No action specified'}
+        """Route mining messages to the mining handler"""
+        session_id = id(self)  # Or however you track sessions
+        return await self.mining_handler.handle_mining_message(session_id, data)
 
-            if action == 'initialize':
-                # Initialize mining parameters
-                difficulty = data.get('difficulty', 2)
-                security_level = data.get('security_level', 20)
-                confirmation_params = data.get('confirmation_params', {
-                    'quantum_threshold': 0.85,
-                    'min_confirmations': 6,
-                    'max_confirmations': 100
-                })
-                
-                await self.blockchain.initialize_mining(
-                    difficulty=difficulty,
-                    security_level=security_level,
-                    confirmation_params=confirmation_params
-                )
-                return {'status': 'success', 'message': 'Mining initialized'}
-
-            elif action == 'start':
-                # Start mining process
-                duration = data.get('duration', 5)
-                miner_address = data.get('miner_address')
-                
-                if not miner_address:
-                    return {'status': 'error', 'message': 'No miner address provided'}
-                    
-                await self.blockchain.start_mining(
-                    duration=duration,
-                    miner_address=miner_address
-                )
-                return {'status': 'success', 'message': 'Mining started'}
-
-            elif action == 'get_metrics':
-                # Get mining metrics
-                metrics = self.blockchain.get_mining_metrics()
-                return {
-                    'status': 'success',
-                    'metrics': metrics
-                }
-
-            else:
-                return {'status': 'error', 'message': f'Unknown mining action: {action}'}
-
-        except Exception as e:
-            logger.error(f"Error handling mining message: {str(e)}")
-            return {'status': 'error', 'message': str(e)}
 
     async def handle_transaction_message(self, data: dict) -> dict:
         """Handle transaction-related messages."""
@@ -8727,110 +9086,130 @@ class QuantumBlockchainWebSocketServer:
             logger.error(traceback.format_exc())
             return False
 
-
-    async def process_message(self, websocket: websockets.WebSocketServerProtocol, message: str):
-        """Process incoming WebSocket messages with proper parameter passing"""
+    async def process_message(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process incoming messages"""
         try:
-            # Parse message
-            try:
-                data = json.loads(message)
-            except json.JSONDecodeError:
-                await websocket.send(json.dumps({
-                    "status": "error",
-                    "message": "Invalid JSON message"
-                }))
-                return
-
-            # Validate message format
-            if not isinstance(data, dict) or 'category' not in data:
-                await websocket.send(json.dumps({
-                    "status": "error",
-                    "message": "Invalid message format - missing category"
-                }))
-                return
-
-            # Get appropriate handler
             category = data.get('category')
-            handler = self.handlers.get(category)
             
-            if not handler:
-                await websocket.send(json.dumps({
-                    "status": "error",
-                    "message": f"Unknown message category: {category}"
-                }))
-                return
+            if not category:
+                return {'status': 'error', 'message': 'No category specified'}
 
-            # Call handler with both websocket and data parameters
-            response = await handler(websocket, data)
-            await websocket.send(json.dumps(response))
+            if category == 'mining':
+                return await self.mining_handler.handle_mining_message(data)
+            else:
+                return {
+                    'status': 'error',
+                    'message': f'Unknown category: {category}'
+                }
 
         except Exception as e:
-            self.logger.error(f"Error processing message: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            await websocket.send(json.dumps({
-                "status": "error",
-                "message": str(e)
-            }))
+            logger.error(f"Error processing message: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def cleanup_session(self, session_id: str):
+        """Clean up session resources"""
+        try:
+            session = self.sessions.get(session_id)
+            if session:
+                # Stop any mining tasks
+                if self.mining_handler and hasattr(self.mining_handler, 'sessions'):
+                    mining_session = self.mining_handler.sessions.get(session_id)
+                    if mining_session and mining_session.get('mining_task'):
+                        mining_session['mining_task'].cancel()
+                        
+            logger.info(f"Cleaned up session {session_id}")
+            
+        except Exception as e:
+            logger.error(f"Error cleaning up session {session_id}: {str(e)}")
+
+    async def shutdown(self):
+        """Shutdown the server"""
+        try:
+            if self.server:
+                self.server.close()
+                await self.server.wait_closed()
+                
+            # Clean up all sessions
+            for session_id in list(self.sessions.keys()):
+                await self.cleanup_session(session_id)
+                
+            logger.info("Server shut down successfully")
+            
+        except Exception as e:
+            logger.error(f"Error shutting down server: {str(e)}")
+
+
 
 
     async def handle_websocket(self, websocket, path):
-        """Handle WebSocket connections."""
+        """Handle WebSocket connection with proper session management"""
+        session_id = str(id(websocket))
+        logger.info(f"New WebSocket connection established. Session ID: {session_id}")
+        
         try:
+            # Initialize session if needed
+            if session_id not in self.sessions:
+                self.sessions[session_id] = {
+                    'websocket': websocket,
+                    'last_activity': time.time()
+                }
+
             async for message in websocket:
                 try:
-                    response = await self.process_message(websocket, message)
-                    await websocket.send(json.dumps(response))
-                except Exception as e:
-                    logger.error(f"Error handling message: {str(e)}")
+                    # Parse message
+                    data = json.loads(message)
+                    logger.debug(f"Received message for session {session_id}: {data}")
+
+                    # Process message using existing handler
+                    response = await self.handle_message(session_id, websocket, data)
+                    
+                    # Send response
+                    if response:
+                        await websocket.send(json.dumps(response))
+                        logger.debug(f"Sent response for session {session_id}: {response}")
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON message received: {str(e)}")
                     await websocket.send(json.dumps({
                         'status': 'error',
-                        'message': str(e)
+                        'message': 'Invalid JSON message'
                     }))
+                except Exception as e:
+                    logger.error(f"Error processing message: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    await websocket.send(json.dumps({
+                        'status': 'error',
+                        'message': f'Error processing message: {str(e)}'
+                    }))
+
         except websockets.exceptions.ConnectionClosed:
-            pass
+            logger.info(f"WebSocket connection closed for session {session_id}")
         except Exception as e:
             logger.error(f"WebSocket connection error: {str(e)}")
-
-    async def handle_message(self, websocket, message_str):
-        """Handle incoming WebSocket messages."""
-        try:
-            data = json.loads(message_str)
-            category = data.get('category')
-
-            if not category:
-                await websocket.send(json.dumps({
-                    'status': 'error',
-                    'message': 'No category specified'
-                }))
-                return
-
-            if category not in self.message_handlers:
-                available_categories = list(self.message_handlers.keys())
-                await websocket.send(json.dumps({
-                    'status': 'error',
-                    'message': f'Unknown category: {category}. Available categories: {available_categories}'
-                }))
-                return
-
-            # Call the appropriate handler with just the data
-            handler = self.message_handlers[category]
-            response = await handler(data)
-            
-            # Send response back
-            await websocket.send(json.dumps(response))
-
-        except json.JSONDecodeError:
-            await websocket.send(json.dumps({
-                'status': 'error',
-                'message': 'Invalid JSON message'
-            }))
-        except Exception as e:
-            logger.error(f"Error handling message: {str(e)}")
             logger.error(traceback.format_exc())
-            await websocket.send(json.dumps({
+        finally:
+            # Cleanup session
+            await self.cleanup_session(session_id)
+            logger.info(f"Session {session_id} cleaned up")
+
+
+
+    async def _handle_mining_message(self, data: dict) -> dict:
+        """Handle mining-related messages"""
+        try:
+            return await self.mining_handler.handle_mining_message(data)
+        except Exception as e:
+            logger.error(f"Error in mining handler: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {
                 'status': 'error',
                 'message': str(e)
-            }))
+            }
+
+
+
+
 
     async def cleanup(self):
         """Clean up server resources."""
@@ -9003,31 +9382,51 @@ class QuantumBlockchainWebSocketServer:
 
     async def handle_connection(self, websocket, path):
         """Handle incoming WebSocket connections"""
-        session_id = str(id(websocket))
-        logger.info(f"New connection established: {session_id}")
+        session_id = str(uuid.uuid4())
+        self.sessions[session_id] = {'websocket': websocket}
         
-        self.create_session(session_id)
+        logger.info(f"New connection established. Session ID: {session_id}")
         
         try:
             async for message in websocket:
                 try:
+                    # Parse message
                     data = json.loads(message)
-                    response = await self.handle_message(session_id, websocket, data)
-                    if response:
-                        await websocket.send(json.dumps(response))
+                    logger.debug(f"Received message: {data}")
+                    
+                    # Add session ID to data
+                    data['session_id'] = session_id
+                    
+                    # Process message
+                    response = await self.process_message(data)
+                    
+                    # Send response
+                    await websocket.send(json.dumps(response))
+                    
                 except json.JSONDecodeError:
-                    await websocket.send(json.dumps({
-                        "status": "error",
-                        "message": "Invalid JSON format"
-                    }))
+                    error_response = {
+                        'status': 'error',
+                        'message': 'Invalid JSON message'
+                    }
+                    await websocket.send(json.dumps(error_response))
                 except Exception as e:
-                    logger.error(f"Error handling message: {str(e)}")
-                    await websocket.send(json.dumps({
-                        "status": "error",
-                        "message": str(e)
-                    }))
+                    logger.error(f"Error processing message: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    error_response = {
+                        'status': 'error',
+                        'message': str(e)
+                    }
+                    await websocket.send(json.dumps(error_response))
+                    
+        except websockets.exceptions.ConnectionClosed:
+            logger.info(f"Connection closed for session {session_id}")
         finally:
-            await self.cleanup_session(session_id)
+            # Cleanup session
+            if session_id in self.sessions:
+                await self.cleanup_session(session_id)
+                del self.sessions[session_id]
+
+
                 
     async def handle_get_status(self, session_id: str, websocket, data: dict) -> dict:
         """Handle get_status action for transactions with improved logging"""
@@ -9244,6 +9643,8 @@ class QuantumBlockchainWebSocketServer:
                     "create_with_pincode": self.handle_create_wallet_with_pincode,
                     "create_with_mnemonic": self.handle_create_wallet_with_mnemonic,
                     "get_info": self.handle_get_wallet_info,
+                    "get_balance": self.handle_get_wallet_balance,  
+
                     "sign_message": lambda sid, ws, d: self.handle_sign_message(sid, d),
                     "verify_signature": lambda sid, ws, d: self.handle_verify_signature(sid, d),
                     "encrypt_message": lambda sid, ws, d: self.handle_encrypt_message(sid, d),
@@ -9308,6 +9709,32 @@ class QuantumBlockchainWebSocketServer:
                 "status": "error",
                 "message": str(e)
             }
+    async def handle_get_wallet_balance(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle get balance request"""
+        try:
+            address = data.get("address")
+            if not address:
+                return {
+                    "status": "error",
+                    "message": "No address provided"
+                }
+
+            # Get balance from wallet_balances
+            balance = self.wallet_balances.get(address, "0")
+            
+            logger.info(f"Retrieved balance for wallet {address}: {balance}")
+            return {
+                "status": "success",
+                "balance": balance
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get balance: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {
+                "status": "error",
+                "message": f"Failed to get balance: {str(e)}"
+            }
 
 
 
@@ -9358,11 +9785,45 @@ class QuantumBlockchainWebSocketServer:
     # Wallet Handlers
     async def handle_create_wallet(self, session_id: str, websocket, data: dict) -> dict:
         """Handle wallet creation"""
-        self.sessions[session_id]['wallet'] = Wallet()
-        return {
-            "status": "success",
-            "wallet": self.sessions[session_id]['wallet'].to_dict()
-        }
+        try:
+            # Create new wallet
+            new_wallet = Wallet()  # Initialize new wallet
+
+            # Store in session
+            if session_id not in self.sessions:
+                self.sessions[session_id] = {}
+            self.sessions[session_id]['wallet'] = new_wallet
+
+            # Initialize balance
+            self.wallet_balances[new_wallet.address] = "0"
+
+            # Get private key in PEM format
+            private_key_pem = new_wallet.private_key_pem() if new_wallet.private_key else None
+
+            # Create response with all required fields including private key
+            wallet_data = {
+                'address': new_wallet.address,
+                'public_key': new_wallet.public_key,
+                'private_key': private_key_pem,  # Include private key in PEM format
+                'mnemonic': new_wallet.mnemonic_phrase,
+                'hashed_pincode': new_wallet.hashed_pincode,
+                'salt': base64.b64encode(new_wallet.salt).decode('utf-8') if new_wallet.salt else None
+            }
+
+            logger.info(f"Created new wallet with address: {new_wallet.address[:8]}...")
+            return {
+                'status': 'success',
+                'wallet': wallet_data
+            }
+
+        except Exception as e:
+            logger.error(f"Wallet creation failed: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {
+                'status': 'error',
+                'message': f'Failed to create wallet: {str(e)}'
+            }
+
 
     async def handle_create_wallet_with_pincode(self, session_id: str, websocket, data: dict) -> dict:
         """Handle wallet creation with pincode"""

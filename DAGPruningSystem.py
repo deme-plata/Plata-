@@ -310,7 +310,6 @@ class DAGPruningSystem:
             logger.error(f"Error handling timestamp violations: {str(e)}")
             logger.error(traceback.format_exc())
             return dag
-
     async def prune_dag(self, dag: nx.DiGraph, confirmation_system) -> Tuple[nx.DiGraph, Dict]:
         """Prune the DAG while preserving essential properties."""
         try:
@@ -324,129 +323,133 @@ class DAGPruningSystem:
             if initial_size <= 1:
                 return working_dag, self._get_pruning_stats(0, start_time, 0, True)
 
-            # Step 1: Initial size check and aggressive pruning if needed
-            if initial_size > self.max_dag_size * 1.5:  # If severely oversized
-                # Keep only most recent and highest scored nodes
-                all_nodes = sorted(
-                    working_dag.nodes(),
-                    key=lambda n: (
-                        confirmation_system.quantum_scores.get(n, 0.0),
-                        working_dag.nodes[n].get('timestamp', 0)
-                    ),
-                    reverse=True
-                )[:self.max_dag_size]
-                working_dag = working_dag.subgraph(all_nodes).copy()
-
-            # Step 2: Resolve transaction conflicts
-            tx_conflicts = defaultdict(list)
+            # Handle transaction conflicts FIRST before anything else
+            conflict_blocks = defaultdict(list)
             for node in working_dag.nodes():
                 block = working_dag.nodes[node].get('block')
                 if block and hasattr(block, 'transactions'):
                     txs = block.transactions if isinstance(block.transactions, list) else [block.transactions]
                     for tx in txs:
                         tx_hash = tx.hash if hasattr(tx, 'hash') else str(tx)
-                        tx_conflicts[tx_hash].append(node)
+                        conflict_blocks[tx_hash].append(node)
 
-            # Apply conflict resolution
             blocks_to_remove = set()
-            for tx_hash, containing_blocks in tx_conflicts.items():
-                if len(containing_blocks) > 1:
-                    sorted_blocks = sorted(
-                        containing_blocks,
+            blocks_to_keep = set()
+            
+            # Always keep genesis block
+            if genesis_hash in working_dag.nodes():
+                blocks_to_keep.add(genesis_hash)
+            
+            for tx_hash, blocks in conflict_blocks.items():
+                if len(blocks) > 1:
+                    # Sort by quantum score primarily and timestamp secondarily
+                    scored_blocks = sorted(
+                        blocks,
                         key=lambda b: (
-                            confirmation_system.quantum_scores.get(b, 0),
+                            confirmation_system.quantum_scores.get(b, 0.0),
                             working_dag.nodes[b].get('timestamp', 0)
                         ),
                         reverse=True
                     )
-                    blocks_to_remove.update(sorted_blocks[1:])
+                    blocks_to_keep.add(scored_blocks[0])  # Keep highest scored block
+                    blocks_to_remove.update(scored_blocks[1:])  # Remove all others
                     conflicts_resolved += 1
 
-            for block in blocks_to_remove:
-                if block in working_dag:
-                    preds = list(working_dag.predecessors(block))
-                    succs = list(working_dag.successors(block))
-                    for pred in preds:
-                        for succ in succs:
-                            if (working_dag.nodes[pred]['timestamp'] < 
-                                working_dag.nodes[succ]['timestamp']):
-                                working_dag.add_edge(pred, succ)
-                    working_dag.remove_node(block)
-
-            # Step 3: Identify critical components
-            genesis_present = genesis_hash in working_dag
-            min_required_blocks = set()
-            recent_blocks = set()
+            # Pre-identify secure blocks
             secure_blocks = set()
-            critical_paths = set()
+            secure_paths = set()
+            # Don't check removed blocks for security
+            for node in [n for n in working_dag.nodes() if n not in blocks_to_remove]:
+                try:
+                    security_info = await confirmation_system.get_transaction_security(node, None)
+                    if security_info:
+                        security_level = security_info.get('security_level', 'MEDIUM')
+                        if self.security_levels.get(security_level, 0) >= self.security_levels.get(self.min_security_level, 0):
+                            secure_blocks.add(node)
+                            secure_paths.update(nx.ancestors(working_dag, node))
+                except Exception as e:
+                    logger.debug(f"Error checking security for node {node}: {str(e)}")
 
-            # Track critical nodes with scoring
+            # Remove conflicts except secure blocks and genesis
+            blocks_to_remove = blocks_to_remove - secure_blocks - {genesis_hash}
+            initial_nodes = [n for n in working_dag.nodes() if n not in blocks_to_remove]
+            working_dag = working_dag.subgraph(initial_nodes).copy()
+
+            # Add edges to connect genesis if it exists but is isolated
+            if genesis_hash in working_dag.nodes() and working_dag.degree(genesis_hash) == 0:
+                # Find the earliest non-genesis block by timestamp
+                non_genesis_nodes = [n for n in working_dag.nodes() if n != genesis_hash]
+                if non_genesis_nodes:
+                    earliest_node = min(
+                        non_genesis_nodes,
+                        key=lambda n: working_dag.nodes[n].get('timestamp', float('inf'))
+                    )
+                    working_dag.add_edge(genesis_hash, earliest_node)
+
+            if initial_size > self.max_dag_size * 1.5:
+                must_keep = secure_blocks.union(secure_paths, blocks_to_keep)
+                remaining_slots = self.max_dag_size - len(must_keep)
+                if remaining_slots > 0:
+                    candidates = [n for n in working_dag.nodes() if n not in must_keep]
+                    sorted_candidates = sorted(
+                        candidates,
+                        key=lambda n: (
+                            confirmation_system.quantum_scores.get(n, 0.0),
+                            working_dag.nodes[n].get('timestamp', 0)
+                        ),
+                        reverse=True
+                    )[:remaining_slots]
+                    must_keep.update(sorted_candidates)
+                working_dag = working_dag.subgraph(must_keep).copy()
+
+            # Identify critical components
+            genesis_present = genesis_hash in working_dag
+            recent_blocks = set()
+            critical_paths = set()
+            critical_nodes = secure_blocks.copy()
+
             node_scores = {}
-            tx_blocks = {}
             for node in working_dag.nodes():
                 timestamp = working_dag.nodes[node].get('timestamp', 0)
                 if current_time - timestamp < 3600:
                     recent_blocks.add(node)
-                    # Add predecessors of recent blocks to preserve paths
+                    critical_nodes.add(node)
                     critical_paths.update(nx.ancestors(working_dag, node))
-                try:
-                    security_info = await confirmation_system.get_transaction_security(node, None)
-                    if security_info and security_info['security_level'] in ['MAXIMUM', 'VERY_HIGH', 'HIGH']:
-                        secure_blocks.add(node)
-                        # Add predecessors of secure blocks to preserve paths
-                        critical_paths.update(nx.ancestors(working_dag, node))
-                except Exception as e:
-                    logger.debug(f"Error checking security for node {node}: {str(e)}")
 
-                # Calculate node score
                 quantum_score = confirmation_system.quantum_scores.get(node, 0.0)
                 time_factor = np.exp(-(current_time - timestamp) / 3600)
+                is_critical = (node == genesis_hash or node in recent_blocks or 
+                             node in secure_blocks or node in critical_paths or
+                             node in blocks_to_keep)
+                node_scores[node] = float('inf') if is_critical else quantum_score * 0.4 + time_factor * 0.6
 
-                if node == genesis_hash:
-                    node_scores[node] = float('inf')
-                elif node in recent_blocks or node in secure_blocks:
-                    node_scores[node] = 1.0
-                else:
-                    node_scores[node] = quantum_score * 0.4 + time_factor * 0.6
+            nodes_to_keep = {genesis_hash} if genesis_present else set()
+            nodes_to_keep.update(critical_nodes | secure_blocks | critical_paths | blocks_to_keep)
 
-                # Track transaction confirmations
-                if 'transaction' in working_dag.nodes[node]:
-                    tx_blocks[node] = set(nx.ancestors(working_dag, node))
-                    conf_blocks = sorted(
-                        list(tx_blocks[node]),
-                        key=lambda n: working_dag.nodes[n].get('timestamp', 0),
-                        reverse=True
-                    )
-                    min_required_blocks.update(conf_blocks[:self.min_confirmations])
-
-            # Step 4: Strict size enforcement while preserving paths
-            nodes_to_keep = {genesis_hash} if genesis_hash in working_dag else set()
-            nodes_to_keep.update(recent_blocks)
-            nodes_to_keep.update(secure_blocks)
-            nodes_to_keep.update(min_required_blocks)
-            nodes_to_keep.update(critical_paths)
-
-            # If over size limit, keep highest scoring nodes while preserving critical paths
             if len(nodes_to_keep) > self.max_dag_size:
-                scored_nodes = sorted(
-                    nodes_to_keep,
-                    key=lambda n: node_scores.get(n, 0.0),
-                    reverse=True
-                )
-                essential_nodes = {n for n in nodes_to_keep if n in recent_blocks or n in secure_blocks}
-                remaining_slots = self.max_dag_size - len(essential_nodes)
-                
-                # Ensure paths to critical blocks are preserved
+                essential_nodes = secure_blocks.union(recent_blocks)
                 path_nodes = set()
                 for critical in essential_nodes:
-                    paths = nx.single_source_shortest_path(working_dag, critical)
-                    path_nodes.update(*paths.values())
-                
-                nodes_to_keep = essential_nodes.union(
-                    set(n for n in scored_nodes if n in path_nodes)[:remaining_slots]
+                    try:
+                        paths = nx.single_source_shortest_path(working_dag, critical)
+                        path_nodes.update(*paths.values())
+                    except nx.NetworkXError:
+                        continue
+
+                scored_nodes = sorted(
+                    [n for n in nodes_to_keep],
+                    key=lambda n: (
+                        n == genesis_hash,  # Genesis block gets highest priority
+                        n in secure_blocks,
+                        n in blocks_to_keep,
+                        n in essential_nodes,
+                        n in path_nodes,
+                        node_scores.get(n, 0.0)
+                    ),
+                    reverse=True
                 )
+                nodes_to_keep = set(scored_nodes[:max(self.max_dag_size, len(secure_blocks))])
             else:
-                # Fill remaining slots with highest scoring nodes
                 remaining_slots = self.max_dag_size - len(nodes_to_keep)
                 if remaining_slots > 0:
                     other_nodes = sorted(
@@ -456,89 +459,33 @@ class DAGPruningSystem:
                     )[:remaining_slots]
                     nodes_to_keep.update(other_nodes)
 
-            # Create pruned DAG with only kept nodes and their predecessors
             pruned_dag = working_dag.subgraph(nodes_to_keep).copy()
 
-            # Step 5: Ensure connectivity
+            # Ensure genesis block connectivity if present
+            if genesis_hash in pruned_dag.nodes() and pruned_dag.degree(genesis_hash) == 0:
+                # Find earliest non-genesis block
+                non_genesis = [n for n in pruned_dag.nodes() if n != genesis_hash]
+                if non_genesis:
+                    earliest = min(non_genesis, key=lambda n: pruned_dag.nodes[n].get('timestamp', float('inf')))
+                    pruned_dag.add_edge(genesis_hash, earliest)
+
             if pruned_dag.number_of_nodes() > 1:
                 components = list(nx.weakly_connected_components(pruned_dag))
                 if len(components) > 1:
-                    # Keep largest component
-                    largest_comp = max(components, key=len)
+                    component_scores = [
+                        (comp, len(comp & secure_blocks))
+                        for comp in components
+                    ]
+                    largest_comp = max(component_scores, key=lambda x: x[1])[0]
                     pruned_dag = pruned_dag.subgraph(largest_comp).copy()
 
-                    # If still too large, trim while preserving critical paths
-                    if pruned_dag.number_of_nodes() > self.max_dag_size:
-                        essential_nodes = {n for n in pruned_dag.nodes() 
-                                        if n in recent_blocks or n in secure_blocks}
-                        path_nodes = set()
-                        for critical in essential_nodes:
-                            try:
-                                paths = nx.single_source_shortest_path(pruned_dag, critical)
-                                path_nodes.update(*paths.values())
-                            except nx.NetworkXError:
-                                continue
-                        
-                        nodes = sorted(
-                            pruned_dag.nodes(),
-                            key=lambda n: (n in path_nodes, node_scores.get(n, 0.0)),
-                            reverse=True
-                        )[:self.max_dag_size]
-                        pruned_dag = pruned_dag.subgraph(nodes).copy()
-
             nodes_pruned = initial_size - pruned_dag.number_of_nodes()
-            return pruned_dag, self._get_pruning_stats(
-                nodes_pruned=nodes_pruned,
-                start_time=start_time,
-                conflicts_resolved=conflicts_resolved,
-                preserve_ordering=True
-            )
+            return pruned_dag, self._get_pruning_stats(nodes_pruned, start_time, conflicts_resolved, True)
 
         except Exception as e:
             logger.error(f"Error during DAG pruning: {str(e)}")
             logger.error(traceback.format_exc())
-            
-            # Emergency fallback with strict size enforcement
-            try:
-                # Keep only essential nodes up to size limit
-                nodes_to_keep = set([genesis_hash] if genesis_present else [])
-                nodes_to_keep.update(list(recent_blocks)[:self.max_dag_size//2])
-                remaining_slots = self.max_dag_size - len(nodes_to_keep)
-                
-                if remaining_slots > 0:
-                    # Fill remaining slots with highest quantum score nodes
-                    other_nodes = sorted(
-                        [n for n in working_dag.nodes() if n not in nodes_to_keep],
-                        key=lambda n: confirmation_system.quantum_scores.get(n, 0.0),
-                        reverse=True
-                    )[:remaining_slots]
-                    nodes_to_keep.update(other_nodes)
-                
-                pruned_dag = working_dag.subgraph(nodes_to_keep).copy()
-                
-                # Ensure final size limit
-                if pruned_dag.number_of_nodes() > self.max_dag_size:
-                    nodes = list(pruned_dag.nodes())[:self.max_dag_size]
-                    pruned_dag = pruned_dag.subgraph(nodes).copy()
-                    
-                return pruned_dag, self._get_pruning_stats(
-                    nodes_pruned=initial_size - pruned_dag.number_of_nodes(),
-                    start_time=start_time,
-                    conflicts_resolved=conflicts_resolved,
-                    preserve_ordering=True
-                )
-            except Exception as e2:
-                logger.error(f"Fallback failed: {str(e2)}")
-                # Last resort: return truncated DAG
-                nodes = list(working_dag.nodes())[:self.max_dag_size]
-                final_dag = working_dag.subgraph(nodes).copy()
-                return final_dag, self._get_pruning_stats(
-                    nodes_pruned=0,
-                    start_time=start_time,
-                    conflicts_resolved=conflicts_resolved,
-                    preserve_ordering=True
-                )
-
+            return dag, self._get_pruning_stats(0, start_time, conflicts_resolved, True)
     def _is_critical_node(self, node: str, dag: nx.DiGraph, 
                          critical_blocks: Set[str], confirmation_system) -> bool:
         """Determine if a node is critical and should not be pruned."""
