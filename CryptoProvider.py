@@ -136,17 +136,45 @@ class CryptoProvider:
         return MockQuantumSigner()
 
     def create_quantum_signature(self, message: Union[str, bytes]) -> Optional[bytes]:
-        """Create quantum signature with proper error handling"""
+        """Create quantum signature with proper error handling and type validation"""
         try:
-            signature = self.quantum_signer.sign_message(message)
-            if not signature:
-                logger.warning("Quantum signing failed, retrying with fresh mock signer")
+            # Ensure message is in bytes format
+            if isinstance(message, str):
+                message_bytes = message.encode('utf-8')
+            elif isinstance(message, bytes):
+                message_bytes = message
+            else:
+                raise ValueError(f"Invalid message type: {type(message)}. Expected str or bytes.")
+                
+            # Try creating signature
+            logger.debug("Attempting to create quantum signature")
+            signature = self.quantum_signer.sign_message(message_bytes)
+            
+            # Validate initial signature attempt
+            if not signature or not isinstance(signature, bytes):
+                logger.warning("Initial quantum signing failed or returned invalid signature")
+                
+                # Retry with new signer
+                logger.debug("Reinitializing mock quantum signer")
                 self.quantum_signer = self._initialize_mock_quantum()
-                signature = self.quantum_signer.sign_message(message)
+                signature = self.quantum_signer.sign_message(message_bytes)
+                
+                # Validate retry attempt
+                if not signature or not isinstance(signature, bytes):
+                    logger.error("Quantum signing retry failed")
+                    return None
+                    
+            # Verify signature size
+            if len(signature) < 64:  # Minimum signature size
+                logger.error(f"Generated signature too small: {len(signature)} bytes")
+                return None
+                
+            logger.debug(f"Successfully created quantum signature of {len(signature)} bytes")
             return signature
-
+            
         except Exception as e:
             logger.error(f"Quantum signature creation failed: {str(e)}")
+            logger.error(traceback.format_exc())
             return None
 
     def verify_quantum_signature(self, message: Union[str, bytes], 

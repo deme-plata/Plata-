@@ -173,7 +173,8 @@ from Wallet import Wallet
 from DAGKnightMiner import DAGKnightMiner
 from DAGConfirmationSystem import DAGConfirmationSystem
 from DAGKnightGasSystem import EnhancedDAGKnightGasSystem
-from P2PNode import P2PNode, enhance_p2p_node,LinuxQuantumNode,NetworkOptimizer,DAGKnightConsensus    # Import the enhance_p2p_node function
+from P2PNode import P2PNode, enhance_p2p_node,LinuxQuantumNode,NetworkOptimizer,DAGKnightConsensus    
+from AdvancedHomomorphicSystem import AdvancedHomomorphicSystem, QuantumEnhancedProofs,QuantumDecoherence,QuantumFoamTopology,NoncommutativeGeometry
 import systemd
 class SignalManager:
     def __init__(self, app):
@@ -8591,6 +8592,10 @@ import logging
 import socket
 from contextlib import closing
 import traceback
+import logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 class QuantumBlockchainWebSocketServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 8765):
         """Initialize server with specified host and port."""
@@ -8612,6 +8617,7 @@ class QuantumBlockchainWebSocketServer:
         self._initialize_wallet_storage()
         self.mining_handler = MiningHandler()
         self.wallet_balances = {}  # Dictionary to store wallet balances
+        self.stark = SecureHybridZKStark(security_level=20)
 
         # Initialize core components
         self.session_manager = SessionManager()
@@ -8647,7 +8653,11 @@ class QuantumBlockchainWebSocketServer:
                    f"\n\tTransaction storage"
                    f"\n\tMetrics tracking")
 
-        self.parallel_processor = ParallelTransactionProcessor()
+
+        self.parallel_processor = ParallelTransactionProcessor(
+            max_batch_size=100,
+            max_workers=10
+        )
         self.transaction_batches = {}
         self.p2p_node = None
         self.network_ready = False
@@ -8658,6 +8668,10 @@ class QuantumBlockchainWebSocketServer:
             'mining': self.handle_mining_message,
             'transaction': self.handle_transaction_message,
             'p2p_test': self.handle_p2p_test_message,
+            'homomorphic': self.handle_homomorphic_operations,
+            'quantum_proof': self.handle_quantum_proof_operations,
+            'quantum_metrics': self.handle_get_quantum_metrics,
+
             'consensus': self.consensus_handler.handle_message  # Add consensus handler
         }
         self.handlers = {
@@ -8666,15 +8680,100 @@ class QuantumBlockchainWebSocketServer:
             'transaction': self.handle_transaction_message,
             'p2p_test': self.handle_p2p_test_message,
             'consensus': self.consensus_handler.handle_message  # Add consensus handler
-            # ... other handlers
         }
         self.is_initialized = False
+        self.homomorphic_system = AdvancedHomomorphicSystem(key_size=2048)
+        
+        # Initialize quantum-enhanced proofs system
+        self.quantum_proofs = QuantumEnhancedProofs(
+            quantum_system=self.homomorphic_system.quantum_decoherence,
+            foam_generator=self.homomorphic_system.foam_topology,
+            nc_geometry=self.homomorphic_system.nc_geometry
+        )
+        
+        # Storage for various quantum-enhanced components
+        self.encrypted_values = {}
+        self.quantum_states = {}
+        self.quantum_proof_store = {}
+        self.foam_structures = {}
+        
+        # Physics constants
+        self.physics_constants = {
+            'G': G,
+            'c': c,
+            'hbar': hbar,
+            'l_p': l_p,
+            't_p': t_p,
+            'm_p': m_p
+        }
+        self.quantum_metrics = {
+            'total_operations': 0,
+            'successful_proofs': 0,
+            'quantum_states': [],
+            'decoherence_events': [],
+            'foam_structures': [],
+            'verification_stats': {
+                'total': 0,
+                'successful': 0,
+                'failed': 0
+            }
+        }
+
     def _initialize_wallet_storage(self):
         """Initialize wallet storage and balances"""
         if not hasattr(self, 'wallets'):
             self.wallets = {}
         if not hasattr(self, 'wallet_balances'):
             self.wallet_balances = {}
+    async def initialize(self):
+        """Initialize server components"""
+        try:
+            if not isinstance(self.port, int):
+                raise ValueError(f"Invalid port: {self.port}. Port must be an integer.")
+
+            self.loop = asyncio.get_event_loop()
+            
+            # Initialize quantum components if needed
+            await self._initialize_quantum_components()
+            
+            logger.info(f"Starting quantum-enhanced WebSocket server on {self.host}:{self.port}")
+            
+            self.server = await websockets.serve(
+                self.handle_websocket,
+                self.host,
+                self.port,
+                ping_interval=None,
+                ping_timeout=None
+            )
+            
+            self.is_initialized = True
+            logger.info(f"Server initialized successfully on ws://{self.host}:{self.port}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Server initialization failed: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+    async def _initialize_quantum_components(self):
+        """Initialize quantum components if needed"""
+        try:
+            # Prepare initial quantum states
+            initial_state = self._prepare_quantum_state()
+            self.quantum_states['initial'] = initial_state
+            
+            # Generate initial foam structure
+            foam_structure = self.homomorphic_system.foam_topology.generate_foam_structure(
+                volume=1.0,
+                temperature=300.0
+            )
+            self.foam_structures['initial'] = foam_structure
+            
+            logger.info("Quantum components initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize quantum components: {str(e)}")
+            raise
 
     async def update_wallet_balance(self, address: str, amount: str):
         """Update wallet balance"""
@@ -8691,18 +8790,41 @@ class QuantumBlockchainWebSocketServer:
         except Exception as e:
             logger.error(f"Failed to update wallet balance: {str(e)}")
             return False
+    def get_wallet(self, address: str) -> Optional[Wallet]:
+        """Get wallet by address with proper error handling"""
+        try:
+            # Check stored wallets first
+            if address in self.wallets:
+                return self.wallets[address]
+            
+            # Check session wallets
+            for session in self.sessions.values():
+                if isinstance(session, dict) and 'wallet' in session:
+                    wallet = session['wallet']
+                    if wallet and getattr(wallet, 'address', None) == address:
+                        return wallet
+            
+            logger.warning(f"Wallet not found: {address}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting wallet {address}: {str(e)}")
+            return None
+
 
     async def get_wallet_balance(self, address: str) -> str:
         """Get wallet balance"""
         return self.wallet_balances.get(address, "0")
+        
+
     async def handle_wallet_message(self, data: dict) -> dict:
-        """Handle wallet-related messages using Wallet class."""
+        """Handle wallet-related messages using Wallet class with quantum features."""
         try:
             if not hasattr(self, 'wallets'):
                 self.wallets = {}
 
             if not hasattr(self, 'wallet_balances'):
-                self.wallet_balances = {}  # Add balance tracking
+                self.wallet_balances = {}
 
             action = data.get('action')
             if not action:
@@ -8710,14 +8832,22 @@ class QuantumBlockchainWebSocketServer:
 
             if action == 'create':
                 try:
-                    # Create new wallet using the Wallet class
-                    new_wallet = Wallet()  # This will generate keys internally
+                    # Create new wallet with quantum features
+                    new_wallet = Wallet()  # Initialize wallet with quantum support
                     
                     # Convert wallet to dictionary for response
                     wallet_data = {
                         'address': new_wallet.address,
                         'public_key': new_wallet.public_key,
-                        'private_key': new_wallet.private_key_pem()
+                        'private_key': new_wallet.private_key_pem(),
+                        'mnemonic': new_wallet.mnemonic_phrase,  # Include mnemonic
+                        'hashed_pincode': new_wallet.hashed_pincode,
+                        'salt': base64.b64encode(new_wallet.salt).decode('utf-8') if new_wallet.salt else None,
+                        'security_features': {
+                            'quantum_enabled': True,
+                            'zk_proof_enabled': True,
+                            'homomorphic_enabled': True
+                        }
                     }
                     
                     # Store wallet and initialize balance
@@ -8733,17 +8863,111 @@ class QuantumBlockchainWebSocketServer:
                     logger.error(f"Wallet creation failed: {str(e)}")
                     return {'status': 'error', 'message': str(e)}
 
+            elif action == 'sign_message':
+                try:
+                    address = data.get('address')
+                    message_bytes = data.get('message_bytes')
+                    use_quantum = data.get('use_quantum', False)
+                    
+                    if not address or not message_bytes:
+                        return {'status': 'error', 'message': 'Address and message_bytes required'}
+                    
+                    wallet = self.wallets.get(address)
+                    if not wallet:
+                        return {'status': 'error', 'message': 'Wallet not found'}
+
+                    try:
+                        # Decode message bytes
+                        message = base64.b64decode(message_bytes)
+                        
+                        if use_quantum:
+                            # Generate quantum signature
+                            quantum_signature = await wallet.crypto_provider.create_quantum_signature(message)
+                            
+                            # Generate standard signature as backup
+                            standard_signature = wallet.sign_message(message)
+                            
+                            return {
+                                'status': 'success',
+                                'quantum_signature': base64.b64encode(quantum_signature).decode() if quantum_signature else None,
+                                'signature': standard_signature,
+                                'timestamp': time.time()
+                            }
+                        else:
+                            # Standard signature only
+                            signature = wallet.sign_message(message)
+                            return {
+                                'status': 'success',
+                                'signature': signature
+                            }
+                    except ValueError as e:
+                        return {'status': 'error', 'message': str(e)}
+                        
+                except Exception as e:
+                    logger.error(f"Message signing failed: {str(e)}")
+                    return {'status': 'error', 'message': str(e)}
+
+            elif action == 'verify_signature':
+                try:
+                    address = data.get('address')
+                    message_bytes = data.get('message_bytes')
+                    signature = data.get('signature')
+                    quantum_signature = data.get('quantum_signature')
+                    
+                    if not all([address, message_bytes]):
+                        return {'status': 'error', 'message': 'Address and message_bytes required'}
+                    
+                    if not signature and not quantum_signature:
+                        return {'status': 'error', 'message': 'Either signature or quantum_signature required'}
+                    
+                    wallet = self.wallets.get(address)
+                    if not wallet:
+                        return {'status': 'error', 'message': 'Wallet not found'}
+
+                    message = base64.b64decode(message_bytes)
+                    verification_results = {}
+                    
+                    # Verify standard signature if provided
+                    if signature:
+                        standard_valid = wallet.verify_signature(
+                            message_bytes,
+                            signature,
+                            wallet.public_key
+                        )
+                        verification_results['standard_signature'] = standard_valid
+                    
+                    # Verify quantum signature if provided
+                    if quantum_signature:
+                        quantum_sig_bytes = base64.b64decode(quantum_signature)
+                        quantum_valid = await wallet.crypto_provider.verify_quantum_signature(
+                            message,
+                            quantum_sig_bytes
+                        )
+                        verification_results['quantum_signature'] = quantum_valid
+                    
+                    # Overall validity
+                    is_valid = all(verification_results.values())
+                    
+                    return {
+                        'status': 'success',
+                        'valid': is_valid,
+                        'verification_details': verification_results,
+                        'verification_time': time.time()
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"Signature verification failed: {str(e)}")
+                    return {'status': 'error', 'message': str(e)}
+
             elif action == 'get_balance':
                 try:
                     address = data.get('address')
                     if not address:
                         return {'status': 'error', 'message': 'No address provided'}
 
-                    # First check if wallet exists
                     if address not in self.wallets:
                         return {'status': 'error', 'message': 'Wallet not found'}
 
-                    # Get balance from our tracking
                     balance = self.wallet_balances.get(address, "0")
 
                     logger.info(f"Retrieved balance for wallet {address}: {balance}")
@@ -8755,66 +8979,117 @@ class QuantumBlockchainWebSocketServer:
                     logger.error(f"Failed to get balance for {address}: {str(e)}")
                     return {'status': 'error', 'message': str(e)}
 
-            elif action == 'sign_message':
+            elif action == 'create_zk_proof':
                 try:
                     address = data.get('address')
-                    message = data.get('message')
+                    statement = data.get('statement')
                     
-                    if not address or not message:
-                        return {'status': 'error', 'message': 'Address and message required'}
+                    if not address or not statement:
+                        return {'status': 'error', 'message': 'Address and statement required'}
                     
                     wallet = self.wallets.get(address)
                     if not wallet:
                         return {'status': 'error', 'message': 'Wallet not found'}
                     
-                    signature = wallet.sign_message(message)
-                    return {
-                        'status': 'success',
-                        'signature': signature
-                    }
-                except Exception as e:
-                    logger.error(f"Message signing failed: {str(e)}")
-                    return {'status': 'error', 'message': str(e)}
-
-            elif action == 'verify_signature':
-                try:
-                    address = data.get('address')
-                    message = data.get('message')
-                    signature = data.get('signature')
-                    
-                    if not all([address, message, signature]):
-                        return {'status': 'error', 'message': 'Address, message, and signature required'}
-                    
-                    wallet = self.wallets.get(address)
-                    if not wallet:
-                        return {'status': 'error', 'message': 'Wallet not found'}
-                    
-                    # Convert message to base64 if it's not already
-                    message_b64 = base64.b64encode(message.encode()).decode() if isinstance(message, str) else message
-                    
-                    is_valid = wallet.verify_signature(
-                        message_b64,
-                        signature,
-                        wallet.public_key
+                    # Generate ZK proof using the wallet's crypto provider
+                    proof = await wallet.crypto_provider.zk_system.prove(
+                        statement['actual_balance'],
+                        statement['threshold']
                     )
                     
                     return {
                         'status': 'success',
-                        'valid': is_valid
+                        'zk_proof': base64.b64encode(str(proof).encode()).decode(),
+                        'timestamp': time.time()
                     }
+                    
                 except Exception as e:
-                    logger.error(f"Signature verification failed: {str(e)}")
+                    logger.error(f"ZK proof creation failed: {str(e)}")
                     return {'status': 'error', 'message': str(e)}
 
             else:
-                return {'status': 'error', 'message': f'Unknown wallet action: {action}'}
+                return {
+                    'status': 'error',
+                    'message': f'Unknown wallet action: {action}. Available actions: create, sign_message, verify_signature, get_balance, create_zk_proof'
+                }
 
         except Exception as e:
             logger.error(f"Error handling wallet message: {str(e)}")
             logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
 
-        return {'status': 'error', 'message': 'Unexpected end of handler'}  # Fallback response
+    async def handle_create_quantum_signature(self, data: dict) -> dict:
+        """Handle quantum signature creation"""
+        try:
+            address = data.get('address')
+            message_bytes = data.get('message_bytes')
+            private_key = data.get('private_key')
+
+            if not all([address, message_bytes, private_key]):
+                return {
+                    'status': 'error',
+                    'message': 'Missing required parameters'
+                }
+
+            # Get wallet
+            wallet = self.wallets.get(address)
+            if not wallet:
+                return {
+                    'status': 'error',
+                    'message': 'Wallet not found'
+                }
+
+            # Create quantum signature
+            message = base64.b64decode(message_bytes)
+            quantum_signature = await self.crypto_provider.create_quantum_signature(message)
+            
+            if not quantum_signature:
+                return {
+                    'status': 'error',
+                    'message': 'Failed to create quantum signature'
+                }
+
+            return {
+                'status': 'success',
+                'quantum_signature': base64.b64encode(quantum_signature).decode(),
+                'timestamp': time.time()
+            }
+
+        except Exception as e:
+            logger.error(f"Error creating quantum signature: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_verify_quantum_signature(self, data: dict) -> dict:
+        """Handle quantum signature verification"""
+        try:
+            message_bytes = data.get('message_bytes')
+            quantum_signature = data.get('quantum_signature')
+            public_key = data.get('public_key')
+
+            if not all([message_bytes, quantum_signature, public_key]):
+                return {
+                    'status': 'error',
+                    'message': 'Missing required parameters'
+                }
+
+            # Verify quantum signature
+            message = base64.b64decode(message_bytes)
+            signature = base64.b64decode(quantum_signature)
+            
+            is_valid = await self.crypto_provider.verify_quantum_signature(
+                message,
+                signature
+            )
+
+            return {
+                'status': 'success',
+                'valid': is_valid,
+                'verification_time': time.time()
+            }
+
+        except Exception as e:
+            logger.error(f"Error verifying quantum signature: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
 
     async def handle_mining_message(self, data: dict) -> dict:
         """Route mining messages to the mining handler"""
@@ -8823,50 +9098,105 @@ class QuantumBlockchainWebSocketServer:
 
 
     async def handle_transaction_message(self, data: dict) -> dict:
-        """Handle transaction-related messages."""
+        """Handle transaction message using parallel processor"""
         try:
             action = data.get('action')
             if not action:
                 return {'status': 'error', 'message': 'No action specified'}
 
             if action == 'create':
-                # Create and process new transaction
-                sender = data.get('sender')
-                receiver = data.get('receiver')
-                amount = data.get('amount')
-                
-                if not all([sender, receiver, amount]):
-                    return {'status': 'error', 'message': 'Missing transaction parameters'}
-
-                tx = await self.blockchain.create_transaction(
-                    sender=sender,
-                    receiver=receiver,
-                    amount=Decimal(amount)
-                )
-                
-                return {
-                    'status': 'success',
-                    'transaction': tx.to_dict()
+                # Create base transaction
+                tx_data = {
+                    'sender': data.get('sender'),
+                    'receiver': data.get('receiver'),
+                    'amount': data.get('amount'),
+                    'quantum_enabled': data.get('quantum_enabled', False),
+                    'use_zk_proof': data.get('use_zk_proof', False),
+                    'use_ring_signature': data.get('use_ring_signature', False),
+                    'use_homomorphic': data.get('use_homomorphic', False)
                 }
 
-            elif action == 'get_status':
-                # Get transaction status
-                tx_hash = data.get('tx_hash')
-                if not tx_hash:
-                    return {'status': 'error', 'message': 'No transaction hash provided'}
+                # Get sender wallet
+                sender_wallet = self.wallets.get(tx_data['sender'])
+                if not sender_wallet:
+                    return {'status': 'error', 'message': 'Sender wallet not found'}
+
+                # Create transaction with wallet
+                transaction = Transaction(**tx_data)
+                transaction.wallet = sender_wallet  # Attach wallet for signing
+
+                # Process transaction with parallel processor
+                result = await self.parallel_processor.process_single_transaction(transaction)
+                
+                if result['status'] == 'success':
+                    # Store processed transaction
+                    if not hasattr(self, 'transactions'):
+                        self.transactions = {}
+                    self.transactions[transaction.id] = transaction
+
+                    return {
+                        'status': 'success',
+                        'transaction': {
+                            **transaction.to_dict(),
+                            'security_features': result['security_success'],
+                            'processing_time': result['processing_time']
+                        }
+                    }
+                else:
+                    return {
+                        'status': 'error',
+                        'message': 'Transaction processing failed',
+                        'details': result.get('error')
+                    }
+
+            elif action == 'batch_create':
+                # Handle batch transaction creation
+                transactions = []
+                for tx_data in data.get('transactions', []):
+                    sender_wallet = self.wallets.get(tx_data['sender'])
+                    if not sender_wallet:
+                        continue
+                        
+                    transaction = Transaction(**tx_data)
+                    transaction.wallet = sender_wallet
+                    transactions.append(transaction)
+
+                if not transactions:
+                    return {'status': 'error', 'message': 'No valid transactions to process'}
+
+                # Process batch
+                results = await self.parallel_processor.process_transactions_batch(transactions)
+                
+                # Store successful transactions
+                if not hasattr(self, 'transactions'):
+                    self.transactions = {}
                     
-                status = await self.blockchain.get_transaction_status(tx_hash)
+                for result in results:
+                    if result['status'] == 'success':
+                        tx = result['transaction']
+                        self.transactions[tx.id] = tx
+
                 return {
                     'status': 'success',
-                    'tx_status': status
+                    'processed': len(results),
+                    'transactions': [
+                        {
+                            **r['transaction'].to_dict(),
+                            'security_features': r['security_success'],
+                            'processing_time': r['processing_time']
+                        }
+                        for r in results
+                    ],
+                    'metrics': self.parallel_processor.metrics
                 }
 
-            else:
-                return {'status': 'error', 'message': f'Unknown transaction action: {action}'}
+            return {'status': 'error', 'message': f'Unknown transaction action: {action}'}
 
         except Exception as e:
             logger.error(f"Error handling transaction message: {str(e)}")
+            logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
+
 
     async def handle_p2p_test_message(self, data: dict) -> dict:
         """Handle P2P test messages including consensus testing."""
@@ -9143,32 +9473,36 @@ class QuantumBlockchainWebSocketServer:
 
 
     async def handle_websocket(self, websocket, path):
-        """Handle WebSocket connection with proper session management"""
-        session_id = str(id(websocket))
+        """Handle WebSocket connection with quantum enhancement"""
+        session_id = str(uuid.uuid4())
         logger.info(f"New WebSocket connection established. Session ID: {session_id}")
         
         try:
-            # Initialize session if needed
-            if session_id not in self.sessions:
-                self.sessions[session_id] = {
-                    'websocket': websocket,
-                    'last_activity': time.time()
-                }
-
+            # Initialize session
+            self.sessions[session_id] = {
+                'websocket': websocket,
+                'quantum_state': self._prepare_quantum_state(),
+                'foam_structure': self.homomorphic_system.foam_topology.generate_foam_structure(
+                    volume=1.0,
+                    temperature=300.0
+                ),
+                'last_activity': time.time()
+            }
+            
             async for message in websocket:
                 try:
                     # Parse message
                     data = json.loads(message)
                     logger.debug(f"Received message for session {session_id}: {data}")
-
-                    # Process message using existing handler
+                    
+                    # Process message with quantum enhancement
                     response = await self.handle_message(session_id, websocket, data)
                     
                     # Send response
                     if response:
                         await websocket.send(json.dumps(response))
                         logger.debug(f"Sent response for session {session_id}: {response}")
-
+                        
                 except json.JSONDecodeError as e:
                     logger.error(f"Invalid JSON message received: {str(e)}")
                     await websocket.send(json.dumps({
@@ -9182,12 +9516,9 @@ class QuantumBlockchainWebSocketServer:
                         'status': 'error',
                         'message': f'Error processing message: {str(e)}'
                     }))
-
+                    
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"WebSocket connection closed for session {session_id}")
-        except Exception as e:
-            logger.error(f"WebSocket connection error: {str(e)}")
-            logger.error(traceback.format_exc())
         finally:
             # Cleanup session
             await self.cleanup_session(session_id)
@@ -9636,7 +9967,7 @@ class QuantumBlockchainWebSocketServer:
             
             logger.debug(f"Handling {category}/{action} request for session {session_id}")
             
-            # Update handlers dictionary to include all actions, including test endpoints
+            # Update handlers dictionary to include quantum operations
             handlers = {
                 "wallet": {
                     "create": self.handle_create_wallet,
@@ -9644,7 +9975,6 @@ class QuantumBlockchainWebSocketServer:
                     "create_with_mnemonic": self.handle_create_wallet_with_mnemonic,
                     "get_info": self.handle_get_wallet_info,
                     "get_balance": self.handle_get_wallet_balance,  
-
                     "sign_message": lambda sid, ws, d: self.handle_sign_message(sid, d),
                     "verify_signature": lambda sid, ws, d: self.handle_verify_signature(sid, d),
                     "encrypt_message": lambda sid, ws, d: self.handle_encrypt_message(sid, d),
@@ -9669,14 +9999,44 @@ class QuantumBlockchainWebSocketServer:
                     "get_metrics": self.handle_get_transaction_metrics,
                     "estimate_gas": self.handle_estimate_gas
                 },
-                "p2p_test": {  # New test category with test handlers
+                "p2p_test": {
                     "test_peer_connection": self.handle_test_peer_connection,
                     "test_quantum_entanglement": self.handle_test_quantum_entanglement,
                     "test_transaction_propagation": self.handle_test_transaction_propagation,
                     "test_consensus": self.handle_test_consensus,
                     "get_network_metrics": self.handle_get_network_metrics
+                },
+                # New quantum-enhanced categories
+                "homomorphic": {
+                    "encrypt": self._handle_homomorphic_encrypt,
+                    "decrypt": self._handle_homomorphic_decrypt,
+                    "add": self._handle_homomorphic_add,
+                    "multiply": self._handle_homomorphic_multiply,
+                    "batch": self._handle_homomorphic_batch
+                },
+                "quantum_proof": {
+                    "generate": self.handle_generate_quantum_proof,
+                    "verify": self.handle_verify_quantum_proof,
+                    "get_metrics": self.handle_get_proof_metrics
+                },
+                "quantum_metrics": {
+                    "get_all": self.handle_get_quantum_metrics,
+                    "get_decoherence": lambda sid, ws, d: self._calculate_decoherence(
+                        self.sessions[sid]['quantum_state']
+                    ),
+                    "get_foam_entropy": lambda sid, ws, d: self.quantum_proofs.get_quantum_entropy(
+                        self.sessions[sid]['quantum_state'],
+                        self.sessions[sid]['foam_structure']
+                    ),
+                    "get_system_constants": lambda sid, ws, d: {
+                        'status': 'success',
+                        'constants': self.physics_constants
+                    }
                 }
             }
+
+            # Update quantum state before processing
+            await self._update_session_quantum_state(session_id)
 
             # Check if the category exists in handlers
             if category not in handlers:
@@ -9698,7 +10058,22 @@ class QuantumBlockchainWebSocketServer:
             # Call the appropriate handler for the action
             handler = category_handlers[action]
             logger.debug(f"Calling handler for {category}/{action}")
+            
+            # Track quantum metrics if applicable
+            if category in ['homomorphic', 'quantum_proof', 'quantum_metrics']:
+                self.quantum_metrics['total_operations'] += 1
+            
             response = await handler(session_id, websocket, data)
+            
+            # Add quantum metrics to response for quantum operations
+            if category in ['homomorphic', 'quantum_proof', 'quantum_metrics']:
+                quantum_state = self.sessions[session_id]['quantum_state']
+                response['quantum_state_metrics'] = {
+                    'decoherence': float(self._calculate_decoherence(quantum_state)),
+                    'purity': float(np.trace(quantum_state @ quantum_state)),
+                    'timestamp': time.time()
+                }
+            
             logger.debug(f"Handler response: {response}")
             return response
 
@@ -9709,6 +10084,712 @@ class QuantumBlockchainWebSocketServer:
                 "status": "error",
                 "message": str(e)
             }
+            
+            
+    async def handle_homomorphic_operations(self, session_id: str, data: dict) -> dict:
+        """Handle homomorphic encryption operations with quantum enhancement"""
+        try:
+            action = data.get("action")
+            if not action:
+                return {'status': 'error', 'message': 'No action specified'}
+
+            handlers = {
+                'encrypt': self._handle_homomorphic_encrypt,
+                'decrypt': self._handle_homomorphic_decrypt,
+                'add': self._handle_homomorphic_add,
+                'multiply': self._handle_homomorphic_multiply,
+                'batch': self._handle_homomorphic_batch
+            }
+
+            if action not in handlers:
+                return {
+                    'status': 'error',
+                    'message': f'Unknown action: {action}. Available actions: {list(handlers.keys())}'
+                }
+
+            return await handlers[action](session_id, data)
+
+        except Exception as e:
+            logger.error(f"Error in homomorphic operation: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def _handle_homomorphic_encrypt(self, session_id: str, data: dict) -> dict:
+        """Handle quantum-enhanced homomorphic encryption"""
+        try:
+            value = Decimal(str(data.get("value", 0)))
+            if value <= 0:
+                return {'status': 'error', 'message': 'Value must be positive'}
+
+            # Get session quantum state
+            quantum_state = self.sessions[session_id]['quantum_state']
+            foam_structure = self.sessions[session_id]['foam_structure']
+
+            # Encrypt with quantum enhancement
+            cipher, operation_id = await self.homomorphic_system.encrypt(value)
+            
+            # Apply quantum corrections
+            quantum_correction = self.quantum_proofs.nc_geometry.modified_dispersion(
+                np.array([float(value), 0, 0]),
+                float(value)
+            )
+            
+            # Store encrypted value with quantum data
+            self.encrypted_values[operation_id] = {
+                'cipher': cipher,
+                'quantum_state': quantum_state.copy(),
+                'foam_structure': foam_structure,
+                'quantum_correction': quantum_correction
+            }
+
+            # Calculate quantum metrics
+            quantum_metrics = {
+                'decoherence': self._calculate_decoherence(quantum_state),
+                'foam_entropy': self.quantum_proofs.get_quantum_entropy(quantum_state, foam_structure),
+                'quantum_correction': float(quantum_correction)
+            }
+
+            return {
+                'status': 'success',
+                'operation_id': operation_id,
+                'encrypted_value': base64.b64encode(cipher).decode('utf-8'),
+                'quantum_metrics': quantum_metrics
+            }
+
+        except Exception as e:
+            logger.error(f"Encryption error: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def _handle_homomorphic_decrypt(self, session_id: str, data: dict) -> dict:
+        """Handle quantum-enhanced homomorphic decryption"""
+        try:
+            operation_id = data.get("operation_id")
+            if not operation_id:
+                return {'status': 'error', 'message': 'Operation ID required'}
+
+            stored_data = self.encrypted_values.get(operation_id)
+            if not stored_data:
+                return {'status': 'error', 'message': 'Encrypted value not found'}
+
+            # Decrypt with quantum enhancement
+            value, metadata = await self.homomorphic_system.decrypt(stored_data['cipher'])
+            
+            # Apply inverse quantum correction
+            value = Decimal(str(float(value) / float(stored_data['quantum_correction'])))
+
+            # Update quantum state
+            evolved_state = self.quantum_proofs.quantum_system.lindblad_evolution(
+                stored_data['quantum_state'],
+                0.1,  # Evolution time
+                0.01  # Decoherence rate
+            )[-1]
+
+            # Calculate final metrics
+            final_metrics = {
+                'decoherence': self._calculate_decoherence(evolved_state),
+                'foam_topology': stored_data['foam_structure'],
+                'quantum_correction_applied': float(stored_data['quantum_correction'])
+            }
+
+            return {
+                'status': 'success',
+                'decrypted_value': str(value),
+                'metadata': metadata,
+                'quantum_metrics': final_metrics
+            }
+
+        except Exception as e:
+            logger.error(f"Decryption error: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def _handle_homomorphic_add(self, session_id: str, data: dict) -> dict:
+        """Handle quantum-enhanced homomorphic addition"""
+        try:
+            op_id1 = data.get("operation_id1")
+            op_id2 = data.get("operation_id2")
+
+            if not op_id1 or not op_id2:
+                return {'status': 'error', 'message': 'Both operation IDs required'}
+
+            stored_data1 = self.encrypted_values.get(op_id1)
+            stored_data2 = self.encrypted_values.get(op_id2)
+
+            if not stored_data1 or not stored_data2:
+                return {'status': 'error', 'message': 'One or both encrypted values not found'}
+
+            # Combine quantum states
+            combined_state = self._combine_quantum_states(
+                stored_data1['quantum_state'],
+                stored_data2['quantum_state']
+            )
+
+            # Add encrypted values
+            result_cipher = await self.homomorphic_system.add_encrypted(
+                stored_data1['cipher'],
+                stored_data2['cipher']
+            )
+
+            # Generate new foam structure
+            new_foam = self.homomorphic_system.foam_topology.generate_foam_structure(
+                volume=2.0,
+                temperature=300.0
+            )
+
+            # Calculate combined quantum correction
+            combined_correction = (
+                stored_data1['quantum_correction'] + 
+                stored_data2['quantum_correction']
+            ) / 2
+
+            # Store result
+            new_op_id = f"add_{op_id1}_{op_id2}"
+            self.encrypted_values[new_op_id] = {
+                'cipher': result_cipher,
+                'quantum_state': combined_state,
+                'foam_structure': new_foam,
+                'quantum_correction': combined_correction
+            }
+
+            return {
+                'status': 'success',
+                'operation_id': new_op_id,
+                'encrypted_result': base64.b64encode(result_cipher).decode('utf-8'),
+                'quantum_metrics': {
+                    'combined_decoherence': self._calculate_decoherence(combined_state),
+                    'foam_entropy': self.quantum_proofs.get_quantum_entropy(
+                        combined_state,
+                        new_foam
+                    ),
+                    'quantum_correction': float(combined_correction)
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Addition error: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def _handle_homomorphic_multiply(self, session_id: str, data: dict) -> dict:
+        """Handle quantum-enhanced homomorphic multiplication"""
+        try:
+            operation_id = data.get("operation_id")
+            constant = Decimal(str(data.get("constant", 0)))
+
+            if not operation_id:
+                return {'status': 'error', 'message': 'Operation ID required'}
+
+            stored_data = self.encrypted_values.get(operation_id)
+            if not stored_data:
+                return {'status': 'error', 'message': 'Encrypted value not found'}
+
+            # Multiply with quantum enhancement
+            result_cipher = await self.homomorphic_system.multiply_by_constant(
+                stored_data['cipher'],
+                constant
+            )
+
+            # Scale quantum correction
+            scaled_correction = stored_data['quantum_correction'] * float(constant)
+
+            # Generate new foam structure
+            new_foam = self.homomorphic_system.foam_topology.generate_foam_structure(
+                volume=1.0,
+                temperature=300.0
+            )
+
+            # Store result
+            new_op_id = f"mult_{operation_id}_{constant}"
+            self.encrypted_values[new_op_id] = {
+                'cipher': result_cipher,
+                'quantum_state': stored_data['quantum_state'].copy(),
+                'foam_structure': new_foam,
+                'quantum_correction': scaled_correction
+            }
+
+            return {
+                'status': 'success',
+                'operation_id': new_op_id,
+                'encrypted_result': base64.b64encode(result_cipher).decode('utf-8'),
+                'quantum_metrics': {
+                    'decoherence': self._calculate_decoherence(stored_data['quantum_state']),
+                    'foam_entropy': self.quantum_proofs.get_quantum_entropy(
+                        stored_data['quantum_state'],
+                        new_foam
+                    ),
+                    'quantum_correction': float(scaled_correction)
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Multiplication error: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+            
+                
+    async def handle_quantum_proof_operations(self, session_id: str, data: dict) -> dict:
+            """Handle quantum-enhanced zero-knowledge proof operations"""
+            try:
+                action = data.get("action")
+                handlers = {
+                    "generate": self.handle_generate_quantum_proof,
+                    "verify": self.handle_verify_quantum_proof,
+                    "get_metrics": self.handle_get_proof_metrics,
+                    "batch_verify": self.handle_batch_verify_proofs
+                }
+
+                if action not in handlers:
+                    return {
+                        "status": "error",
+                        "message": f"Unknown action: {action}. Available actions: {list(handlers.keys())}"
+                    }
+
+                # Get session data
+                session = self.sessions.get(session_id)
+                if not session:
+                    return {"status": "error", "message": "Invalid session"}
+
+                # Update quantum state before operation
+                await self._update_session_quantum_state(session_id)
+                
+                return await handlers[action](session_id, data)
+
+            except Exception as e:
+                logger.error(f"Error in quantum proof operation: {str(e)}")
+                logger.error(traceback.format_exc())
+                return {"status": "error", "message": str(e)}
+
+    async def handle_generate_quantum_proof(self, session_id: str, data: dict) -> dict:
+        """Generate quantum-enhanced zero-knowledge proof"""
+        try:
+            # Get required parameters
+            secret = int(data.get("secret", 0))
+            public_input = int(data.get("public_input", 0))
+            
+            # Get session quantum state
+            session = self.sessions[session_id]
+            quantum_state = session['quantum_state']
+            foam_structure = session['foam_structure']
+
+            # Generate quantum-enhanced proof
+            proof, proof_metadata = await self.quantum_proofs.generate_quantum_proof(
+                secret=secret,
+                public_input=public_input,
+                quantum_state=quantum_state,
+                foam_structure=foam_structure
+            )
+
+            # Store proof data
+            proof_id = str(uuid.uuid4())
+            self.quantum_proof_store[proof_id] = {
+                'proof': proof,
+                'metadata': proof_metadata,
+                'quantum_state': quantum_state.copy(),
+                'foam_structure': foam_structure,
+                'timestamp': time.time()
+            }
+
+            # Calculate quantum entropy
+            quantum_entropy = self.quantum_proofs.get_quantum_entropy(
+                quantum_state,
+                foam_structure
+            )
+
+            # Update metrics
+            self.quantum_metrics['successful_proofs'] += 1
+
+            return {
+                "status": "success",
+                "proof_id": proof_id,
+                "stark_proof": base64.b64encode(str(proof[0]).encode()).decode('utf-8'),
+                "quantum_features": {
+                    "foam_factor": float(proof_metadata['foam_factor']),
+                    "nc_correction": float(proof_metadata['nc_correction']),
+                    "quantum_entropy": float(quantum_entropy)
+                },
+                "metadata": {
+                    "timestamp": time.time(),
+                    "quantum_state_purity": float(np.trace(quantum_state @ quantum_state)),
+                    "decoherence": float(self._calculate_decoherence(quantum_state))
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error generating quantum proof: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {"status": "error", "message": str(e)}
+
+    async def handle_verify_quantum_proof(self, session_id: str, data: dict) -> dict:
+        """Verify quantum-enhanced zero-knowledge proof"""
+        try:
+            proof_id = data.get("proof_id")
+            public_input = int(data.get("public_input", 0))
+
+            stored_proof = self.quantum_proof_store.get(proof_id)
+            if not stored_proof:
+                return {"status": "error", "message": "Proof not found"}
+
+            # Calculate time-based decoherence
+            current_time = time.time()
+            time_elapsed = current_time - stored_proof['timestamp']
+            decoherence_factor = np.exp(-0.1 * time_elapsed)  # Simple decoherence model
+
+            # Update quantum state with decoherence
+            evolved_state = self.quantum_proofs.quantum_system.lindblad_evolution(
+                # stored_proof['quantum_state'],
+                time_elapsed,
+                0.1  # Decoherence rate
+            )[-1]
+
+            # Verify the proof with quantum features
+            verification_result = await self.quantum_proofs.verify_quantum_proof(
+                public_input=public_input,
+                proof=(stored_proof['proof'], stored_proof['metadata']),
+                quantum_state=evolved_state
+            )
+
+            # Calculate final decoherence
+            final_decoherence = self._calculate_decoherence(evolved_state)
+
+            # Update verification stats
+            self.quantum_metrics['verification_stats']['total'] += 1
+            if verification_result and final_decoherence <= 0.5:
+                self.quantum_metrics['verification_stats']['successful'] += 1
+            else:
+                self.quantum_metrics['verification_stats']['failed'] += 1
+
+            return {
+                "status": "success",
+                "verified": verification_result and final_decoherence <= 0.5,
+                "verification_metrics": {
+                    "decoherence": float(final_decoherence),
+                    "decoherence_factor": float(decoherence_factor),
+                    "quantum_state_valid": final_decoherence <= 0.5,
+                    "foam_topology_valid": stored_proof['metadata']['foam_factor'] >= 0.1,
+                    "time_elapsed": time_elapsed,
+                    "timestamp": current_time
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error verifying quantum proof: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {"status": "error", "message": str(e)}
+
+    async def handle_batch_verify_proofs(self, session_id: str, data: dict) -> dict:
+        """Batch verify multiple quantum proofs"""
+        try:
+            proof_ids = data.get("proof_ids", [])
+            public_inputs = data.get("public_inputs", [])
+
+            if len(proof_ids) != len(public_inputs):
+                return {"status": "error", "message": "Mismatched proof IDs and public inputs"}
+
+            results = []
+            for proof_id, public_input in zip(proof_ids, public_inputs):
+                verification_data = {
+                    "proof_id": proof_id,
+                    "public_input": public_input
+                }
+                result = await self.handle_verify_quantum_proof(session_id, verification_data)
+                results.append(result)
+
+            # Calculate batch metrics
+            successful_verifications = sum(1 for r in results if r.get('verified', False))
+            average_decoherence = np.mean([
+                r['verification_metrics']['decoherence'] 
+                for r in results 
+                if 'verification_metrics' in r
+            ])
+
+            return {
+                "status": "success",
+                "batch_size": len(proof_ids),
+                "successful_verifications": successful_verifications,
+                "batch_metrics": {
+                    "success_rate": successful_verifications / len(proof_ids),
+                    "average_decoherence": float(average_decoherence),
+                    "timestamp": time.time()
+                },
+                "individual_results": results
+            }
+
+        except Exception as e:
+            logger.error(f"Error in batch verification: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {"status": "error", "message": str(e)}
+
+    async def _update_session_quantum_state(self, session_id: str):
+        """Update quantum state for session"""
+        try:
+            session = self.sessions[session_id]
+            current_time = time.time()
+            time_elapsed = current_time - session.get('last_quantum_update', current_time)
+
+            if time_elapsed > 0:
+                # Evolve quantum state
+                evolved_state = self.quantum_proofs.quantum_system.lindblad_evolution(
+                    session['quantum_state'],
+                    time_elapsed,
+                    0.01  # Low decoherence rate
+                )[-1]
+
+                # Generate new foam structure periodically
+                if time_elapsed > 300:  # 5 minutes
+                    session['foam_structure'] = self.homomorphic_system.foam_topology.generate_foam_structure(
+                        volume=1.0,
+                        temperature=300.0
+                    )
+
+                session['quantum_state'] = evolved_state
+                session['last_quantum_update'] = current_time
+
+        except Exception as e:
+            logger.error(f"Error updating quantum state: {str(e)}")
+            logger.error(traceback.format_exc())
+
+    def _calculate_decoherence(self, quantum_state: np.ndarray) -> float:
+        """Calculate decoherence from quantum state"""
+        try:
+            purity = np.trace(quantum_state @ quantum_state)
+            dimension = quantum_state.shape[0]
+            decoherence = 1 - (purity - 1/dimension)/(1 - 1/dimension)
+            return float(decoherence)
+        except Exception as e:
+            logger.error(f"Error calculating decoherence: {str(e)}")
+            return 1.0  # Maximum decoherence on error
+            
+                
+    async def handle_get_quantum_metrics(self, session_id: str, data: dict) -> dict:
+            """Get comprehensive quantum metrics"""
+            try:
+                metrics_type = data.get("type", "all")
+                
+                if metrics_type == "all":
+                    return await self._get_all_quantum_metrics(session_id)
+                elif metrics_type == "session":
+                    return await self._get_session_quantum_metrics(session_id)
+                elif metrics_type == "system":
+                    return await self._get_system_quantum_metrics()
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"Unknown metrics type: {metrics_type}"
+                    }
+
+            except Exception as e:
+                logger.error(f"Error getting quantum metrics: {str(e)}")
+                return {"status": "error", "message": str(e)}
+
+    async def _get_all_quantum_metrics(self, session_id: str) -> dict:
+        """Get all quantum metrics including session, system, and operational metrics"""
+        try:
+            session_metrics = await self._get_session_quantum_metrics(session_id)
+            system_metrics = await self._get_system_quantum_metrics()
+            
+            return {
+                "status": "success",
+                "metrics": {
+                    "session": session_metrics.get("metrics", {}),
+                    "system": system_metrics.get("metrics", {}),
+                    "operational": {
+                        "total_operations": self.quantum_metrics['total_operations'],
+                        "successful_proofs": self.quantum_metrics['successful_proofs'],
+                        "verification_stats": self.quantum_metrics['verification_stats']
+                    }
+                },
+                "timestamp": time.time()
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting all quantum metrics: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    async def _get_session_quantum_metrics(self, session_id: str) -> dict:
+        """Get quantum metrics for specific session"""
+        try:
+            session = self.sessions.get(session_id)
+            if not session:
+                return {"status": "error", "message": "Session not found"}
+
+            quantum_state = session['quantum_state']
+            foam_structure = session['foam_structure']
+
+            # Calculate quantum metrics
+            decoherence = self._calculate_decoherence(quantum_state)
+            quantum_entropy = self.quantum_proofs.get_quantum_entropy(
+                quantum_state,
+                foam_structure
+            )
+
+            return {
+                "status": "success",
+                "metrics": {
+                    "quantum_state": {
+                        "decoherence": float(decoherence),
+                        "purity": float(np.trace(quantum_state @ quantum_state)),
+                        "entropy": float(quantum_entropy)
+                    },
+                    "foam_topology": {
+                        "betti_0": foam_structure['betti_0'],
+                        "betti_1": foam_structure['betti_1'],
+                        "euler_characteristic": foam_structure['euler_characteristic']
+                    },
+                    "time_metrics": {
+                        "last_update": session.get('last_quantum_update', time.time()),
+                        "session_age": time.time() - session.get('created_at', time.time())
+                    }
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting session quantum metrics: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    async def _get_system_quantum_metrics(self) -> dict:
+        """Get system-wide quantum metrics"""
+        try:
+            # Calculate system-wide metrics
+            total_decoherence = np.mean([
+                self._calculate_decoherence(session['quantum_state'])
+                for session in self.sessions.values()
+                if 'quantum_state' in session
+            ])
+
+            active_proofs = sum(
+                1 for proof in self.quantum_proof_store.values()
+                if self._calculate_decoherence(proof['quantum_state']) <= 0.5
+            )
+
+            return {
+                "status": "success",
+                "metrics": {
+                    "system_state": {
+                        "average_decoherence": float(total_decoherence),
+                        "active_sessions": len(self.sessions),
+                        "active_proofs": active_proofs,
+                        "total_proofs": len(self.quantum_proof_store)
+                    },
+                    "homomorphic_metrics": {
+                        "active_ciphertexts": len(self.encrypted_values),
+                        "total_operations": self.quantum_metrics['total_operations']
+                    },
+                    "physical_constants": self.physics_constants,
+                    "performance": {
+                        "memory_usage": self._get_memory_usage(),
+                        "uptime": time.time() - self.start_time
+                    }
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting system quantum metrics: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    async def cleanup_session(self, session_id: str):
+        """Clean up session resources with quantum state management"""
+        try:
+            session = self.sessions.get(session_id)
+            if session:
+                # Store final quantum metrics before cleanup
+                final_metrics = await self._get_session_quantum_metrics(session_id)
+                self.quantum_metrics['decoherence_events'].append({
+                    'session_id': session_id,
+                    'final_metrics': final_metrics.get('metrics', {}),
+                    'timestamp': time.time()
+                })
+
+                # Clean up quantum resources
+                del session['quantum_state']
+                del session['foam_structure']
+
+                # Remove session
+                del self.sessions[session_id]
+
+                # Clean up associated proofs
+                self._cleanup_session_proofs(session_id)
+
+                logger.info(f"Session {session_id} cleaned up successfully")
+
+        except Exception as e:
+            logger.error(f"Error cleaning up session {session_id}: {str(e)}")
+            logger.error(traceback.format_exc())
+
+    def _cleanup_session_proofs(self, session_id: str):
+        """Clean up proofs associated with session"""
+        try:
+            # Find and remove expired proofs
+            current_time = time.time()
+            expired_proofs = [
+                proof_id for proof_id, proof_data in self.quantum_proof_store.items()
+                if current_time - proof_data['timestamp'] > 3600  # 1 hour expiration
+                or self._calculate_decoherence(proof_data['quantum_state']) > 0.9  # High decoherence
+            ]
+
+            for proof_id in expired_proofs:
+                del self.quantum_proof_store[proof_id]
+
+        except Exception as e:
+            logger.error(f"Error cleaning up session proofs: {str(e)}")
+
+    def _get_memory_usage(self) -> dict:
+        """Get memory usage statistics"""
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            
+            return {
+                'rss': memory_info.rss,  # Resident Set Size
+                'vms': memory_info.vms,  # Virtual Memory Size
+                'quantum_state_size': sum(
+                    sys.getsizeof(session.get('quantum_state', 0))
+                    for session in self.sessions.values()
+                ),
+                'proof_store_size': sum(
+                    sys.getsizeof(proof_data)
+                    for proof_data in self.quantum_proof_store.values()
+                )
+            }
+        except Exception as e:
+            logger.error(f"Error getting memory usage: {str(e)}")
+            return {}
+
+    async def shutdown(self):
+        """Shutdown server with proper cleanup"""
+        try:
+            logger.info("Starting server shutdown...")
+
+            # Clean up all sessions
+            for session_id in list(self.sessions.keys()):
+                await self.cleanup_session(session_id)
+
+            # Store final metrics
+            final_metrics = await self._get_system_quantum_metrics()
+            logger.info(f"Final system metrics: {final_metrics}")
+
+            # Close server
+            if self.server:
+                self.server.close()
+                await self.server.wait_closed()
+
+            # Clean up quantum resources
+            del self.homomorphic_system
+            del self.quantum_proofs
+
+            logger.info("Server shutdown complete")
+
+        except Exception as e:
+            logger.error(f"Error during shutdown: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    @property
+    def start_time(self):
+        """Get server start time"""
+        return getattr(self, '_start_time', time.time())
+
+    def _prepare_quantum_state(self) -> np.ndarray:
+        """Prepare initial quantum state"""
+        system_size = self.homomorphic_system.quantum_decoherence.system_size
+        return np.eye(system_size) / system_size
+
     async def handle_get_wallet_balance(self, session_id: str, websocket, data: dict) -> dict:
         """Handle get balance request"""
         try:
@@ -9745,12 +10826,18 @@ class QuantumBlockchainWebSocketServer:
             await self.session_manager.initialize_session(session_id)
             
             # Get miner from session manager
-            miner = self.session_manager.get_miner(session_id)
+            if 'miner' not in self.sessions[session_id]:
+                logger.info(f"[{session_id}] Initializing new miner for session")
+                self.sessions[session_id]['miner'] = DAGKnightMiner(
+                    difficulty=2,
+                    security_level=20
+                )  # Fixed missing closing parenthesis
+
+            miner = self.sessions[session_id]['miner']
             if not miner:
-                logger.error(f"[{session_id}] Miner not available")
                 return {
-                    "status": "error",
-                    "message": "Please initialize mining system first"
+                    'status': 'error',
+                    'message': 'Failed to initialize miner'
                 }
 
             # Prepare tx data for estimation
@@ -9780,19 +10867,19 @@ class QuantumBlockchainWebSocketServer:
                 "message": f"Failed to estimate gas: {str(e)}"
             }
 
-
-
     # Wallet Handlers
+# In the handle_create_wallet method:
     async def handle_create_wallet(self, session_id: str, websocket, data: dict) -> dict:
-        """Handle wallet creation"""
+        """Handle wallet creation with proper storage"""
         try:
-            # Create new wallet
-            new_wallet = Wallet()  # Initialize new wallet
+            # Create new wallet 
+            new_wallet = Wallet()
 
-            # Store in session
+            # Store in session and global wallet storage
             if session_id not in self.sessions:
                 self.sessions[session_id] = {}
             self.sessions[session_id]['wallet'] = new_wallet
+            self.wallets[new_wallet.address] = new_wallet  # Store in global wallet dict
 
             # Initialize balance
             self.wallet_balances[new_wallet.address] = "0"
@@ -9800,17 +10887,17 @@ class QuantumBlockchainWebSocketServer:
             # Get private key in PEM format
             private_key_pem = new_wallet.private_key_pem() if new_wallet.private_key else None
 
-            # Create response with all required fields including private key
+            # Create response data
             wallet_data = {
                 'address': new_wallet.address,
                 'public_key': new_wallet.public_key,
-                'private_key': private_key_pem,  # Include private key in PEM format
+                'private_key': private_key_pem,
                 'mnemonic': new_wallet.mnemonic_phrase,
                 'hashed_pincode': new_wallet.hashed_pincode,
                 'salt': base64.b64encode(new_wallet.salt).decode('utf-8') if new_wallet.salt else None
             }
 
-            logger.info(f"Created new wallet with address: {new_wallet.address[:8]}...")
+            logger.info(f"Created new wallet with address: {new_wallet.address}")
             return {
                 'status': 'success',
                 'wallet': wallet_data
@@ -9818,12 +10905,10 @@ class QuantumBlockchainWebSocketServer:
 
         except Exception as e:
             logger.error(f"Wallet creation failed: {str(e)}")
-            logger.error(traceback.format_exc())
             return {
                 'status': 'error',
                 'message': f'Failed to create wallet: {str(e)}'
             }
-
 
     async def handle_create_wallet_with_pincode(self, session_id: str, websocket, data: dict) -> dict:
         """Handle wallet creation with pincode"""
@@ -9836,12 +10921,35 @@ class QuantumBlockchainWebSocketServer:
             "status": "success",
             "wallet": self.sessions[session_id]['wallet'].to_dict()
         }
-        # Transaction Handlers
+            # Transaction Handlers
     async def handle_create_transaction(self, session_id: str, websocket, data: dict) -> dict:
         """Handle transaction creation with gas tracking and security features"""
         try:
             logger.debug(f"Creating transaction with data: {data}")
             
+            # Validate required fields
+            required_fields = ["sender", "receiver", "amount"]
+            missing_fields = [field for field in required_fields if field not in data]
+            if missing_fields:
+                return {
+                    "status": "error",
+                    "message": f"Missing required fields: {', '.join(missing_fields)}"
+                }
+
+            # Validate amount is a valid number
+            try:
+                amount = Decimal(str(data["amount"]))
+                if amount <= 0:
+                    return {
+                        "status": "error",
+                        "message": "Amount must be greater than 0"
+                    }
+            except (ValueError, decimal.InvalidOperation):
+                return {
+                    "status": "error",
+                    "message": "Invalid amount provided"
+                }
+
             # First get gas estimate
             gas_estimate = await self.handle_estimate_gas(session_id, websocket, data)
             if gas_estimate["status"] != "success":
@@ -9855,96 +10963,463 @@ class QuantumBlockchainWebSocketServer:
                     "status": "error",
                     "message": "Miner not initialized. Cannot estimate gas."
                 }
-                
+                    
             # Initialize crypto provider if needed
             if 'crypto_provider' not in self.sessions[session_id]:
                 self.sessions[session_id]['crypto_provider'] = CryptoProvider()
             crypto_provider = self.sessions[session_id]['crypto_provider']
             
-            # Prepare base transaction data
-            tx_data = {
-                "sender": data["sender"],
-                "receiver": data["receiver"],
-                "amount": Decimal(str(data["amount"])),
-                "price": Decimal(str(gas_data["total_cost"])),
-                "buyer_id": data.get("buyer_id", data["receiver"]),
-                "seller_id": data.get("seller_id", data["sender"]),
-                "gas_limit": gas_data["gas_needed"],
-                "gas_price": Decimal(str(gas_data["gas_price"])),
-                "quantum_enabled": data.get("quantum_enabled", False)
-            }
-            
-            # Create base transaction
-            transaction = Transaction(**tx_data)
-            
-            # Apply security features
-            message = f"{transaction.sender}{transaction.receiver}{transaction.amount}".encode()
-            
-            # Apply security features in parallel
-            security_tasks = [
-                self._apply_base_signature(transaction, message),
-                self._apply_zk_proof(transaction, transaction.amount, crypto_provider),
-                self._apply_homomorphic(transaction, transaction.amount, crypto_provider),
-                self._apply_ring_signature(transaction, message, crypto_provider),
-                self._apply_quantum_signature(transaction, message, crypto_provider),
-                self._apply_post_quantum(transaction, message, crypto_provider)
-            ]
-            
-            security_results = await asyncio.gather(*security_tasks, return_exceptions=True)
-            
-            # Track security metrics
-            security_features = {
-                'zk_proof': bool(transaction.zk_proof),
-                'homomorphic': bool(transaction.homomorphic_amount),
-                'ring_signature': bool(transaction.ring_signature),
-                'quantum_signature': bool(transaction.quantum_signature),
-                'post_quantum': bool(getattr(transaction, 'pq_cipher', None)),
-                'base_signature': bool(transaction.signature)
-            }
-            
-            # Add gas data to transaction
-            transaction.gas_data = {
-                "gas_price": gas_data["gas_price"],
-                "gas_used": gas_data["gas_needed"],
-                "total_cost": gas_data["total_cost"],
-                "quantum_premium": gas_data["components"].get("quantum_premium", 0),
-                "entanglement_premium": gas_data["components"].get("entanglement_premium", 0),
-                "base_price": gas_data["components"]["base_price"]
-            }
-            
-            # Store transaction in session
-            if session_id not in self.sessions:
-                self.sessions[session_id] = {}
-            if 'transactions' not in self.sessions[session_id]:
-                self.sessions[session_id]['transactions'] = {}
-            self.sessions[session_id]["transactions"][transaction.id] = transaction
-            
-            # Track gas metrics
-            if hasattr(self, 'gas_metrics'):
-                self.gas_metrics.track_transaction(
-                    transaction.gas_data["gas_price"],
-                    transaction.gas_data["gas_used"],
-                    transaction.gas_data["quantum_premium"] if transaction.quantum_enabled else 0,
-                    transaction.gas_data.get("entanglement_premium", 0)
-                )
-            
-            # Return success with complete transaction data
-            return {
-                "status": "success",
-                "transaction": {
-                    **transaction.to_dict(),
-                    "gas_data": transaction.gas_data,
-                    "security_features": security_features
+            # Create transaction data with timestamp
+            try:
+                current_time = int(time.time())
+                
+                tx_data = {
+                    "sender": data["sender"],
+                    "receiver": data["receiver"],
+                    "amount": amount,
+                    "price": Decimal(str(gas_data["total_cost"])),
+                    "buyer_id": data.get("buyer_id", data["receiver"]),
+                    "seller_id": data.get("seller_id", data["sender"]),
+                    "gas_limit": gas_data["gas_needed"],
+                    "gas_price": Decimal(str(gas_data["gas_price"])),
+                    "quantum_enabled": data.get("quantum_enabled", False),
+                    "timestamp": current_time
                 }
-            }
+            except (ValueError, decimal.InvalidOperation) as e:
+                return {
+                    "status": "error",
+                    "message": f"Invalid transaction data: {str(e)}"
+                }
+                    
+            # Create base transaction
+            try:
+                transaction = Transaction(**tx_data)
+            except Exception as e:
+                logger.error(f"Failed to create transaction object: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Failed to create transaction: {str(e)}"
+                }
+                    
+            # Create message bytes with proper structure
+            try:
+                message_dict = {
+                    "sender": transaction.sender,
+                    "receiver": transaction.receiver,
+                    "amount": str(transaction.amount),
+                    "timestamp": transaction.timestamp,
+                    "gas_price": str(transaction.gas_price),
+                    "gas_limit": str(transaction.gas_limit),
+                    "tx_id": transaction.id  # Use transaction ID instead of nonce
+                }
+                message = hashlib.sha256(
+                    json.dumps(message_dict, sort_keys=True).encode('utf-8')
+                ).digest()
+                logger.debug(f"Created message digest of length: {len(message)} bytes")
+            except Exception as e:
+                logger.error(f"Failed to create message bytes: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Failed to create message digest: {str(e)}"
+                }
+                    
+            # Track security feature results
+            security_results = {}
             
+            # Apply security features sequentially
+            try:
+                # Always apply base signature first
+                logger.debug("Applying base signature...")
+                await self.apply_base_signature(transaction, message)
+                if not transaction.signature:
+                    raise ValueError("Base signature application failed")
+                security_results['base_signature'] = True
+                    
+                # Apply quantum signature if enabled
+                if data.get("quantum_enabled") or data.get("use_quantum"):
+                    logger.debug("Applying quantum signature...")
+                    await self.apply_quantum_signature(transaction, message, crypto_provider)
+                    security_results['quantum_signature'] = bool(transaction.quantum_signature)
+                        
+                # Apply ZK proof if requested
+                if data.get("use_zk_proof"):
+                    logger.debug("Applying ZK proof...")
+                    await self.apply_zk_proof(transaction, transaction.amount, crypto_provider)
+                    security_results['zk_proof'] = bool(getattr(transaction, 'zk_proof', None))
+                        
+                # Apply homomorphic encryption if requested
+                if data.get("use_homomorphic"):
+                    logger.debug("Applying homomorphic encryption...")
+                    await self.apply_homomorphic(transaction, transaction.amount, crypto_provider)
+                    security_results['homomorphic'] = bool(getattr(transaction, 'homomorphic_amount', None))
+                        
+                # Apply ring signature if requested
+                if data.get("use_ring_signature"):
+                    logger.debug("Applying ring signature...")
+                    await self.apply_ring_signature(transaction, message, crypto_provider)
+                    security_results['ring_signature'] = bool(getattr(transaction, 'ring_signature', None))
+                        
+                # Apply post-quantum encryption if requested
+                if data.get("use_post_quantum"):
+                    logger.debug("Applying post-quantum encryption...")
+                    await self.apply_post_quantum(transaction, message, crypto_provider)
+                    security_results['post_quantum'] = bool(getattr(transaction, 'pq_cipher', None))
+                        
+            except Exception as e:
+                error_msg = f"Failed to apply security features: {str(e)}"
+                logger.error(error_msg)
+                logger.error(traceback.format_exc())
+                return {
+                    "status": "error",
+                    "message": error_msg
+                }
+                    
+            # Finalize transaction
+            try:
+                # Add gas data
+                transaction.gas_data = {
+                    "gas_price": gas_data["gas_price"],
+                    "gas_used": gas_data["gas_needed"],
+                    "total_cost": gas_data["total_cost"],
+                    "quantum_premium": gas_data["components"].get("quantum_premium", 0),
+                    "entanglement_premium": gas_data["components"].get("entanglement_premium", 0),
+                    "base_price": gas_data["components"]["base_price"]
+                }
+                    
+                # Store in session
+                if session_id not in self.sessions:
+                    self.sessions[session_id] = {}
+                if 'transactions' not in self.sessions[session_id]:
+                    self.sessions[session_id]['transactions'] = {}
+                self.sessions[session_id]["transactions"][transaction.id] = transaction
+                    
+                # Track gas metrics
+                if hasattr(self, 'gas_metrics'):
+                    self.gas_metrics.track_transaction(
+                        transaction.gas_data["gas_price"],
+                        transaction.gas_data["gas_used"],
+                        transaction.gas_data["quantum_premium"] if transaction.quantum_enabled else 0,
+                        transaction.gas_data.get("entanglement_premium", 0)
+                    )
+                    
+                logger.info(f"Successfully created transaction with ID: {transaction.id}")
+                logger.debug(f"Applied security features: {security_results}")
+                    
+                # Return complete transaction data
+                return {
+                    "status": "success",
+                    "transaction": {
+                        **transaction.to_dict(),
+                        "gas_data": transaction.gas_data,
+                        "security_features": security_results,
+                        "timestamp": current_time,
+                        "tx_id": transaction.id  # Include transaction ID instead of nonce
+                    }
+                }
+                    
+            except Exception as e:
+                error_msg = f"Failed to finalize transaction: {str(e)}"
+                logger.error(error_msg)
+                logger.error(traceback.format_exc())
+                return {
+                    "status": "error",
+                    "message": error_msg
+                }
+                    
         except Exception as e:
-            logger.error(f"Transaction creation failed: {str(e)}")
+            error_msg = f"Transaction creation failed: {str(e)}"
+            logger.error(error_msg)
             logger.error(traceback.format_exc())
             return {
                 "status": "error",
-                "message": str(e)
+                "message": error_msg
             }
+            
+    def get_wallet(self, address: str) -> Optional[Wallet]:
+        """Get wallet by address with proper error handling"""
+        try:
+            # Check direct wallet storage first
+            if address in self.wallets:
+                return self.wallets[address]
+            
+            # Check session wallets as backup
+            for session in self.sessions.values():
+                if isinstance(session, dict) and 'wallet' in session:
+                    wallet = session['wallet']
+                    if wallet and getattr(wallet, 'address', None) == address:
+                        # Add to main wallet storage for future lookups
+                        self.wallets[address] = wallet
+                        return wallet
+            
+            logger.warning(f"Wallet not found: {address}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting wallet {address}: {str(e)}")
+            return None
+    async def apply_base_signature(self, transaction: Transaction, message: bytes) -> None:
+        """Apply standard signature to transaction"""
+        try:
+            # Get wallet
+            wallet = self.get_wallet(transaction.sender)
+            if not wallet:
+                raise ValueError(f"Wallet not found: {transaction.sender}")
+
+            # Ensure message is bytes
+            if not isinstance(message, bytes):
+                logger.debug(f"Converting message to bytes. Current type: {type(message)}")
+                if isinstance(message, str):
+                    message = message.encode('utf-8')
+                else:
+                    raise ValueError(f"Cannot convert message of type {type(message)} to bytes")
+                
+            # Sign message with detailed error checking
+            try:
+                # Get private key in correct format
+                if isinstance(wallet.private_key, str):
+                    private_key = serialization.load_pem_private_key(
+                        wallet.private_key.encode('utf-8'),
+                        password=None,
+                        backend=default_backend()
+                    )
+                else:
+                    private_key = wallet.private_key
+                
+                # Create signature
+                signature = private_key.sign(
+                    message,
+                    ec.ECDSA(hashes.SHA256())
+                )
+                
+                if not signature or len(signature) == 0:
+                    logger.error("Generated signature is empty")
+                    raise ValueError("Empty signature generated")
+                    
+                logger.debug(f"Generated signature of length: {len(signature)} bytes")
+                transaction.signature = base64.b64encode(signature).decode('utf-8')
+                
+                # Store public key in proper format
+                public_key = private_key.public_key()
+                transaction.public_key = base64.b64encode(
+                    public_key.public_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PublicFormat.SubjectPublicKeyInfo
+                    )
+                ).decode('utf-8')
+                
+                logger.debug(
+                    f"Applied base signature for transaction {transaction.id}\n"
+                    f"Signature length: {len(signature)} bytes"
+                )
+                
+            except Exception as e:
+                logger.error(f"Signing error details: {str(e)}")
+                logger.error(traceback.format_exc())
+                raise ValueError(f"Error generating signature: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"Failed to apply base signature: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise ValueError(f"Signing failed: {str(e)}")
+
+    def sign_message(self, message: bytes) -> bytes:
+        """Sign a message and return the signature as bytes"""
+        try:
+            if not isinstance(message, bytes):
+                raise ValueError(f"Message must be bytes, got {type(message)}")
+                
+            if not self.private_key:
+                raise ValueError("No private key available")
+                
+            signature = self.private_key.sign(
+                message,
+                ec.ECDSA(hashes.SHA256())
+            )
+            
+            if not isinstance(signature, bytes):
+                raise ValueError(f"Expected bytes signature, got {type(signature)}")
+                
+            return signature
+            
+        except Exception as e:
+            logger.error(f"Error signing message: {str(e)}")
+            raise
+
+
+    async def apply_quantum_signature(self, transaction: Transaction, message: bytes, crypto_provider: CryptoProvider) -> None:
+        """Apply quantum signature if enabled"""
+        try:
+            if not crypto_provider:
+                raise ValueError("Crypto provider not initialized")
+                
+            quantum_signature = await crypto_provider.create_quantum_signature(message)
+            if quantum_signature:
+                transaction.quantum_signature = base64.b64encode(quantum_signature).decode()
+                logger.debug(f"Applied quantum signature for transaction {transaction.id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to apply quantum signature: {str(e)}")
+            raise
+
+    async def apply_zk_proof(self, transaction: Transaction, amount: Decimal, crypto_provider: CryptoProvider) -> None:
+        """Apply zero-knowledge proof to transaction amount using existing STARK"""
+        try:
+            if not crypto_provider:
+                raise ValueError("Crypto provider not initialized")
+
+            # Convert amount to integer (wei-like format) for ZK proof
+            amount_int = int(amount * 10**18)  # Convert to smallest unit
+            
+            # Create public input from transaction data
+            public_input = int.from_bytes(hashlib.sha256(str(amount_int).encode()).digest(), 'big')
+            
+            # Use the existing stark.prove method
+            zk_proof = await asyncio.to_thread(
+                crypto_provider.stark.prove,  # Use base prove method
+                amount_int,  # Secret
+                public_input # Public input
+            )
+            
+            if zk_proof:
+                transaction.zk_proof = base64.b64encode(str(zk_proof).encode()).decode()
+                logger.debug(f"Applied ZK proof for transaction {transaction.id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to apply ZK proof: {str(e)}")
+            raise
+    async def apply_homomorphic(self, transaction: Transaction, amount: Decimal, crypto_provider: CryptoProvider) -> None:
+        """Apply homomorphic encryption to transaction amount"""
+        try:
+            if not crypto_provider:
+                raise ValueError("Crypto provider not initialized")
+
+            # Convert amount to integer (cents) for encryption
+            amount_int = int(amount * 100)
+            
+            # Create homomorphic encryption
+            encrypted_amount = await crypto_provider.create_homomorphic_cipher(amount_int)
+            
+            if encrypted_amount:
+                transaction.homomorphic_amount = base64.b64encode(encrypted_amount).decode()
+                logger.debug(f"Applied homomorphic encryption for transaction {transaction.id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to apply homomorphic encryption: {str(e)}")
+            raise
+
+    async def apply_ring_signature(self, transaction: Transaction, message: bytes, crypto_provider: CryptoProvider) -> None:
+        """Apply ring signature to transaction"""
+        try:
+            if not crypto_provider:
+                raise ValueError("Crypto provider not initialized")
+            
+            # Get wallet for signing
+            wallet = self.get_wallet(transaction.sender)
+            if not wallet:
+                raise ValueError(f"Wallet not found: {transaction.sender}")
+            
+            # Create ring signature
+            ring_signature = await crypto_provider.create_ring_signature(
+                message,
+                wallet.private_key,
+                wallet.get_public_key_pem()
+            )
+            
+            if ring_signature:
+                transaction.ring_signature = base64.b64encode(ring_signature).decode()
+                logger.debug(f"Applied ring signature for transaction {transaction.id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to apply ring signature: {str(e)}")
+            raise
+
+    async def apply_post_quantum(self, transaction: Transaction, message: bytes, crypto_provider: CryptoProvider) -> None:
+        """Apply post-quantum encryption to transaction"""
+        try:
+            if not crypto_provider:
+                raise ValueError("Crypto provider not initialized")
+            
+            # Get wallet for encryption
+            wallet = self.get_wallet(transaction.sender)
+            if not wallet:
+                raise ValueError(f"Wallet not found: {transaction.sender}")
+            
+            # Encrypt with post-quantum algorithm
+            pq_cipher = await crypto_provider.pq_encrypt(message)
+            
+            if pq_cipher:
+                transaction.pq_cipher = base64.b64encode(pq_cipher).decode()
+                logger.debug(f"Applied post-quantum encryption for transaction {transaction.id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to apply post-quantum encryption: {str(e)}")
+            raise
+
+    async def verify_transaction_security(self, transaction: Transaction, crypto_provider: CryptoProvider) -> Dict[str, bool]:
+        """Verify all security features of a transaction"""
+        try:
+            verification_results = {
+                'base_signature': False,
+                'quantum_signature': False,
+                'zk_proof': False,
+                'homomorphic': False,
+                'ring_signature': False,
+                'post_quantum': False
+            }
+
+            message = f"{transaction.sender}{transaction.receiver}{transaction.amount}".encode()
+
+            # Verify base signature
+            if transaction.signature:
+                wallet = self.get_wallet(transaction.sender)
+                if wallet:
+                    verification_results['base_signature'] = await wallet.verify_signature(
+                        message,
+                        base64.b64decode(transaction.signature),
+                        transaction.public_key
+                    )
+
+            # Verify quantum signature if present
+            if transaction.quantum_signature and crypto_provider:
+                quantum_sig = base64.b64decode(transaction.quantum_signature)
+                verification_results['quantum_signature'] = await crypto_provider.verify_quantum_signature(
+                    message,
+                    quantum_sig,
+                    transaction.public_key
+                )
+
+            # Verify other security features if present
+            if transaction.zk_proof and crypto_provider:
+                amount_int = int(transaction.amount * 100)
+                public_input = int.from_bytes(hashlib.sha256(str(amount_int).encode()).digest(), 'big')
+                verification_results['zk_proof'] = await crypto_provider.stark.verify_transaction(
+                    public_input,
+                    eval(base64.b64decode(transaction.zk_proof).decode())
+                )
+
+            if transaction.homomorphic_amount and crypto_provider:
+                homomorphic_cipher = base64.b64decode(transaction.homomorphic_amount)
+                decrypted_amount = await crypto_provider.decrypt_homomorphic(homomorphic_cipher)
+                verification_results['homomorphic'] = (decrypted_amount == int(transaction.amount * 100))
+
+            if transaction.ring_signature and crypto_provider:
+                ring_sig = base64.b64decode(transaction.ring_signature)
+                verification_results['ring_signature'] = crypto_provider.verify_ring_signature(
+                    message,
+                    ring_sig,
+                    [transaction.public_key]
+                )
+
+            if transaction.pq_cipher and crypto_provider:
+                pq_cipher = base64.b64decode(transaction.pq_cipher)
+                decrypted = crypto_provider.pq_decrypt(pq_cipher)
+                verification_results['post_quantum'] = (decrypted == message)
+
+            return verification_results
+
+        except Exception as e:
+            logger.error(f"Failed to verify transaction security: {str(e)}")
+            raise
 
     # Security feature application methods
     async def _apply_base_signature(self, transaction: Transaction, message: bytes):
@@ -9994,7 +11469,6 @@ class QuantumBlockchainWebSocketServer:
             return False
 
     async def apply_quantum_signature(self, transaction: Transaction, message: bytes, crypto_provider: CryptoProvider) -> bool:
-        """Apply quantum signature with proper transaction update"""
         try:
             # Generate quantum signature
             quantum_sig = await asyncio.to_thread(
@@ -10003,58 +11477,40 @@ class QuantumBlockchainWebSocketServer:
             )
             
             if quantum_sig:
-                # Create new status
-                new_status = ConfirmationStatus(
-                    score=0.0,
-                    security_level="LOW",
-                    confirmations=0,
-                    is_final=False
-                )
+                # Set quantum signature
+                transaction.quantum_signature = quantum_sig
                 
-                # Create new metrics
-                new_metrics = ConfirmationMetrics(
-                    path_diversity=0.0,
-                    quantum_strength=0.85,
-                    consensus_weight=0.0,
-                    depth_score=0.0
-                )
-                
-                # Create new confirmation data
-                new_confirmation_data = ConfirmationData(
-                    status=new_status,
-                    metrics=new_metrics,
-                    confirming_blocks=[],
-                    confirmation_paths=[],
-                    quantum_confirmations=[]
-                )
-                
-                # Create updated transaction copy
-                updated_transaction = transaction.model_copy(
-                    update={
-                        'quantum_signature': quantum_sig,
-                        'confirmation_data': new_confirmation_data,
-                        'confirmations': 0
-                    }
-                )
-                
-                # Update transaction store if needed
-                if transaction.tx_hash in self.transaction_store:
-                    self.transaction_store[transaction.tx_hash] = updated_transaction
+                # Initialize confirmation data
+                if not hasattr(transaction, 'confirmation_data'):
+                    transaction.confirmation_data = ConfirmationData(
+                        status=ConfirmationStatus(
+                            confirmation_score=0.0,
+                            security_level='LOW',
+                            confirmations=0,
+                            is_final=False
+                        ),
+                        metrics=ConfirmationMetrics(
+                            path_diversity=0.0,
+                            quantum_strength=0.85,
+                            consensus_weight=0.0,
+                            depth_score=0.0
+                        )
+                    )
                 
                 # Update metrics
                 self.transaction_metrics['security_features']['quantum_signature'] += 1
                 
                 logger.debug(
-                    f"Applied quantum signature to transaction {transaction.tx_hash}:\n"
+                    f"Applied quantum signature to transaction {transaction.id}:\n"
                     f"Signature size: {len(quantum_sig)} bytes\n"
-                    f"Initial confirmation score: {new_status.score}\n"
-                    f"Security level: {new_status.security_level}"
+                    f"Initial confirmation score: {transaction.confirmation_data.status.confirmation_score}\n"
+                    f"Security level: {transaction.confirmation_data.status.security_level}"
                 )
                 
                 return True
-            
+                
             return False
-            
+                
         except Exception as e:
             logger.error(f"Error applying quantum signature: {str(e)}")
             logger.error(traceback.format_exc())
@@ -10384,27 +11840,73 @@ class QuantumBlockchainWebSocketServer:
 
     async def handle_sign_message(self, session_id: str, data: dict) -> dict:
         """Handle message signing request"""
+        logger = logging.getLogger(__name__)
         try:
-            wallet = self.sessions[session_id].get('wallet')
+            # Get wallet
+            address = data.get("address")
+            if not address:
+                logger.error("No address provided")
+                return {"status": "error", "message": "Address is required"}
+            
+            wallet = self.get_wallet(address)
             if not wallet:
-                return {"status": "error", "message": "No wallet found for this session"}
+                logger.error(f"Wallet not found for address: {address}")
+                return {"status": "error", "message": "Wallet not found"}
             
             message_bytes = data.get("message_bytes")
             if not message_bytes:
+                logger.error("No message bytes provided")
                 return {"status": "error", "message": "message_bytes is required"}
             
             try:
-                # Sign the base64 encoded message
-                signature = wallet.sign_message(message_bytes)
-                return {
+                # Decode message
+                message = base64.b64decode(message_bytes)
+                logger.debug(f"Decoded message of length: {len(message)} bytes")
+                
+                # Standard signature (synchronous)
+                signature = wallet.sign_message(message)
+                result = {
                     "status": "success",
-                    "signature": signature
+                    "signature": base64.b64encode(signature).decode('utf-8')
                 }
-            except ValueError as e:
+                
+                # Add quantum signature if requested
+                if data.get("use_quantum", False):
+                    if not hasattr(wallet, 'crypto_provider') or wallet.crypto_provider is None:
+                        from crypto_provider import CryptoProvider
+                        wallet.crypto_provider = CryptoProvider()
+                    
+                    try:
+                        # Use run_in_executor for quantum signature generation
+                        loop = asyncio.get_event_loop()
+                        quantum_signature = await loop.run_in_executor(
+                            None,
+                            wallet.crypto_provider.create_quantum_signature,
+                            message
+                        )
+                        
+                        if quantum_signature:
+                            result["quantum_signature"] = base64.b64encode(quantum_signature).decode('utf-8')
+                            logger.debug(f"Added quantum signature of length: {len(quantum_signature)} bytes")
+                        else:
+                            logger.warning("Quantum signature generation failed")
+                            
+                    except Exception as qe:
+                        logger.error(f"Error generating quantum signature: {str(qe)}")
+                        logger.error(traceback.format_exc())
+                        # Continue without quantum signature
+                        
+                logger.info(f"Successfully signed message for wallet: {address}")
+                return result
+                
+            except Exception as e:
+                logger.error(f"Error during message signing: {str(e)}")
+                logger.error(traceback.format_exc())
                 return {"status": "error", "message": str(e)}
                 
         except Exception as e:
             logger.error(f"Error in handle_sign_message: {str(e)}")
+            logger.error(traceback.format_exc())
             return {"status": "error", "message": str(e)}
 
 
@@ -10412,29 +11914,69 @@ class QuantumBlockchainWebSocketServer:
     async def handle_verify_signature(self, session_id: str, data: dict) -> dict:
         """Handle signature verification request"""
         try:
-            wallet = self.sessions[session_id].get('wallet')
+            # Get wallet
+            address = data.get("address")
+            if not address:
+                return {"status": "error", "message": "Address is required"}
+                
+            wallet = self.get_wallet(address)
             if not wallet:
-                return {"status": "error", "message": "No wallet found for this session"}
+                return {"status": "error", "message": "Wallet not found"}
             
+            # Get message and signatures
             message_bytes = data.get("message_bytes")
             signature = data.get("signature")
+            quantum_signature = data.get("quantum_signature")
             
-            if not message_bytes or not signature:
-                return {"status": "error", "message": "message_bytes and signature are required"}
+            if not message_bytes or (not signature and not quantum_signature):
+                return {
+                    "status": "error", 
+                    "message": "message_bytes and either signature or quantum_signature are required"
+                }
             
             try:
-                # Verify the signature
-                is_valid = wallet.verify_signature(message_bytes, signature, wallet.public_key)
+                # Decode message and signatures
+                message = base64.b64decode(message_bytes)
+                verification_results = {}
+                
+                # Verify standard signature if provided
+                if signature:
+                    sig_bytes = base64.b64decode(signature)
+                    verification_results['standard_signature'] = wallet.verify_signature(message, sig_bytes)
+                
+                # Verify quantum signature if provided
+                if quantum_signature and hasattr(wallet, 'crypto_provider') and wallet.crypto_provider:
+                    q_sig_bytes = base64.b64decode(quantum_signature)
+                    # Use run_in_executor for potentially blocking quantum verification
+                    loop = asyncio.get_event_loop()
+                    verification_results['quantum_signature'] = await loop.run_in_executor(
+                        None,
+                        wallet.crypto_provider.verify_quantum_signature,
+                        message,
+                        q_sig_bytes
+                    )
+                
+                # Determine overall validity
+                is_valid = all(verification_results.values()) if verification_results else False
+                
                 return {
                     "status": "success",
-                    "valid": is_valid
+                    "valid": is_valid,
+                    "verification_details": verification_results,
+                    "timestamp": time.time()
                 }
-            except ValueError as e:
-                return {"status": "error", "message": str(e)}
                 
+            except Exception as e:
+                logger.error(f"Verification error: {str(e)}")
+                logger.error(traceback.format_exc())
+                return {"status": "error", "message": str(e)}
+                    
         except Exception as e:
             logger.error(f"Error in handle_verify_signature: {str(e)}")
+            logger.error(traceback.format_exc())
             return {"status": "error", "message": str(e)}
+
+
     def log_message(self, level: str, message: str):
         """Helper method for consistent logging"""
         logger_method = getattr(logger, level.lower(), logger.info)
@@ -10442,35 +11984,59 @@ class QuantumBlockchainWebSocketServer:
 
 
     async def handle_encrypt_message(self, session_id: str, data: dict) -> dict:
-        """
-        Handle message encryption request
-        Args:
-            session_id: Session identifier
-            data: Request data containing message_bytes and recipient_public_key
-        """
+        """Handle message encryption request"""
         try:
-            wallet = self.sessions[session_id].get('wallet')
+            # Get wallet
+            wallet = self.get_wallet(data.get('address'))
             if not wallet:
-                return {"status": "error", "message": "No wallet found for this session"}
+                return {"status": "error", "message": "No wallet found for this address"}
             
-            message_bytes = data.get("message_bytes")
-            recipient_public_key = data.get("recipient_public_key")
-            
-            if not message_bytes or not recipient_public_key:
-                return {"status": "error", "message": "message_bytes and recipient_public_key are required"}
+            # Get value to encrypt
+            value = data.get("value")
+            if not value:
+                return {"status": "error", "message": "Value to encrypt is required"}
+
+            # Check if homomorphic encryption is requested
+            use_homomorphic = data.get("use_homomorphic", False)
             
             try:
-                # Encrypt the message
-                encrypted = wallet.encrypt_message(message_bytes, recipient_public_key)
-                return {
-                    "status": "success",
-                    "encrypted_message": encrypted
-                }
+                if use_homomorphic:
+                    # Convert value to integer (cents) for homomorphic encryption
+                    value_cents = int(Decimal(value) * 100)
+                    # Get crypto provider
+                    if 'crypto_provider' not in self.sessions[session_id]:
+                        self.sessions[session_id]['crypto_provider'] = CryptoProvider()
+                    crypto_provider = self.sessions[session_id]['crypto_provider']
+                    # Encrypt using homomorphic encryption
+                    cipher = await crypto_provider.create_homomorphic_cipher(value_cents)
+                    return {
+                        "status": "success",
+                        "homomorphic_cipher": base64.b64encode(cipher).decode('utf-8')
+                    }
+                else:
+                    # Standard encryption
+                    if not data.get("recipient_public_key"):
+                        return {
+                            "status": "error", 
+                            "message": "recipient_public_key is required for standard encryption"
+                        }
+                        
+                    encrypted = wallet.encrypt_message(
+                        value.encode('utf-8'),
+                        data["recipient_public_key"]
+                    )
+                    return {
+                        "status": "success",
+                        "encrypted_message": base64.b64encode(encrypted).decode('utf-8')
+                    }
+
             except ValueError as e:
+                logger.error(f"Encryption error: {str(e)}")
                 return {"status": "error", "message": str(e)}
-                
+                    
         except Exception as e:
             logger.error(f"Error in handle_encrypt_message: {str(e)}")
+            logger.error(traceback.format_exc())
             return {"status": "error", "message": str(e)}
 
     async def handle_decrypt_message(self, session_id: str, data: dict) -> dict:
