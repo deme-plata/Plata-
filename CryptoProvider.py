@@ -79,61 +79,122 @@ class CryptoProvider:
     def _initialize_mock_quantum(self) -> 'MockQuantumSigner':
         """Enhanced mock quantum signer"""
         class MockQuantumSigner:
+            """Enhanced mock quantum signer with stable verification"""
             def __init__(self):
                 self.signature_size = 64
                 self.secret_key = os.urandom(32)
-                self.public_key = hashlib.sha256(self.secret_key).digest()
-                logger.info("Initialized mock quantum signer")
+                self.signature_cache = {}  # Cache for signature generation
+                logger.info("Initialized enhanced mock quantum signer")
 
-            def sign_message(self, message: Union[str, bytes]) -> bytes:
-                """Generate deterministic quantum-like signature"""
+            def _normalize_message(self, message: Union[str, bytes]) -> bytes:
+                """Normalize message for consistent handling"""
                 try:
                     if isinstance(message, str):
-                        message = message.encode()
+                        message = message.encode('utf-8')
+                    
+                    # Create deterministic hash of message
+                    return hashlib.sha256(message).digest()
+                    
+                except Exception as e:
+                    logger.error(f"Message normalization failed: {str(e)}")
+                    return hashlib.sha256(str(message).encode()).digest()
 
-                    # Create deterministic but unique signature
+            def _generate_signature(self, message_hash: bytes) -> bytes:
+                """Generate deterministic quantum-like signature"""
+                try:
+                    # Check cache first
+                    if message_hash in self.signature_cache:
+                        return self.signature_cache[message_hash]
+
+                    # Generate deterministic components
                     h = hashlib.sha512()
                     h.update(self.secret_key)
-                    h.update(message)
-                    h.update(str(time.time_ns()).encode())
+                    h.update(message_hash)
+                    
+                    base = h.digest()[:32]
+                    quantum = hashlib.sha256(base + self.secret_key).digest()[:32]
+                    
+                    # Combine components
+                    signature = bytes(a ^ b for a, b in zip(base, quantum))
+                    
+                    # Double length for required size
+                    final_sig = signature * 2
+                    result = final_sig[:self.signature_size]
+                    
+                    # Cache the signature
+                    self.signature_cache[message_hash] = result
+                    
+                    return result
 
-                    # Add quantum characteristics
-                    base_signature = h.digest()
-                    quantum_noise = bytes(x ^ y for x, y in zip(
-                        base_signature[:32],
-                        os.urandom(32)
-                    ))
+                except Exception as e:
+                    logger.error(f"Signature generation failed: {str(e)}")
+                    return os.urandom(self.signature_size)
 
-                    signature = base_signature[:32] + quantum_noise
-                    logger.debug(f"Created mock quantum signature of size {len(signature)} bytes")
+            def sign_message(self, message: Union[str, bytes]) -> bytes:
+                """Sign a message with quantum-like features"""
+                try:
+                    message_hash = self._normalize_message(message)
+                    
+                    logger.debug(f"Signing message with hash: {message_hash.hex()}")
+                    signature = self._generate_signature(message_hash)
+                    logger.debug(f"Generated signature: {signature.hex()}")
+                    
                     return signature
 
                 except Exception as e:
-                    logger.error(f"Mock quantum signing error: {str(e)}")
+                    logger.error(f"Signing failed: {str(e)}")
                     return os.urandom(self.signature_size)
-            def verify_signature(self, message: Union[str, bytes], 
-                               signature: bytes, public_key: Optional[bytes] = None) -> bool:
-                """Verify with quantum-like characteristics"""
-                try:
-                    if isinstance(message, str):
-                        message = message.encode()
 
-                    if len(signature) != self.signature_size:
+            def verify_signature(self, message: Union[str, bytes], signature: bytes) -> bool:
+                """Verify a signature with consistent handling"""
+                try:
+                    if not signature or len(signature) != self.signature_size:
+                        logger.error(f"Invalid signature size: {len(signature) if signature else 0}")
                         return False
 
-                    # Verify deterministic part
-                    h = hashlib.sha512()
-                    h.update(self.secret_key)
-                    h.update(message)
-                    expected_base = h.digest()[:32]
-
-                    return signature[:32] == expected_base
+                    message_hash = self._normalize_message(message)
+                    logger.debug(f"Verifying message with hash: {message_hash.hex()}")
+                    
+                    expected_signature = self._generate_signature(message_hash)
+                    
+                    # Use constant-time comparison
+                    is_valid = hmac.compare_digest(signature, expected_signature)
+                    
+                    if not is_valid:
+                        logger.error("Signature verification failed:")
+                        logger.error(f"Message hash: {message_hash.hex()}")
+                        logger.error(f"Expected signature: {expected_signature.hex()}")
+                        logger.error(f"Received signature: {signature.hex()}")
+                    else:
+                        logger.debug("Signature verified successfully")
+                    
+                    return is_valid
 
                 except Exception as e:
-                    logger.error(f"Mock quantum verification error: {str(e)}")
+                    logger.error(f"Verification failed: {str(e)}")
+                    logger.error(traceback.format_exc())
                     return False
 
+
+
+
+
         return MockQuantumSigner()
+    def get_signing_key(self) -> ec.EllipticCurvePrivateKey:
+        """Get or create signing key for crypto operations"""
+        try:
+            if not hasattr(self, '_signing_key'):
+                self._signing_key = ec.generate_private_key(
+                    ec.SECP256R1(),
+                    default_backend()
+                )
+                logger.debug("Generated new signing key")
+                
+            return self._signing_key
+            
+        except Exception as e:
+            logger.error(f"Failed to get/generate signing key: {str(e)}")
+            raise ValueError("Could not get signing key")
 
     def create_quantum_signature(self, message: Union[str, bytes]) -> Optional[bytes]:
         """Create quantum signature with proper error handling and type validation"""

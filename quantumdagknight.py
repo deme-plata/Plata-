@@ -122,7 +122,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey as PublicKey
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
-
+import numpy as np
 from blockcypher_integration import BlockCypherAPI
 from helius_integration import HeliusAPI
 from web3 import Web3
@@ -175,6 +175,8 @@ from DAGConfirmationSystem import DAGConfirmationSystem
 from DAGKnightGasSystem import EnhancedDAGKnightGasSystem
 from P2PNode import P2PNode, enhance_p2p_node,LinuxQuantumNode,NetworkOptimizer,DAGKnightConsensus    
 from AdvancedHomomorphicSystem import AdvancedHomomorphicSystem, QuantumEnhancedProofs,QuantumDecoherence,QuantumFoamTopology,NoncommutativeGeometry
+from DAGKnightGasSystem import EnhancedGasTransactionType, EnhancedGasPrice, EnhancedDAGKnightGasSystem
+
 import systemd
 class SignalManager:
     def __init__(self, app):
@@ -7572,12 +7574,13 @@ async def check_initialization(request):
             )
 
 
-
 class SessionManager:
     def __init__(self):
+        """Initialize session manager with proper storage"""
         self.sessions: Dict[str, dict] = {}  # Dictionary to store session data
         self.locks: Dict[str, asyncio.Lock] = {}  # Per-session locks
         self.logger = logging.getLogger(__name__)
+        self.transaction_store = {}  # Initialize transaction store
 
     async def initialize_session(self, session_id: str, difficulty: int = 2, security_level: int = 20):
         """Initialize a new session with miner and required components"""
@@ -7586,10 +7589,19 @@ class SessionManager:
                 if session_id not in self.sessions:  # Double-check pattern
                     # Create session with all components
                     self.sessions[session_id] = {
-                        'wallet': Wallet(),
+                        'wallet': None,  # Initialize wallet as None
                         'crypto_provider': None,
                         'transactions': {},
-                        'mining_state': None,
+                        'mining_state': {
+                            'mining_start_time': time.time(),
+                            'mining_task': None,
+                            'performance_data': {
+                                'blocks_mined': [],
+                                'mining_times': [],
+                                'hash_rates': [],
+                                'start_time': time.time()
+                            }
+                        },
                         'miner': None,  # Add miner field
                         'last_activity': time.time()
                     }
@@ -7613,82 +7625,33 @@ class SessionManager:
                         genesis_hash = "0" * 64
                         miner.dag.add_node(genesis_hash, timestamp=time.time())
                         
+                        # Store miner instance directly
                         self.sessions[session_id]['miner'] = miner
-                        logger.debug(f"[{session_id}] Session initialized with miner")
+
+                        # Verify miner storage
+                        if not isinstance(self.sessions[session_id]['miner'], DAGKnightMiner):
+                            raise ValueError("Miner not properly stored")
+                        
+                        self.logger.debug(f"[{session_id}] Session initialized with miner")
                         
                     except Exception as e:
-                        logger.error(f"Error initializing miner: {str(e)}")
-                        logger.error(traceback.format_exc())
-
-
-
-    def _serialize_wallet(self, wallet: Any) -> dict:
-        """Safely serialize wallet data"""
-        if not wallet:
-            return None
-        try:
-            # Extract only serializable wallet data
-            serialized = {
-                'address': getattr(wallet, 'address', None),
-                'public_key': getattr(wallet, 'public_key', None),
-                'mnemonic': getattr(wallet, 'mnemonic', None),
-            }
-            # Add any additional public keys or addresses
-            if hasattr(wallet, 'addresses'):
-                serialized['addresses'] = wallet.addresses
-            if hasattr(wallet, 'public_keys'):
-                serialized['public_keys'] = wallet.public_keys
-            return serialized
-        except Exception as e:
-            logger.error(f"Wallet serialization error: {str(e)}")
-            return None
-
-    def _serialize_crypto_provider(self, provider: Any) -> dict:
-        """Safely serialize crypto provider data"""
-        if not provider:
-            return None
-        try:
-            return {
-                'security_bits': getattr(provider, 'security_bits', 256),
-                'ring_size': getattr(provider, 'ring_size', 11),
-                'initialized': bool(provider)
-            }
-        except Exception as e:
-            logger.error(f"Crypto provider serialization error: {str(e)}")
-            return None
-
-    def _serialize_transaction(self, tx: Any) -> dict:
-        """Safely serialize transaction data"""
-        try:
-            if hasattr(tx, 'to_dict'):
-                tx_dict = tx.to_dict()
-                # Handle special fields
-                if 'zk_proof' in tx_dict and isinstance(tx_dict['zk_proof'], tuple):
-                    tx_dict['zk_proof'] = b64encode(
-                        json.dumps(tx_dict['zk_proof'], default=str).encode()
-                    ).decode()
-                return tx_dict
-            return tx
-        except Exception as e:
-            logger.error(f"Transaction serialization error: {str(e)}")
-            return None
-    def _serialize_miner(self, miner: Any) -> dict:
-        """Safely serialize miner data"""
-        if not miner:
-            return None
-        try:
-            return {
-                'difficulty': getattr(miner, 'difficulty', 2),
-                'security_level': getattr(miner, 'security_level', 20),
-                'blocks_mined': getattr(miner, 'blocks_mined', 0),
-                'initialized': bool(miner)
-            }
-        except Exception as e:
-            logger.error(f"Miner serialization error: {str(e)}")
-            return None
+                        self.logger.error(f"Error initializing miner: {str(e)}")
+                        self.logger.error(traceback.format_exc())
+                        raise  # Re-raise to handle in caller
 
     async def get_session(self, session_id: str) -> dict:
-        """Get or create session with miner data"""
+        """Get session data without serialization for internal use"""
+        try:
+            if session_id not in self.sessions:
+                return None
+            async with self.locks[session_id]:
+                return self.sessions[session_id]
+        except Exception as e:
+            self.logger.error(f"Error getting raw session: {str(e)}")
+            return None
+
+    async def get_session_data(self, session_id: str) -> dict:
+        """Get serialized session data for external use"""
         await self.initialize_session(session_id)
         async with self.locks[session_id]:
             try:
@@ -7714,7 +7677,7 @@ class SessionManager:
                 return session_data
 
             except Exception as e:
-                logger.error(f"Session serialization error: {str(e)}")
+                self.logger.error(f"Session serialization error: {str(e)}")
                 return {
                     'error': str(e),
                     'last_activity': time.time()
@@ -7724,18 +7687,18 @@ class SessionManager:
         """Get miner for session with validation"""
         try:
             if session_id not in self.sessions:
-                logger.error(f"Session {session_id} not found")
+                self.logger.error(f"Session {session_id} not found")
                 return None
                 
             miner = self.sessions[session_id].get('miner')
-            if not miner:
-                logger.error(f"Miner not initialized for session {session_id}")
+            if not isinstance(miner, DAGKnightMiner):
+                self.logger.error(f"Invalid miner type for session {session_id}")
                 return None
                 
             return miner
             
         except Exception as e:
-            logger.error(f"Error getting miner: {str(e)}")
+            self.logger.error(f"Error getting miner: {str(e)}")
             return None
 
     async def update_session(self, session_id: str, key: str, value: Any):
@@ -7743,120 +7706,163 @@ class SessionManager:
         await self.initialize_session(session_id)
         async with self.locks[session_id]:
             try:
-                # Handle special cases
-                if key == 'wallet':
-                    self.sessions[session_id][key] = value
-                elif key == 'crypto_provider':
-                    self.sessions[session_id][key] = value
-                elif key == 'transactions':
-                    if not isinstance(value, dict):
-                        raise ValueError("Transactions must be stored as a dictionary")
-                    self.sessions[session_id][key] = value
+                if '.' in key:  # Handle nested updates
+                    parts = key.split('.')
+                    current = self.sessions[session_id]
+                    for part in parts[:-1]:
+                        if part not in current:
+                            current[part] = {}
+                        current = current[part]
+                    current[parts[-1]] = value
                 else:
                     self.sessions[session_id][key] = value
 
+                # Verify miner if updating miner
+                if key == 'miner' and not isinstance(self.sessions[session_id]['miner'], DAGKnightMiner):
+                    raise ValueError("Invalid miner type after update")
+
                 self.sessions[session_id]['last_activity'] = time.time()
-                logger.debug(f"[{session_id}] Updated {key} successfully")
+                self.logger.debug(f"[{session_id}] Updated {key} successfully")
 
             except Exception as e:
-                logger.error(f"Session update error for {key}: {str(e)}")
+                self.logger.error(f"Session update error for {key}: {str(e)}")
                 raise
 
     async def store_transaction(self, session_id: str, transaction: Transaction) -> None:
         """Store transaction with redundant storage for reliability"""
         try:
-            # Ensure session exists
+            # Initialize session if needed
             if session_id not in self.sessions:
-                self.sessions[session_id] = {}
+                await self.initialize_session(session_id)
             
-            # Initialize transactions dictionary if needed
-            if 'transactions' not in self.sessions[session_id]:
-                self.sessions[session_id]['transactions'] = {}
+            async with self.locks[session_id]:
+                # Initialize transactions dictionary if needed
+                if 'transactions' not in self.sessions[session_id]:
+                    self.sessions[session_id]['transactions'] = {}
+                    
+                # Store in both session and transaction store
+                self.sessions[session_id]['transactions'][transaction.id] = transaction
+                self.transaction_store[f"{session_id}:{transaction.id}"] = transaction
                 
-            # Store in both session and session manager
-            self.sessions[session_id]['transactions'][transaction.id] = transaction
-            
-            # Also store in session manager's transaction store
-            if not hasattr(self, 'transaction_store'):
-                self.transaction_store = {}
-            self.transaction_store[f"{session_id}:{transaction.id}"] = transaction
-            
-            logger.debug(f"[{session_id}] Stored transaction {transaction.id}")
-            logger.debug(f"Current transactions: {list(self.sessions[session_id]['transactions'].keys())}")
-
+                self.logger.debug(f"[{session_id}] Stored transaction {transaction.id}")
+                
         except Exception as e:
-            logger.error(f"Failed to store transaction: {str(e)}")
+            self.logger.error(f"Failed to store transaction: {str(e)}")
             raise
-
-
 
     async def get_transaction(self, session_id: str, tx_id: str) -> Optional[Transaction]:
         """Get transaction with enhanced retrieval logic"""
         try:
-            # Try session storage first
-            if session_id in self.sessions:
-                if 'transactions' in self.sessions[session_id]:
-                    tx = self.sessions[session_id]['transactions'].get(tx_id)
-                    if tx:
-                        return tx
-            
-            # Try session manager storage
-            key = f"{session_id}:{tx_id}"
-            if hasattr(self, 'transaction_store'):
-                tx = self.transaction_store.get(key)
-                if tx:
-                    # Sync back to session storage
-                    if session_id not in self.sessions:
-                        self.sessions[session_id] = {'transactions': {}}
-                    elif 'transactions' not in self.sessions[session_id]:
-                        self.sessions[session_id]['transactions'] = {}
-                    self.sessions[session_id]['transactions'][tx_id] = tx
-                    return tx
-            
-            logger.debug(f"[{session_id}] Transaction {tx_id} not found")
-            return None
-
-        except Exception as e:
-            logger.error(f"Failed to get transaction: {str(e)}")
-            return None
-
-
-
-
-
-    async def get_transaction(self, session_id: str, tx_id: str) -> Optional[Transaction]:
-        """Retrieve transaction with proper type conversion"""
-        try:
-            await self.initialize_session(session_id)
             async with self.locks[session_id]:
-                transactions = self.sessions[session_id].get('transactions', {})
-                tx_data = transactions.get(tx_id)
+                # Try session storage first
+                if session_id in self.sessions:
+                    transactions = self.sessions[session_id].get('transactions', {})
+                    tx = transactions.get(tx_id)
+                    if tx:
+                        return tx if isinstance(tx, Transaction) else Transaction(**tx)
                 
-                if tx_data:
-                    try:
-                        # Convert dictionary to Transaction object
-                        if isinstance(tx_data, dict):
-                            return Transaction(**tx_data)
-                        return tx_data
-                    except Exception as e:
-                        logger.error(f"Failed to convert transaction: {str(e)}")
+                # Try transaction store
+                tx = self.transaction_store.get(f"{session_id}:{tx_id}")
+                if tx:
+                    return tx if isinstance(tx, Transaction) else Transaction(**tx)
+                
                 return None
 
         except Exception as e:
-            logger.error(f"Error retrieving transaction: {str(e)}")
+            self.logger.error(f"Error retrieving transaction: {str(e)}")
             return None
-
 
     async def cleanup_session(self, session_id: str):
         """Clean up session data"""
         if session_id in self.sessions:
             async with self.locks[session_id]:
                 try:
+                    # Clean up mining task if it exists
+                    mining_state = self.sessions[session_id].get('mining_state', {})
+                    if mining_state and mining_state.get('mining_task'):
+                        mining_state['mining_task'].cancel()
+                    
+                    # Clean up session data
                     del self.sessions[session_id]
                     del self.locks[session_id]
-                    logger.debug(f"[{session_id}] Session cleaned up")
+                    
+                    # Clean up transactions
+                    tx_keys = [k for k in self.transaction_store.keys() 
+                             if k.startswith(f"{session_id}:")]
+                    for key in tx_keys:
+                        del self.transaction_store[key]
+                    
+                    self.logger.debug(f"[{session_id}] Session cleaned up")
                 except Exception as e:
-                    logger.error(f"Session cleanup error: {str(e)}")
+                    self.logger.error(f"Session cleanup error: {str(e)}")
+
+    def _serialize_wallet(self, wallet: Any) -> dict:
+        """Safely serialize wallet data"""
+        if not wallet:
+            return None
+        try:
+            serialized = {
+                'address': getattr(wallet, 'address', None),
+                'public_key': getattr(wallet, 'public_key', None),
+                'mnemonic': getattr(wallet, 'mnemonic', None),
+            }
+            if hasattr(wallet, 'addresses'):
+                serialized['addresses'] = wallet.addresses
+            if hasattr(wallet, 'public_keys'):
+                serialized['public_keys'] = wallet.public_keys
+            return serialized
+        except Exception as e:
+            self.logger.error(f"Wallet serialization error: {str(e)}")
+            return None
+
+    def _serialize_crypto_provider(self, provider: Any) -> dict:
+        """Safely serialize crypto provider data"""
+        if not provider:
+            return None
+        try:
+            return {
+                'security_bits': getattr(provider, 'security_bits', 256),
+                'ring_size': getattr(provider, 'ring_size', 11),
+                'initialized': bool(provider)
+            }
+        except Exception as e:
+            self.logger.error(f"Crypto provider serialization error: {str(e)}")
+            return None
+
+    def _serialize_miner(self, miner: Any) -> dict:
+        """Safely serialize miner data"""
+        if not miner:
+            return None
+        try:
+            if not isinstance(miner, DAGKnightMiner):
+                raise ValueError(f"Invalid miner type: {type(miner)}")
+            return {
+                'difficulty': miner.difficulty,
+                'security_level': miner.security_level,
+                'blocks_mined': len(getattr(miner, 'dag', {}).nodes()) if hasattr(miner, 'dag') else 0,
+                'initialized': True,
+                'has_dag': hasattr(miner, 'dag') and isinstance(miner.dag, nx.DiGraph)
+            }
+        except Exception as e:
+            self.logger.error(f"Miner serialization error: {str(e)}")
+            return None
+
+    def _serialize_transaction(self, tx: Any) -> dict:
+        """Safely serialize transaction data"""
+        if not tx:
+            return None
+        try:
+            if hasattr(tx, 'to_dict'):
+                tx_dict = tx.to_dict()
+                if 'zk_proof' in tx_dict and isinstance(tx_dict['zk_proof'], tuple):
+                    tx_dict['zk_proof'] = b64encode(
+                        json.dumps(tx_dict['zk_proof'], default=str).encode()
+                    ).decode()
+                return tx_dict
+            return tx
+        except Exception as e:
+            self.logger.error(f"Transaction serialization error: {str(e)}")
+            return None
 class ParallelTransactionProcessor:
     def __init__(self, max_batch_size: int = 100, max_workers: int = 10):
         self.max_batch_size = max_batch_size
@@ -8285,215 +8291,338 @@ class ConsensusHandler:
             self.logger.error(f"Error getting metrics: {str(e)}")
             return {'status': 'error', 'message': str(e)}
 class MiningHandler:
-    def __init__(self):
-        self.sessions = {}
+    def __init__(self, session_manager):
+        """Initialize mining handler with session management"""
+        self.session_manager = session_manager
+        self.available_actions = [
+            'get_rewards',
+            'initialize',
+            'start',
+            'stop',
+            'get_metrics',
+            'get_dag_status',
+            'validate_block'
+        ]
         self.confirmation_system = DAGConfirmationSystem(
             quantum_threshold=0.85,
             min_confirmations=6,
             max_confirmations=100
         )
+        logger.info(f"MiningHandler initialized with actions: {self.available_actions}")
 
-    async def handle_mining_message(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle mining-related messages"""
+
+
+    async def handle_mining_message(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle mining messages with proper initialization and session management"""
         try:
+            # Validate basic request
             action = data.get('action')
-            session_id = data.get('session_id')
-
             if not action:
                 return {'status': 'error', 'message': 'No action specified'}
 
-            if not session_id:
-                return {'status': 'error', 'message': 'No session ID provided'}
+            logger.debug(f"Processing mining action {action} for session {session_id}")
 
-            # Initialize session if needed
-            if session_id not in self.sessions:
-                self.sessions[session_id] = {}
-
-            # Route to appropriate handler
+            # Special handling for initialization request
             if action == 'initialize':
-                return await self._handle_initialize(session_id, data)
-            elif action == 'start':
-                return await self._handle_start_mining(session_id, data)
-            elif action == 'stop':
-                return await self._handle_stop_mining(session_id)
-            elif action == 'get_metrics':
-                return await self._handle_get_metrics(session_id)
-            else:
-                return {'status': 'error', 'message': f'Unknown action: {action}'}
+                return await self._handle_initialize(session_id, websocket, data)
+
+            # For all other actions, verify/initialize session and miner
+            session = await self.session_manager.get_session(session_id)
+            if not session:
+                logger.debug(f"No session found for {session_id}, initializing...")
+                await self.session_manager.initialize_session(session_id)
+                session = await self.session_manager.get_session(session_id)
+                if not session:
+                    return {'status': 'error', 'message': 'Failed to initialize session'}
+
+            # Verify miner initialization for non-initialize actions
+            miner = session.get('miner')
+            if action != 'initialize' and (not isinstance(miner, DAGKnightMiner) or not hasattr(miner, 'dag')):
+                logger.debug(f"Miner not properly initialized for session {session_id}, initializing...")
+                # Get initialization parameters from request or use defaults
+                init_data = {
+                    'wallet_address': data.get('wallet_address'),
+                    'difficulty': data.get('difficulty', 2),
+                    'security_level': data.get('security_level', 20),
+                    'quantum_enabled': data.get('quantum_enabled', True)
+                }
+                init_result = await self._handle_initialize(session_id, websocket, init_data)
+                if init_result['status'] != 'success':
+                    return init_result
+                
+                # Refresh session after initialization
+                session = await self.session_manager.get_session(session_id)
+                miner = session.get('miner')
+                if not isinstance(miner, DAGKnightMiner):
+                    return {'status': 'error', 'message': 'Miner initialization failed'}
+
+            # Validate action
+            if action not in self.available_actions:
+                return {
+                    'status': 'error',
+                    'message': f"Unknown action: {action}. Available actions: {self.available_actions}"
+                }
+
+            # Map actions to handlers
+            handlers = {
+                'get_rewards': self._handle_get_rewards,
+                'start': self._handle_start_mining,
+                'stop': self._handle_stop_mining,
+                'get_metrics': self._handle_get_mining_metrics,
+                'get_dag_status': self._handle_get_dag_status,
+                'validate_block': self._handle_validate_block
+            }
+
+            handler = handlers.get(action)
+            if not handler:
+                return {'status': 'error', 'message': f'Handler not found for action: {action}'}
+
+            # Execute handler with proper logging
+            logger.debug(f"Executing handler for {action}")
+            result = await handler(session_id, websocket, data)
+            logger.debug(f"Handler result status: {result.get('status')}")
+            
+            return result
 
         except Exception as e:
-            logger.error(f"Error in mining handler: {str(e)}")
+            error_msg = f"Error handling mining message: {str(e)}"
+            logger.error(error_msg)
             logger.error(traceback.format_exc())
-            return {'status': 'error', 'message': str(e)}
+            return {
+                'status': 'error', 
+                'message': error_msg,
+                'action': data.get('action'),
+                'session_id': session_id
+            }
 
-    async def _handle_initialize(self, session_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Initialize mining system"""
+
+    async def _verify_miner_initialized(self, session_id: str, data: dict) -> bool:
+        """Verify miner is properly initialized with retries"""
+        MAX_RETRIES = 3
+        retry_count = 0
+        
+        while retry_count < MAX_RETRIES:
+            try:
+                session = await self.session_manager.get_session(session_id)
+                if not session:
+                    logger.warning(f"No session found on retry {retry_count}")
+                    retry_count += 1
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+                miner = session.get('miner')
+                if not isinstance(miner, DAGKnightMiner):
+                    logger.warning(f"Invalid miner type on retry {retry_count}")
+                    retry_count += 1
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+                if not hasattr(miner, 'dag') or not isinstance(miner.dag, nx.DiGraph):
+                    logger.warning(f"Invalid DAG on retry {retry_count}")
+                    retry_count += 1
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error verifying miner on retry {retry_count}: {str(e)}")
+                retry_count += 1
+                await asyncio.sleep(0.1)
+                
+        return False
+    async def _get_miner_safely(self, session_id: str) -> Optional[DAGKnightMiner]:
+        """Get miner instance with proper validation"""
         try:
+            session = await self.session_manager.get_session(session_id)
+            if not session:
+                return None
+                
+            miner = session.get('miner')
+            if not isinstance(miner, DAGKnightMiner):
+                return None
+                
+            if not hasattr(miner, 'dag') or not isinstance(miner.dag, nx.DiGraph):
+                return None
+                
+            return miner
+            
+        except Exception as e:
+            logger.error(f"Error getting miner safely: {str(e)}")
+            return None
+
+
+    async def _handle_initialize(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle initialization request with complete initialization chain"""
+        try:
+            wallet_address = data.get('wallet_address')
+            if not wallet_address:
+                return {'status': 'error', 'message': 'Wallet address required'}
+
             difficulty = data.get('difficulty', 2)
             security_level = data.get('security_level', 20)
+            quantum_enabled = data.get('quantum_enabled', True)
+            
+            logger.info(f"Initializing miner for session {session_id} with:"
+                       f"\n\tWallet: {wallet_address}"
+                       f"\n\tDifficulty: {difficulty}"
+                       f"\n\tSecurity Level: {security_level}"
+                       f"\n\tQuantum Enabled: {quantum_enabled}")
 
-            # Create miner instance
+            # Create new DAGKnightMiner instance
             miner = DAGKnightMiner(
                 difficulty=difficulty,
                 security_level=security_level
             )
 
-            # Initialize session data
-            self.sessions[session_id] = {
-                'miner': miner,
-                'mining_task': None,
-                'mining_metrics': {
-                    'blocks_mined': 0,
-                    'total_rewards': Decimal('0'),
-                    'start_time': time.time(),
-                    'mining_times': [],
-                    'hash_rates': []
+            # Initialize genesis block in DAG
+            genesis_hash = "0" * 64
+            miner.dag.add_node(genesis_hash, timestamp=time.time())
+            logger.debug(f"Genesis block initialized with hash: {genesis_hash}")
+
+            # Initialize mining metrics
+            miner.mining_metrics = {
+                'transactions_processed': 0,
+                'total_hash_calculations': 0,
+                'average_processing_time': 0,
+                'dag_depth': 0,
+                'branching_factor': 0,
+                'confirmation_rates': [],
+                'path_diversity': 0,
+                'last_update': time.time(),
+                'start_time': time.time(),
+                'quantum_stats': {
+                    'average_fidelity': 1.0,
+                    'decoherence_events': 0,
+                    'quantum_operations': 0
                 }
             }
 
-            logger.info(f"Initialized mining for session {session_id}")
-            return {'status': 'success', 'message': 'Mining initialized'}
+            # Verify miner state
+            if not hasattr(miner, 'dag') or not isinstance(miner.dag, nx.DiGraph):
+                raise ValueError("Miner DAG not properly initialized")
 
-        except Exception as e:
-            logger.error(f"Error initializing mining: {str(e)}")
-            return {'status': 'error', 'message': str(e)}
+            # Get or create session
+            session = await self.session_manager.get_session(session_id)
+            if not session:
+                logger.debug(f"Creating new session for {session_id}")
+                await self.session_manager.initialize_session(session_id)
+                session = await self.session_manager.get_session(session_id)
 
+            # Store miner in session
+            logger.debug(f"Storing miner in session {session_id}")
+            await self.session_manager.update_session(session_id, 'miner', miner)
 
-
-    async def _mining_loop(self, session_id: str, miner_address: str):
-        """Mining loop that continuously mines blocks"""
-        try:
-            session = self.sessions[session_id]
-            miner = session['miner']
-
-            while True:
-                start_time = time.time()
-
-                # Create a new block
-                new_block = await miner.mine_block(
-                    previous_hash=miner.get_latest_block_hash(),
-                    data="",
-                    transactions=[],
-                    reward=Decimal('50'),
-                    miner_address=miner_address
-                )
-
-                if new_block:
-                    mining_time = time.time() - start_time
-
-                    # Initialize balances if needed
-                    if not hasattr(self, 'balances'):
-                        self.balances = {}
-
-                    # Update miner's balance
-                    self.balances[miner_address] = self.balances.get(miner_address, Decimal('0')) + new_block.reward
-
-                    # Update mining metrics
-                    session['mining_metrics']['blocks_mined'] += 1
-                    session['mining_metrics']['total_rewards'] += new_block.reward
-                    session['mining_metrics']['mining_times'].append(mining_time)
-                    session['mining_metrics']['hash_rates'].append(
-                        new_block.nonce / mining_time if mining_time > 0 else 0
-                    )
-
-                    logger.info(
-                        f"Block mined: {new_block.hash}\n"
-                        f"Reward: {new_block.reward}\n"
-                        f"Miner balance: {self.balances[miner_address]}"
-                    )
-
-                await asyncio.sleep(0.1)  # Small delay to prevent CPU overload
-
-        except asyncio.CancelledError:
-            logger.info("Mining task cancelled")
-        except Exception as e:
-            logger.error(f"Error in mining loop: {str(e)}")
-            logger.error(traceback.format_exc())
-
-
-
-
-    async def handle_initialize(self, session_id: str, data: dict) -> dict:
-        """Initialize mining system"""
-        try:
-            # Get initialization parameters
-            difficulty = int(data.get('difficulty', 4))
-            security_level = int(data.get('security_level', 20))
-            confirmation_params = data.get('confirmation_params', {})
-
-            # Create new miner instance
-            miner = DAGKnightMiner(
-                difficulty=difficulty,
-                security_level=security_level
-            )
-
-            # Initialize confirmation system
-            miner.confirmation_system = DAGConfirmationSystem(
-                quantum_threshold=confirmation_params.get('quantum_threshold', 0.85),
-                min_confirmations=confirmation_params.get('min_confirmations', 6),
-                max_confirmations=confirmation_params.get('max_confirmations', 100)
-            )
-
-            # Store in session
-            if session_id not in self.sessions:
-                self.sessions[session_id] = {}
-
-            self.sessions[session_id]['miner'] = miner
-            self.sessions[session_id]['mining_task'] = None
-            self.sessions[session_id]['performance_data'] = {
-                'blocks_mined': [],
-                'mining_times': [],
-                'hash_rates': [],
-                'start_time': None
+            # Initialize mining state
+            mining_state = {
+                'mining_start_time': time.time(),
+                'mining_task': None,
+                'performance_data': {
+                    'blocks_mined': [],
+                    'mining_times': [],
+                    'hash_rates': [],
+                    'start_time': time.time()
+                }
             }
+            
+            # Store mining state
+            logger.debug(f"Storing mining state in session {session_id}")
+            await self.session_manager.update_session(session_id, 'mining_state', mining_state)
 
-            logger.info(f"Initialized mining system for session {session_id}")
+            # Verify complete initialization
+            session = await self.session_manager.get_session(session_id)
+            stored_miner = session.get('miner')
+            if not isinstance(stored_miner, DAGKnightMiner):
+                raise ValueError("Miner not properly stored in session")
+            
+            logger.info(f"Miner initialization successful for session {session_id}")
+            
             return {
                 'status': 'success',
-                'message': 'Mining system initialized',
+                'message': 'Miner initialized successfully',
                 'settings': {
                     'difficulty': difficulty,
                     'security_level': security_level,
-                    'confirmation_params': confirmation_params
+                    'quantum_enabled': quantum_enabled,
+                    'genesis_hash': genesis_hash,
+                    'miner_address': wallet_address,
+                    'time': str(int(time.time()))
                 }
             }
 
         except Exception as e:
-            logger.error(f"Error initializing mining system: {str(e)}")
+            logger.error(f"Error initializing miner: {str(e)}")
             logger.error(traceback.format_exc())
-            return {'status': 'error', 'message': str(e)}
-
-    async def handle_start(self, session_id: str, data: dict) -> dict:
-        """Start mining process"""
+            return {'status': 'error', 'message': f"Miner initialization failed: {str(e)}"}
+    async def verify_miner_initialization(self, session_id: str) -> bool:
+        """Verify miner is properly initialized"""
         try:
-            if session_id not in self.sessions:
-                return {'status': 'error', 'message': 'Session not initialized'}
+            session = await self.session_manager.get_session(session_id)
+            if not session:
+                logger.error(f"Session {session_id} not found")
+                return False
 
-            session = self.sessions[session_id]
-            if not session.get('miner'):
+            miner = session.get('miner')
+            if not isinstance(miner, DAGKnightMiner):
+                logger.error(f"Invalid miner type in session {session_id}: {type(miner)}")
+                return False
+
+            if not hasattr(miner, 'dag') or not isinstance(miner.dag, nx.DiGraph):
+                logger.error(f"Invalid DAG in miner for session {session_id}")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error verifying miner initialization: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+
+    async def _handle_start_mining(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle start mining request with proper session handling"""
+        try:
+            # Get session through session manager
+            session = await self.session_manager.get_session(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
+
+            miner = session.get('miner')
+            if not miner:
                 return {'status': 'error', 'message': 'Miner not initialized'}
 
             if session.get('mining_task'):
                 return {'status': 'error', 'message': 'Mining already in progress'}
 
-            # Get mining parameters
-            miner_address = data.get('miner_address')
-            if not miner_address:
-                return {'status': 'error', 'message': 'Miner address required'}
+            wallet_address = data.get('wallet_address')
+            if not wallet_address:
+                return {'status': 'error', 'message': 'Wallet address required'}
 
             duration = int(data.get('duration', 300))  # Default 5 minutes
 
-            # Initialize performance data
-            session['performance_data'] = {
-                'blocks_mined': [],
-                'mining_times': [],
-                'hash_rates': [],
-                'start_time': asyncio.get_event_loop().time()
-            }
+            # Initialize mining state if needed
+            if 'mining_state' not in session:
+                await self.session_manager.update_session(session_id, 'mining_state', {
+                    'mining_start_time': time.time(),
+                    'mining_task': None,
+                    'performance_data': {
+                        'blocks_mined': [],
+                        'mining_times': [],
+                        'hash_rates': [],
+                        'start_time': time.time()
+                    }
+                })
 
-            # Start mining task
-            session['mining_task'] = asyncio.create_task(
-                self._mining_loop(session_id, miner_address, duration)
+            # Create mining task
+            mining_task = asyncio.create_task(
+                self._mining_loop(session_id, websocket, duration, wallet_address)
+            )
+            
+            # Update session with mining task
+            await self.session_manager.update_session(
+                session_id, 
+                'mining_state.mining_task', 
+                mining_task
             )
 
             return {
@@ -8507,50 +8636,140 @@ class MiningHandler:
             logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
 
-    async def handle_stop(self, session_id: str, data: dict) -> dict:
-        """Stop mining process"""
+
+    async def _handle_stop_mining(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle stop mining request"""
         try:
-            if session_id not in self.sessions:
-                return {'status': 'error', 'message': 'Session not found'}
+            session = self.sessions.get(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
 
-            session = self.sessions[session_id]
-            if session.get('mining_task'):
-                session['mining_task'].cancel()
-                session['mining_task'] = None
-                return {'status': 'success', 'message': 'Mining stopped'}
+            mining_task = session.get('mining_task')
+            if not mining_task:
+                return {'status': 'error', 'message': 'No mining task in progress'}
 
-            return {'status': 'error', 'message': 'No mining task in progress'}
+            # Cancel mining task
+            mining_task.cancel()
+            try:
+                await mining_task
+            except asyncio.CancelledError:
+                pass
+
+            session['mining_task'] = None
+
+            # Calculate final metrics
+            final_metrics = {
+                'blocks_mined': len(session['performance_data']['blocks_mined']),
+                'total_mining_time': time.time() - session['performance_data']['start_time'],
+                'average_hash_rate': (
+                    sum(session['performance_data']['hash_rates']) / 
+                    len(session['performance_data']['hash_rates'])
+                    if session['performance_data']['hash_rates'] else 0
+                )
+            }
+
+            return {
+                'status': 'success',
+                'message': 'Mining stopped successfully',
+                'final_metrics': final_metrics
+            }
 
         except Exception as e:
             logger.error(f"Error stopping mining: {str(e)}")
+            logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
 
-    async def handle_get_metrics(self, session_id: str, data: dict) -> dict:
-        """Get mining metrics"""
+    async def _handle_get_rewards(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle get rewards request with proper object handling"""
         try:
-            if session_id not in self.sessions:
-                return {'status': 'error', 'message': 'Session not found'}
+            wallet_address = data.get('wallet_address')
+            if not wallet_address:
+                return {'status': 'error', 'message': 'Wallet address required'}
 
-            session = self.sessions[session_id]
-            perf_data = session.get('performance_data', {})
-            current_time = asyncio.get_event_loop().time()
-            start_time = perf_data.get('start_time', current_time)
-            elapsed_time = current_time - start_time
+            # Get session from session manager
+            session = await self.session_manager.get_session(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
+
+            # Get miner and verify it's a proper instance
+            miner = session.get('miner')
+            if not isinstance(miner, DAGKnightMiner):
+                return {'status': 'error', 'message': 'Miner not properly initialized'}
+
+            # Get block metrics from miner instance
+            block_data = {
+                'height': len(miner.dag.nodes()) if hasattr(miner.dag, 'nodes') else 0,
+                'quantum_signature': miner.quantum_metrics.get('latest_signature', ''),
+                'entanglement_strength': miner.quantum_metrics.get('entanglement_strength', 0.5),
+                'quantum_coherence': miner.quantum_metrics.get('coherence', 0.5),
+                'interference_pattern': miner.quantum_metrics.get('interference', 0.5),
+                'confirmation_metrics': {
+                    'confirmation_score': self.confirmation_system.quantum_scores.get(wallet_address, 0.85),
+                    'path_diversity': miner.mining_metrics.get('path_diversity', 0),
+                    'dag_depth': miner.mining_metrics.get('dag_depth', 0),
+                    'cross_shard_references': 0,
+                    'validation_participation': 1.0
+                },
+                'miner_stake': miner.network_metrics.get('total_stake', 0),
+                'stake_duration': time.time() - session.get('mining_state', {}).get('mining_start_time', time.time()),
+                'participation_score': 1.0,
+                'tx_throughput': len(miner.dag.nodes()) if hasattr(miner.dag, 'nodes') else 0,
+                'block_propagation_time': 1.0,
+                'network_latency': 100
+            }
+
+            # Calculate rewards using miner's reward system
+            reward = Decimal('50')  # Default reward
+            if hasattr(miner, 'reward_system') and hasattr(miner.reward_system, 'calculate_block_reward'):
+                reward = miner.reward_system.calculate_block_reward(block_data)
+
+            components = {
+                'total_rewards': str(reward),
+                'quantum_bonuses': str(reward * Decimal('0.25')),
+                'dag_bonuses': str(reward * Decimal('0.20')),
+                'stake_bonuses': str(reward * Decimal('0.15'))
+            }
+
+            return {
+                'status': 'success',
+                'rewards': components,
+                'block_data': block_data
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting rewards: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+
+
+    async def _handle_get_mining_metrics(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle get mining metrics request"""
+        try:
+            session = self.sessions.get(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
+
+            miner = session.get('miner')
+            if not miner:
+                return {'status': 'error', 'message': 'Miner not initialized'}
 
             metrics = {
-                'blocks_mined': len(perf_data.get('blocks_mined', [])),
-                'average_mining_time': (
-                    sum(perf_data.get('mining_times', [])) / 
-                    len(perf_data.get('mining_times', [1])) 
-                    if perf_data.get('mining_times') else 0
-                ),
-                'hash_rate': (
-                    sum(perf_data.get('hash_rates', [])) / 
-                    len(perf_data.get('hash_rates', [1])) 
-                    if perf_data.get('hash_rates') else 0
-                ),
-                'elapsed_time': elapsed_time,
-                'mining_active': session.get('mining_task') is not None
+                'blocks_mined': len(session['performance_data']['blocks_mined']),
+                'mining_metrics': {
+                    'hash_rate': (
+                        sum(session['performance_data']['hash_rates'][-10:]) / 
+                        len(session['performance_data']['hash_rates'][-10:])
+                        if session['performance_data']['hash_rates'] else 0
+                    ),
+                    'average_mining_time': (
+                        sum(session['performance_data']['mining_times']) / 
+                        len(session['performance_data']['mining_times'])
+                        if session['performance_data']['mining_times'] else 0
+                    )
+                },
+                'dag_metrics': miner.get_dag_metrics(),
+                'quantum_metrics': miner.quantum_metrics
             }
 
             return {
@@ -8560,20 +8779,22 @@ class MiningHandler:
 
         except Exception as e:
             logger.error(f"Error getting mining metrics: {str(e)}")
+            logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
 
-    async def handle_get_dag_status(self, session_id: str, data: dict) -> dict:
-        """Get DAG status"""
+    async def _handle_get_dag_status(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle get DAG status request"""
         try:
-            if session_id not in self.sessions:
-                return {'status': 'error', 'message': 'Session not found'}
+            session = self.sessions.get(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
 
-            session = self.sessions[session_id]
             miner = session.get('miner')
             if not miner:
                 return {'status': 'error', 'message': 'Miner not initialized'}
 
             dag_metrics = miner.get_dag_metrics()
+            
             return {
                 'status': 'success',
                 'dag_metrics': dag_metrics
@@ -8581,7 +8802,108 @@ class MiningHandler:
 
         except Exception as e:
             logger.error(f"Error getting DAG status: {str(e)}")
+            logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
+
+    async def _handle_validate_block(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle block validation request"""
+        try:
+            session = self.sessions.get(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
+
+            miner = session.get('miner')
+            if not miner:
+                return {'status': 'error', 'message': 'Miner not initialized'}
+
+            block_hash = data.get('block_hash')
+            if not block_hash:
+                return {'status': 'error', 'message': 'Block hash required'}
+
+            is_valid = await miner.validate_block(block_hash)
+            
+            return {
+                'status': 'success',
+                'valid': is_valid
+            }
+
+        except Exception as e:
+            logger.error(f"Error validating block: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+    async def _mining_loop(self, session_id: str, websocket, duration: int, wallet_address: str):
+        """Mining loop with proper error handling and reconnection"""
+        try:
+            session = await self.session_manager.get_session(session_id)
+            if not session:
+                return
+
+            miner = session.get('miner')
+            if not isinstance(miner, DAGKnightMiner):
+                return
+
+            start_time = time.time()
+            end_time = start_time + duration
+            ws_connection = WebSocketConnection(websocket.remote_address)
+
+            while time.time() < end_time:
+                try:
+                    # Mine a block
+                    block = await miner.mine_block(
+                        previous_hash=miner.get_latest_block_hash(),
+                        data="Mining block",
+                        transactions=[],
+                        reward=Decimal('50'),
+                        miner_address=wallet_address
+                    )
+
+                    if block:
+                        # Update mining metrics
+                        mining_state = session.get('mining_state', {})
+                        performance_data = mining_state.get('performance_data', {})
+                        
+                        # Store block data
+                        blocks_mined = performance_data.setdefault('blocks_mined', [])
+                        blocks_mined.append(block)
+                        
+                        # Update session atomically
+                        await self.session_manager.update_session(
+                            session_id,
+                            'mining_state.performance_data',
+                            performance_data
+                        )
+
+                        # Try to send update to client
+                        try:
+                            await ws_connection.send({
+                                'type': 'mining_update',
+                                'block_hash': block.hash,
+                                'timestamp': time.time()
+                            })
+                        except Exception as ws_error:
+                            self.logger.error(f"WebSocket send error: {str(ws_error)}")
+                            # Continue mining even if we can't send updates
+
+                except websockets.exceptions.ConnectionClosed:
+                    self.logger.warning("Connection closed, attempting reconnect...")
+                    await ws_connection.reconnect()
+                    continue
+                    
+                except Exception as block_error:
+                    self.logger.error(f"Error mining block: {str(block_error)}")
+                    await asyncio.sleep(1)
+                    continue
+                
+                await asyncio.sleep(0.1)  # Prevent CPU overload
+
+        except asyncio.CancelledError:
+            self.logger.info(f"Mining task cancelled for session {session_id}")
+            await ws_connection.close()
+        except Exception as e:
+            self.logger.error(f"Fatal error in mining loop: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            await ws_connection.close()
+
 
 import networkx as nx
 
@@ -8597,153 +8919,920 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class QuantumBlockchainWebSocketServer:
+    # Physics constants
+    G = 6.67430e-11  # Gravitational constant 
+    c = 3.0e8  # Speed of light
+    hbar = 1.0545718e-34  # Reduced Planck constant
+    l_p = np.sqrt(G * hbar / c**3)  # Planck length
+    t_p = l_p / c  # Planck time
+    m_p = np.sqrt(hbar * c / G)  # Planck mass
+    
     def __init__(self, host: str = "0.0.0.0", port: int = 8765):
-        """Initialize server with specified host and port."""
-        
-
-        """Initialize server with all required components"""
+        """Initialize server with robust connection settings"""
+        # Basic server configuration
         self.host = host
-        self.port = port  # Now ensuring port is an integer
+        self.port = port
         self.preferred_port = port
-        self.sessions = {}
         self.server = None
         self.logger = logging.getLogger(__name__)
         self._port_range = range(port, port + 100)
         self._port_index = 0
         self.loop = None
-        self.dagknight = None
-        self.crypto_provider = CryptoProvider()
-        self.wallets = {}
-        self._initialize_wallet_storage()
-        self.mining_handler = MiningHandler()
-        self.wallet_balances = {}  # Dictionary to store wallet balances
-        self.stark = SecureHybridZKStark(security_level=20)
-
-        # Initialize core components
-        self.session_manager = SessionManager()
-        self.transaction_store = {}
-        self.confirmation_system = DAGConfirmationSystem(
-            quantum_threshold=0.85,
-            min_confirmations=6,
-            max_confirmations=100
+        
+        # Connection settings
+        self.connection_timeout = 30  # 30 seconds timeout
+        self.max_message_size = 10 * 1024 * 1024  # 10MB max message size
+        self.keepalive_interval = 20  # 20 seconds keepalive
+        self.close_timeout = 10  # 10 seconds close timeout
+        
+        # Initialize core components in correct order
+        self._initialize_core_components()
+        self._initialize_quantum_components()
+        self._initialize_handlers()
+        self.vm = SimpleVM(
+            gas_limit=10000,
+            number_of_shards=10,
+            security_level=20
         )
         
-        # Initialize metrics tracking
-        self.transaction_metrics = {
-            'total_transactions': 0,
-            'successful_transactions': 0,
-            'processing_times': [],
-            'security_features': {
-                'zk_proof': 0,
-                'homomorphic': 0,
-                'ring_signature': 0,
-                'quantum_signature': 0,
-                'post_quantum': 0,
-                'base_signature': 0
-            },
-            'confirmation_levels': {
-                'HIGH': 0,
-                'MEDIUM': 0,
-                'LOW': 0
-            }
-        }
+        # Initialize necessary components that depend on VM
+        self.native_coin_contract = None
+        self.consensus = PBFTConsensus([], 0)  # Nodes will be added later
+        self.initialize_native_coin_contract()
+
+        self.is_initialized = False
         
         logger.info(f"Initialized WebSocket server with:"
                    f"\n\tConfirmation system (threshold: {self.confirmation_system.quantum_threshold})"
                    f"\n\tTransaction storage"
+                   f"\n\tQuantum-enhanced features"
+                   f"\n\tParallel processing"
                    f"\n\tMetrics tracking")
 
+    async def initialize_async_components(self):
+        """Initialize async components including VM"""
+        await self.vm.initialize()  # Make sure VM is initialized
+        await self.db.init_collections()
+        self.initialized = True
+        logger.info("Server initialized with VM and database collections")
+    def initialize_native_coin_contract(self):
+        """Initialize native coin contract"""
+        try:
+            # Get existing contract if deployed
+            result = self.vm.get_existing_contract(NativeCoinContract)
+            if result and len(result) == 2:
+                self.native_coin_contract_address, self.native_coin_contract = result
+            else:
+                # Deploy new contract if doesn't exist
+                self.native_coin_contract = NativeCoinContract(self.vm)
+                self.native_coin_contract_address = self.vm.generate_contract_address(
+                    "genesis_wallet"
+                )
+                
+            logger.info(f"Initialized native coin contract at {self.native_coin_contract_address}")
+            
+        except Exception as e:
+            logger.error(f"Error initializing native coin contract: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
 
-        self.parallel_processor = ParallelTransactionProcessor(
-            max_batch_size=100,
-            max_workers=10
-        )
-        self.transaction_batches = {}
-        self.p2p_node = None
-        self.network_ready = False
-        self.gas_metrics = GasMetricsTracker()
-        self.consensus_handler = ConsensusHandler(self)
-        self.message_handlers = {
-            'wallet': self.handle_wallet_message,
-            'mining': self.handle_mining_message,
-            'transaction': self.handle_transaction_message,
-            'p2p_test': self.handle_p2p_test_message,
-            'homomorphic': self.handle_homomorphic_operations,
-            'quantum_proof': self.handle_quantum_proof_operations,
-            'quantum_metrics': self.handle_get_quantum_metrics,
-
-            'consensus': self.consensus_handler.handle_message  # Add consensus handler
-        }
-        self.handlers = {
-            'wallet': self.handle_wallet_message,
-            'mining': self.handle_mining_message,
-            'transaction': self.handle_transaction_message,
-            'p2p_test': self.handle_p2p_test_message,
-            'consensus': self.consensus_handler.handle_message  # Add consensus handler
-        }
-        self.is_initialized = False
-        self.homomorphic_system = AdvancedHomomorphicSystem(key_size=2048)
-        
-        # Initialize quantum-enhanced proofs system
-        self.quantum_proofs = QuantumEnhancedProofs(
-            quantum_system=self.homomorphic_system.quantum_decoherence,
-            foam_generator=self.homomorphic_system.foam_topology,
-            nc_geometry=self.homomorphic_system.nc_geometry
-        )
-        
-        # Storage for various quantum-enhanced components
-        self.encrypted_values = {}
-        self.quantum_states = {}
-        self.quantum_proof_store = {}
-        self.foam_structures = {}
-        
-        # Physics constants
-        self.physics_constants = {
-            'G': G,
-            'c': c,
-            'hbar': hbar,
-            'l_p': l_p,
-            't_p': t_p,
-            'm_p': m_p
-        }
-        self.quantum_metrics = {
-            'total_operations': 0,
-            'successful_proofs': 0,
-            'quantum_states': [],
-            'decoherence_events': [],
-            'foam_structures': [],
-            'verification_stats': {
-                'total': 0,
-                'successful': 0,
-                'failed': 0
-            }
-        }
-
-    def _initialize_wallet_storage(self):
-        """Initialize wallet storage and balances"""
-        if not hasattr(self, 'wallets'):
+    def _initialize_core_components(self):
+        """Initialize core components in proper order"""
+        try:
+            # Basic storage
+            self.sessions = {}
+            self.transaction_store = {}
+            
+            # Initialize session manager first
+            self.session_manager = SessionManager()
+            
+            # Core components that don't depend on others
+            self.crypto_provider = CryptoProvider()
             self.wallets = {}
-        if not hasattr(self, 'wallet_balances'):
             self.wallet_balances = {}
+            self._initialize_wallet_storage()
+            
+            # Initialize confirmation system before mining handler
+            self.confirmation_system = DAGConfirmationSystem(
+                quantum_threshold=0.85,
+                min_confirmations=6,
+                max_confirmations=100
+            )
+            
+            # Initialize parallel processing
+            self.parallel_processor = ParallelTransactionProcessor(
+                max_batch_size=100,
+                max_workers=10
+            )
+            
+            # Storage components
+            self.transaction_batches = {}
+            self.encrypted_values = {}
+            self.quantum_states = {}
+            self.quantum_proof_store = {}
+            self.foam_structures = {}
+            
+            # Network components
+            self.p2p_node = None
+            self.network_ready = False
+            self.gas_metrics = GasMetricsTracker()
+            
+            # Initialize mining handler after session manager
+            self.mining_handler = MiningHandler(self.session_manager)
+            
+            # Initialize consensus handler after mining handler
+            self.consensus_handler = ConsensusHandler(self)
+            
+            logger.info("Core components initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing core components: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+            
+    def _initialize_quantum_components(self):
+        """Initialize quantum-specific components"""
+        try:
+            # Quantum components
+            self.quantum_decoherence = QuantumDecoherence(system_size=10)
+            self.foam_topology = QuantumFoamTopology()
+            self.nc_geometry = NoncommutativeGeometry(theta_parameter=1e-40)
+            
+            # Initialize homomorphic system
+            self.homomorphic_system = AdvancedHomomorphicSystem(key_size=2048)
+            
+            # Initialize quantum proofs with proper components
+            self.quantum_proofs = QuantumEnhancedProofs(
+                quantum_system=self.quantum_decoherence,
+                foam_generator=self.foam_topology,
+                nc_geometry=self.nc_geometry
+            )
+            
+            # Initialize quantum metrics tracking
+            self.quantum_metrics = {
+                'total_operations': 0,
+                'successful_proofs': 0,
+                'quantum_states': [],
+                'decoherence_events': [],
+                'foam_structures': [],
+                'verification_stats': {
+                    'total': 0,
+                    'successful': 0,
+                    'failed': 0
+                }
+            }
+            
+            logger.info("Quantum components initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing quantum components: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    def _initialize_handlers(self):
+        """Initialize message handlers with comprehensive support for contracts, NFTs, and RWAs"""
+        try:
+            # Message handlers with proper dependencies
+            self.message_handlers = {
+                'wallet': self.handle_wallet_message,
+                'mining': self.handle_mining_message,
+                'transaction': self.handle_transaction_message,
+                'p2p_test': self.handle_p2p_test_message,
+                'homomorphic': self.handle_homomorphic_operations,
+                'quantum_proof': self.handle_quantum_proof_operations,
+                'quantum_metrics': self.handle_get_quantum_metrics,
+                'consensus': self.consensus_handler.handle_message,
+                'contract': {
+                    'deploy': self.handle_deploy_contract,
+                    'execute': self.handle_execute_contract,
+                    'query': self.handle_query_contract,
+                    'create_nft': self.handle_create_nft,
+                    'mint_nft': self.handle_mint_nft,
+                    'transfer_nft': self.handle_transfer_nft,
+                    'create_rwa': self.handle_create_rwa,
+                    'verify_rwa': self.handle_verify_rwa,
+                    'transfer_rwa': self.handle_transfer_rwa,
+                    'query_rwa': self.handle_query_rwa
+                }
+            }
+            
+            # Simplified handlers map for quick access
+            self.handlers = {
+                'wallet': self.handle_wallet_message,
+                'mining': self.handle_mining_message,
+                'transaction': self.handle_transaction_message,
+                'p2p_test': self.handle_p2p_test_message,
+                'consensus': self.consensus_handler.handle_message,
+                'contract': self.handle_contract_message  # New handler for contract operations
+            }
+            
+            # Initialize metrics tracking with enhanced contract metrics
+            self.transaction_metrics = {
+                'total_transactions': 0,
+                'successful_transactions': 0,
+                'processing_times': [],
+                'security_features': {
+                    'zk_proof': 0,
+                    'homomorphic': 0,
+                    'ring_signature': 0,
+                    'quantum_signature': 0,
+                    'post_quantum': 0,
+                    'base_signature': 0
+                },
+                'confirmation_levels': {
+                    'HIGH': 0,
+                    'MEDIUM': 0,
+                    'LOW': 0
+                },
+                'contract_metrics': {
+                    'total_deployed': 0,
+                    'successful_deployments': 0,
+                    'failed_deployments': 0,
+                    'total_executions': 0,
+                    'successful_executions': 0,
+                    'failed_executions': 0,
+                    'gas_used': 0,
+                    'types': {
+                        'standard': 0,
+                        'nft': 0,
+                        'rwa': 0,
+                        'sql': 0
+                    }
+                },
+                'nft_metrics': {
+                    'total_minted': 0,
+                    'total_transferred': 0,
+                    'unique_creators': set(),
+                    'gas_used': 0
+                },
+                'rwa_metrics': {
+                    'total_created': 0,
+                    'total_verified': 0,
+                    'total_transferred': 0,
+                    'value_locked': Decimal('0'),
+                    'gas_used': 0
+                }
+            }
+            
+            # Initialize contract-specific storage
+            self.contract_store = {
+                'deployed_contracts': {},
+                'nft_contracts': {},
+                'rwa_contracts': {},
+                'contract_executions': {},
+                'pending_verifications': {}
+            }
+            
+            logger.info("Message handlers initialized successfully with contract support")
+            
+        except Exception as e:
+            logger.error(f"Error initializing handlers: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    async def handle_contract_message(self, session_id: str, websocket, data: dict) -> dict:
+        """Route contract-related messages to appropriate handlers"""
+        try:
+            action = data.get('action')
+            if not action:
+                return {'status': 'error', 'message': 'No action specified'}
+
+            # Get handler from contract handlers map
+            handler = self.message_handlers['contract'].get(action)
+            if not handler:
+                return {
+                    'status': 'error',
+                    'message': f'Unknown contract action: {action}. Available actions: {list(self.message_handlers["contract"].keys())}'
+                }
+
+            # Execute handler and track metrics
+            start_time = time.time()
+            result = await handler(session_id, websocket, data)
+            execution_time = time.time() - start_time
+
+            # Update metrics based on action and result
+            self._update_contract_metrics(action, result, execution_time)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error handling contract message: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    def _update_contract_metrics(self, action: str, result: dict, execution_time: float):
+        """Update contract metrics based on action and result"""
+        try:
+            metrics = self.transaction_metrics['contract_metrics']
+            
+            if action == 'deploy':
+                metrics['total_deployed'] += 1
+                if result['status'] == 'success':
+                    metrics['successful_deployments'] += 1
+                    contract_type = result.get('contract_type', 'standard')
+                    metrics['types'][contract_type] += 1
+                else:
+                    metrics['failed_deployments'] += 1
+            
+            elif action in ['execute', 'query']:
+                metrics['total_executions'] += 1
+                if result['status'] == 'success':
+                    metrics['successful_executions'] += 1
+                else:
+                    metrics['failed_executions'] += 1
+            
+            # Update gas metrics
+            if 'gas_used' in result:
+                metrics['gas_used'] += result['gas_used']
+
+            # Update NFT metrics
+            if action in ['create_nft', 'mint_nft', 'transfer_nft']:
+                nft_metrics = self.transaction_metrics['nft_metrics']
+                if result['status'] == 'success':
+                    if action == 'create_nft':
+                        nft_metrics['total_minted'] += 1
+                        if 'sender' in result:
+                            nft_metrics['unique_creators'].add(result['sender'])
+                    elif action == 'transfer_nft':
+                        nft_metrics['total_transferred'] += 1
+
+            # Update RWA metrics
+            if action in ['create_rwa', 'verify_rwa', 'transfer_rwa']:
+                rwa_metrics = self.transaction_metrics['rwa_metrics']
+                if result['status'] == 'success':
+                    if action == 'create_rwa':
+                        rwa_metrics['total_created'] += 1
+                    elif action == 'verify_rwa':
+                        rwa_metrics['total_verified'] += 1
+                    elif action == 'transfer_rwa':
+                        rwa_metrics['total_transferred'] += 1
+
+        except Exception as e:
+            logger.error(f"Error updating contract metrics: {str(e)}")
+    async def handle_deploy_contract(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle smart contract deployment"""
+        try:
+            sender = data.get('sender')
+            contract_data = data.get('data', {})
+            
+            if not sender or not contract_data:
+                return {'status': 'error', 'message': 'Missing required parameters'}
+
+            # Calculate gas
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.SMART_CONTRACT,
+                data_size=len(str(contract_data.get('code', '')).encode()),
+                quantum_enabled=contract_data.get('quantum_enabled', False)
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Check balance
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {'status': 'error', 'message': 'Insufficient balance for gas'}
+
+            # Deploy contract based on type
+            if contract_data.get('type') == 'SQL':
+                contract_address = await self.vm.deploy_sql_contract(
+                    sender=sender,
+                    contract_code=contract_data['code']
+                )
+            else:
+                contract_address = await self.vm.deploy_contract(
+                    sender=sender,
+                    contract_code=contract_data['code']
+                )
+            
+            # Update metrics
+            self.transaction_metrics['contract_metrics']['total_deployed'] += 1
+            self.transaction_metrics['contract_metrics']['successful_deployments'] += 1
+            self.transaction_metrics['contract_metrics']['types']['sql' if contract_data.get('type') == 'SQL' else 'standard'] += 1
+            self.transaction_metrics['contract_metrics']['gas_used'] += total_gas
+            
+            # Deduct gas
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'contract_address': contract_address,
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"Contract deployment error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+
+    async def handle_execute_contract(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle contract execution with proper gas metering"""
+        try:
+            # Verify parameters
+            contract_address = data.get('contract_address')
+            function_name = data.get('function')
+            args = data.get('args', [])
+            sender = data.get('sender')
+            
+            if not all([contract_address, function_name, sender]):
+                return {'status': 'error', 'message': 'Missing required parameters'}
+            
+            # Calculate gas
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.COMPUTATION,
+                data_size=len(str(args).encode())
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Check balance
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {'status': 'error', 'message': 'Insufficient balance for gas'}
+
+            # Execute contract
+            result = await self.vm.execute_contract(
+                contract_address,
+                function_name,
+                *args
+            )
+            
+            # Deduct gas
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'result': result,
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"Contract execution error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_create_nft(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle NFT contract creation and minting"""
+        try:
+            sender = data.get('sender')
+            metadata = data.get('metadata', {})
+            
+            if not sender:
+                return {'status': 'error', 'message': 'Sender address required'}
+            
+            # Calculate gas
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.NFT_CREATION,
+                data_size=len(str(metadata).encode())
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Check balance
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {'status': 'error', 'message': 'Insufficient balance for gas'}
+
+            # Create NFT
+            nft_id = await self.vm.create_nft(
+                creator_address=sender,
+                metadata=metadata
+            )
+            
+            # Deduct gas
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'nft_id': nft_id,
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"NFT creation error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+    async def handle_create_rwa(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle Real World Asset (RWA) token creation"""
+        try:
+            sender = data.get('sender')
+            asset_data = data.get('data', {})  # Changed from asset_data to data to match test case
+            
+            if not sender or not asset_data:
+                return {'status': 'error', 'message': 'Missing required parameters'}
+            
+            # Calculate gas with quantum premium for RWA
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.RWA_CREATION,
+                data_size=len(str(asset_data).encode()),
+                quantum_enabled=True,
+                entanglement_count=2
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Check balance
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {'status': 'error', 'message': 'Insufficient balance for gas'}
+
+            # Create RWA token
+            rwa_address = await self.vm.create_rwa_token(
+                creator=sender,
+                asset_data=asset_data  # Pass the data directly as asset_data
+            )
+            
+            # Update metrics
+            self.transaction_metrics['rwa_metrics']['total_created'] += 1
+            self.transaction_metrics['rwa_metrics']['gas_used'] += total_gas
+            self.transaction_metrics['rwa_metrics']['value_locked'] += Decimal(str(asset_data.get('value', 0)))
+            
+            # Deduct gas
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'token_id': rwa_address,  # Changed from rwa_address to token_id to match test case
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"RWA creation error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+    async def handle_query_contract(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle contract state queries"""
+        try:
+            contract_address = data.get('contract_address')
+            if not contract_address:
+                return {'status': 'error', 'message': 'Contract address required'}
+                
+            contract = await self.vm.get_contract(contract_address)
+            if not contract:
+                return {'status': 'error', 'message': 'Contract not found'}
+                
+            return {
+                'status': 'success',
+                'contract': {
+                    'address': contract_address,
+                    'state': contract.__dict__
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Contract query error: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+    async def handle_mint_nft(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle NFT minting with quantum security features"""
+        try:
+            # Verify required parameters
+            sender = data.get('sender')
+            collection_id = data.get('collection_id')
+            metadata = data.get('metadata', {})
+            
+            if not all([sender, collection_id, metadata]):
+                return {'status': 'error', 'message': 'Missing required parameters'}
+                
+            # Calculate gas cost
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.NFT_MINT,
+                data_size=len(str(metadata).encode()),
+                quantum_enabled=data.get('quantum_enabled', True)
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Check balance
+            wallet = await self.vm.get_wallet(sender)
+            if not wallet:
+                return {'status': 'error', 'message': 'Wallet not found'}
+                
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {
+                    'status': 'error',
+                    'message': f'Insufficient balance for gas. Required: {gas_cost}, Available: {balance}'
+                }
+
+            # Mint NFT
+            token_id = await self.vm.mint_nft(
+                collection_id=collection_id,
+                creator=sender,
+                metadata=metadata,
+                quantum_enabled=data.get('quantum_enabled', True)
+            )
+            
+            # Deduct gas cost
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'token_id': token_id,
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost),
+                'gas_price_components': {
+                    'base_price': float(gas_price.base_price),
+                    'quantum_premium': float(gas_price.quantum_premium),
+                    'security_premium': float(gas_price.security_premium)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"NFT minting error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+    async def handle_verify_rwa(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle RWA verification process"""
+        try:
+            # Required parameters
+            rwa_address = data.get('rwa_address')
+            verification_data = data.get('verification_data', {})
+            sender = data.get('sender')
+            
+            if not all([rwa_address, verification_data, sender]):
+                return {'status': 'error', 'message': 'Missing required parameters'}
+                
+            # Gas calculation
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.RWA_VERIFY,
+                data_size=len(str(verification_data).encode()),
+                quantum_enabled=True
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Validate balance
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {'status': 'error', 'message': 'Insufficient balance for gas'}
+
+            # Verify RWA
+            verification_result = await self.vm.verify_rwa_token(
+                rwa_address=rwa_address,
+                verification_data=verification_data
+            )
+            
+            # Update metrics
+            self.transaction_metrics['rwa_metrics']['total_verified'] += 1
+            self.transaction_metrics['rwa_metrics']['gas_used'] += total_gas
+            
+            # Deduct gas
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'verified': True,
+                'verification_id': verification_result['verification_id'],
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"RWA verification error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_transfer_rwa(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle RWA token transfer"""
+        try:
+            # Required parameters
+            rwa_address = data.get('rwa_address')
+            sender = data.get('sender')
+            recipient = data.get('recipient')
+            transfer_data = data.get('transfer_data', {})
+            
+            if not all([rwa_address, sender, recipient]):
+                return {'status': 'error', 'message': 'Missing required parameters'}
+                
+            # Gas calculation with quantum security
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.RWA_TRANSFER,
+                data_size=len(str(transfer_data).encode()),
+                quantum_enabled=True,
+                entanglement_count=2
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Validate balance
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {'status': 'error', 'message': 'Insufficient balance for gas'}
+
+            # Transfer RWA
+            transfer_result = await self.vm.transfer_rwa_token(
+                rwa_address=rwa_address,
+                from_address=sender,
+                to_address=recipient,
+                transfer_data=transfer_data
+            )
+            
+            # Update metrics
+            self.transaction_metrics['rwa_metrics']['total_transferred'] += 1
+            self.transaction_metrics['rwa_metrics']['gas_used'] += total_gas
+            
+            # Deduct gas
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'transfer_id': transfer_result['transfer_id'],
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"RWA transfer error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_query_rwa(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle RWA token queries"""
+        try:
+            rwa_address = data.get('rwa_address')
+            if not rwa_address:
+                return {'status': 'error', 'message': 'RWA address required'}
+                
+            # Get RWA data
+            rwa_data = await self.vm.get_rwa_token(rwa_address)
+            if not rwa_data:
+                return {'status': 'error', 'message': 'RWA token not found'}
+                
+            return {
+                'status': 'success',
+                'rwa_address': rwa_address,
+                'asset_data': rwa_data['asset_data'],
+                'owner': rwa_data['owner'],
+                'verification_status': rwa_data['verification_status'],
+                'value': str(rwa_data['value']),
+                'transfer_history': rwa_data.get('transfer_history', []),
+                'verifications': rwa_data.get('verifications', [])
+            }
+            
+        except Exception as e:
+            logger.error(f"RWA query error: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_transfer_nft(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle NFT transfer between addresses"""
+        try:
+            # Required parameters
+            token_id = data.get('token_id')
+            sender = data.get('sender')
+            recipient = data.get('recipient')
+            
+            if not all([token_id, sender, recipient]):
+                return {'status': 'error', 'message': 'Missing required parameters'}
+                
+            # Gas calculation
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.NFT_TRANSFER,
+                quantum_enabled=data.get('quantum_enabled', True)
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Validate balance
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {'status': 'error', 'message': 'Insufficient balance for gas'}
+
+            # Transfer NFT
+            transfer_result = await self.vm.transfer_nft(
+                token_id=token_id,
+                from_address=sender,
+                to_address=recipient
+            )
+            
+            # Update metrics
+            self.transaction_metrics['nft_metrics']['total_transferred'] += 1
+            self.transaction_metrics['nft_metrics']['gas_used'] += total_gas
+            
+            # Deduct gas
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'transfer_id': transfer_result['transfer_id'],
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"NFT transfer error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_transfer_nft(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle NFT transfer between addresses"""
+        try:
+            # Verify required parameters
+            token_id = data.get('token_id')
+            sender = data.get('sender')
+            recipient = data.get('recipient')
+            
+            if not all([token_id, sender, recipient]):
+                return {'status': 'error', 'message': 'Missing required parameters'}
+                
+            # Calculate gas
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.NFT_TRANSFER,
+                quantum_enabled=data.get('quantum_enabled', True)
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Check balance
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {'status': 'error', 'message': 'Insufficient balance for gas'}
+
+            # Transfer NFT
+            transfer_result = await self.vm.transfer_nft(
+                token_id=token_id,
+                from_address=sender,
+                to_address=recipient
+            )
+            
+            if not transfer_result:
+                return {'status': 'error', 'message': 'Transfer failed'}
+                
+            # Deduct gas
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'token_id': token_id,
+                'from': sender,
+                'to': recipient,
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"NFT transfer error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_query_nft(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle NFT metadata and ownership queries"""
+        try:
+            token_id = data.get('token_id')
+            if not token_id:
+                return {'status': 'error', 'message': 'Token ID required'}
+                
+            # Get NFT data
+            nft_data = await self.vm.get_nft(token_id)
+            if not nft_data:
+                return {'status': 'error', 'message': 'NFT not found'}
+                
+            return {
+                'status': 'success',
+                'token_id': token_id,
+                'metadata': nft_data['metadata'],
+                'owner': nft_data['owner'],
+                'creation_time': nft_data.get('creation_time'),
+                'transfer_history': nft_data.get('transfer_history', [])
+            }
+            
+        except Exception as e:
+            logger.error(f"NFT query error: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
     async def initialize(self):
-        """Initialize server components"""
+        """Initialize server with robust settings"""
         try:
             if not isinstance(self.port, int):
                 raise ValueError(f"Invalid port: {self.port}. Port must be an integer.")
 
             self.loop = asyncio.get_event_loop()
             
-            # Initialize quantum components if needed
-            await self._initialize_quantum_components()
-            
             logger.info(f"Starting quantum-enhanced WebSocket server on {self.host}:{self.port}")
             
+            # Create server with proper settings
             self.server = await websockets.serve(
                 self.handle_websocket,
                 self.host,
                 self.port,
-                ping_interval=None,
-                ping_timeout=None
+                ping_interval=self.keepalive_interval,
+                ping_timeout=self.keepalive_interval // 2,
+                close_timeout=self.close_timeout,
+                max_size=self.max_message_size,
+                max_queue=1024,  # Maximum number of queued connections
+                compression=None,  # Disable compression for better stability
+                create_protocol=self._create_protocol
             )
             
             self.is_initialized = True
@@ -8755,25 +9844,22 @@ class QuantumBlockchainWebSocketServer:
             logger.error(traceback.format_exc())
             return False
 
-    async def _initialize_quantum_components(self):
-        """Initialize quantum components if needed"""
-        try:
-            # Prepare initial quantum states
-            initial_state = self._prepare_quantum_state()
-            self.quantum_states['initial'] = initial_state
-            
-            # Generate initial foam structure
-            foam_structure = self.homomorphic_system.foam_topology.generate_foam_structure(
-                volume=1.0,
-                temperature=300.0
-            )
-            self.foam_structures['initial'] = foam_structure
-            
-            logger.info("Quantum components initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize quantum components: {str(e)}")
-            raise
+
+    def _create_protocol(self, *args, **kwargs):
+        """Create websocket protocol with custom settings"""
+        kwargs['timeout'] = self.connection_timeout
+        kwargs['max_size'] = self.max_message_size
+        return websockets.WebSocketServerProtocol(*args, **kwargs)
+
+
+
+    def _initialize_wallet_storage(self):
+        """Initialize wallet storage and balances"""
+        if not hasattr(self, 'wallets'):
+            self.wallets = {}
+        if not hasattr(self, 'wallet_balances'):
+            self.wallet_balances = {}
+
 
     async def update_wallet_balance(self, address: str, amount: str):
         """Update wallet balance"""
@@ -9469,60 +10555,137 @@ class QuantumBlockchainWebSocketServer:
         except Exception as e:
             logger.error(f"Error shutting down server: {str(e)}")
 
-
+    async def _handle_session_messages(self, session_id: str):
+        """Handle session messages asynchronously"""
+        try:
+            session = self.sessions[session_id]
+            websocket = session['websocket']
+            message_queue = session['message_queue']
+            
+            while True:
+                try:
+                    # Get message from queue
+                    message = await message_queue.get()
+                    
+                    try:
+                        # Process message
+                        response = await self.handle_message(session_id, websocket, message)
+                        
+                        # Send response if needed
+                        if response:
+                            await websocket.send(json.dumps(response))
+                            
+                        # Update last activity
+                        session['last_activity'] = time.time()
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing queued message: {str(e)}")
+                        logger.error(traceback.format_exc())
+                        try:
+                            await websocket.send(json.dumps({
+                                'status': 'error',
+                                'message': str(e)
+                            }))
+                        except:
+                            pass
+                            
+                    finally:
+                        # Mark message as done
+                        message_queue.task_done()
+                        
+                except asyncio.CancelledError:
+                    logger.debug(f"Message handler cancelled for session {session_id}")
+                    break
+                except Exception as e:
+                    logger.error(f"Error in message handler loop: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    await asyncio.sleep(1)
+                    
+        except Exception as e:
+            logger.error(f"Fatal error in message handler: {str(e)}")
+            logger.error(traceback.format_exc())
+        finally:
+            # Clean up any pending messages
+            while not message_queue.empty():
+                try:
+                    message_queue.get_nowait()
+                    message_queue.task_done()
+                except:
+                    pass
 
 
     async def handle_websocket(self, websocket, path):
-        """Handle WebSocket connection with quantum enhancement"""
+        """Handle WebSocket connection with message queuing"""
         session_id = str(uuid.uuid4())
         logger.info(f"New WebSocket connection established. Session ID: {session_id}")
         
         try:
+            # Set connection timeout
+            await websocket.send(json.dumps({
+                'type': 'connection_settings',
+                'timeout': self.connection_timeout,
+                'keepalive': self.keepalive_interval
+            }))
+            
             # Initialize session
             self.sessions[session_id] = {
                 'websocket': websocket,
                 'quantum_state': self._prepare_quantum_state(),
-                'foam_structure': self.homomorphic_system.foam_topology.generate_foam_structure(
+                'foam_structure': self.foam_topology.generate_foam_structure(
                     volume=1.0,
                     temperature=300.0
                 ),
-                'last_activity': time.time()
+                'last_activity': time.time(),
+                'message_queue': asyncio.Queue(),
+                'pending_responses': {}
             }
             
-            async for message in websocket:
-                try:
-                    # Parse message
-                    data = json.loads(message)
-                    logger.debug(f"Received message for session {session_id}: {data}")
-                    
-                    # Process message with quantum enhancement
-                    response = await self.handle_message(session_id, websocket, data)
-                    
-                    # Send response
-                    if response:
-                        await websocket.send(json.dumps(response))
-                        logger.debug(f"Sent response for session {session_id}: {response}")
+            # Start message handler
+            message_handler = asyncio.create_task(self._handle_session_messages(session_id))
+            
+            try:
+                async for message in websocket:
+                    try:
+                        # Parse message
+                        data = await self._parse_message(message)
                         
-                except json.JSONDecodeError as e:
-                    logger.error(f"Invalid JSON message received: {str(e)}")
-                    await websocket.send(json.dumps({
-                        'status': 'error',
-                        'message': 'Invalid JSON message'
-                    }))
-                except Exception as e:
-                    logger.error(f"Error processing message: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    await websocket.send(json.dumps({
-                        'status': 'error',
-                        'message': f'Error processing message: {str(e)}'
-                    }))
-                    
-        except websockets.exceptions.ConnectionClosed:
-            logger.info(f"WebSocket connection closed for session {session_id}")
-        finally:
-            # Cleanup session
+                        # Add to message queue
+                        await self.sessions[session_id]['message_queue'].put(data)
+                        
+                    except Exception as e:
+                        logger.error(f"Error queueing message: {str(e)}")
+                        await websocket.send(json.dumps({
+                            'status': 'error',
+                            'message': str(e)
+                        }))
+                        
+            except websockets.exceptions.ConnectionClosed:
+                logger.info(f"WebSocket connection closed for session {session_id}")
+            finally:
+                # Cancel message handler
+                message_handler.cancel()
+                try:
+                    await message_handler
+                except asyncio.CancelledError:
+                    pass
+                
+                # Clean up session
+                await self.cleanup_session(session_id)
+                logger.info(f"Session {session_id} cleaned up")
+                
+        except Exception as e:
+            logger.error(f"Error handling websocket: {str(e)}")
+            logger.error(traceback.format_exc())
             await self.cleanup_session(session_id)
-            logger.info(f"Session {session_id} cleaned up")
+    async def _parse_message(self, message: str) -> dict:
+        """Parse message with validation"""
+        try:
+            data = json.loads(message)
+            if not isinstance(data, dict):
+                raise ValueError("Message must be a dictionary")
+            return data
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON: {str(e)}")
 
 
 
@@ -9540,15 +10703,47 @@ class QuantumBlockchainWebSocketServer:
 
 
 
+    async def cleanup_session(self, session_id: str):
+        """Clean up session resources with message queue cleanup"""
+        try:
+            session = self.sessions.get(session_id)
+            if session:
+                # Clean up message queue
+                message_queue = session.get('message_queue')
+                if message_queue:
+                    while not message_queue.empty():
+                        try:
+                            message_queue.get_nowait()
+                            message_queue.task_done()
+                        except:
+                            pass
 
+                # Store final quantum metrics
+                final_metrics = await self._get_session_quantum_metrics(session_id)
+                self.quantum_metrics['decoherence_events'].append({
+                    'session_id': session_id,
+                    'final_metrics': final_metrics.get('metrics', {}),
+                    'timestamp': time.time()
+                })
 
-    async def cleanup(self):
-        """Clean up server resources."""
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
-        self.is_initialized = False
-        logger.info("Server cleaned up")
+                # Clean up quantum resources
+                if 'quantum_state' in session:
+                    del session['quantum_state']
+                if 'foam_structure' in session:
+                    del session['foam_structure']
+
+                # Remove session
+                del self.sessions[session_id]
+
+                # Clean up associated proofs
+                self._cleanup_session_proofs(session_id)
+
+                logger.info(f"Session {session_id} cleaned up successfully")
+
+        except Exception as e:
+            logger.error(f"Error cleaning up session {session_id}: {str(e)}")
+            logger.error(traceback.format_exc())
+
 
 
 
@@ -9957,24 +11152,37 @@ class QuantumBlockchainWebSocketServer:
             logger.error(f"Error getting mining metrics: {str(e)}")
             logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
-       
-
     async def handle_message(self, session_id: str, websocket, data: dict) -> dict:
-        """Route messages to appropriate handlers based on category and action"""
         try:
             category = data.get("category", "")
             action = data.get("action", "")
+            tx_type = data.get("type", "")
             
-            logger.debug(f"Handling {category}/{action} request for session {session_id}")
-            
-            # Update handlers dictionary to include quantum operations
+            logger.debug(f"Handling {category}/{action}/{tx_type} request for session {session_id}")
+
+            # Special transaction type handlers
+            if category == "transaction" and action == "create":
+                if tx_type == "nft_collection":
+                    return await self.handle_create_nft_collection(session_id, websocket, data)
+                elif tx_type == "rwa_token":
+                    return await self.handle_create_rwa(session_id, websocket, data)
+                elif tx_type == "contract_deploy":
+                    return await self.handle_deploy_contract(session_id, websocket, data)
+                elif tx_type:
+                    return await self.handle_create_transaction(session_id, websocket, data)
+
+            # Mining category handler
+            if category == "mining":
+                return await self.mining_handler.handle_mining_message(session_id, websocket, data)
+
+            # Regular handler mapping
             handlers = {
                 "wallet": {
                     "create": self.handle_create_wallet,
                     "create_with_pincode": self.handle_create_wallet_with_pincode,
                     "create_with_mnemonic": self.handle_create_wallet_with_mnemonic,
                     "get_info": self.handle_get_wallet_info,
-                    "get_balance": self.handle_get_wallet_balance,  
+                    "get_balance": self.handle_get_wallet_balance,
                     "sign_message": lambda sid, ws, d: self.handle_sign_message(sid, d),
                     "verify_signature": lambda sid, ws, d: self.handle_verify_signature(sid, d),
                     "encrypt_message": lambda sid, ws, d: self.handle_encrypt_message(sid, d),
@@ -9982,22 +11190,31 @@ class QuantumBlockchainWebSocketServer:
                     "verify_pincode": self.handle_verify_pincode,
                     "generate_alias": self.handle_generate_alias
                 },
-                "mining": {
-                    "initialize": self.handle_initialize_miner,
-                    "start": self.handle_start_mining,
-                    "stop": self.handle_stop_mining,
-                    "get_metrics": self.handle_get_mining_metrics,
-                    "get_dag_status": self.handle_get_dag_status,
-                    "validate_block": self.handle_validate_block
-                },
                 "transaction": {
-                    "create": self.handle_create_transaction,
                     "sign": self.handle_sign_transaction,
                     "verify": self.handle_verify_transaction,
                     "get_status": self.handle_get_status,
                     "get_all": self.handle_get_transactions,
                     "get_metrics": self.handle_get_transaction_metrics,
                     "estimate_gas": self.handle_estimate_gas
+                },
+                "contract": {
+                    "deploy": self.handle_deploy_contract,
+                    "execute": self.handle_execute_contract,
+                    "query": self.handle_query_contract,
+                    "verify": self.handle_verify_contract
+                },
+                "nft": {
+                    "create": self.handle_create_nft_collection,
+                    "mint": self.handle_mint_nft,
+                    "transfer": self.handle_transfer_nft,
+                    "query": self.handle_query_nft
+                },
+                "rwa": {
+                    "create": self.handle_create_rwa,
+                    "verify": self.handle_verify_rwa,
+                    "transfer": self.handle_transfer_rwa,
+                    "query": self.handle_query_rwa
                 },
                 "p2p_test": {
                     "test_peer_connection": self.handle_test_peer_connection,
@@ -10006,7 +11223,6 @@ class QuantumBlockchainWebSocketServer:
                     "test_consensus": self.handle_test_consensus,
                     "get_network_metrics": self.handle_get_network_metrics
                 },
-                # New quantum-enhanced categories
                 "homomorphic": {
                     "encrypt": self._handle_homomorphic_encrypt,
                     "decrypt": self._handle_homomorphic_decrypt,
@@ -10017,7 +11233,8 @@ class QuantumBlockchainWebSocketServer:
                 "quantum_proof": {
                     "generate": self.handle_generate_quantum_proof,
                     "verify": self.handle_verify_quantum_proof,
-                    "get_metrics": self.handle_get_proof_metrics
+                    "get_metrics": self.handle_get_proof_metrics,
+                    "batch_verify": self.handle_batch_verify_proofs
                 },
                 "quantum_metrics": {
                     "get_all": self.handle_get_quantum_metrics,
@@ -10035,37 +11252,36 @@ class QuantumBlockchainWebSocketServer:
                 }
             }
 
-            # Update quantum state before processing
+            # Update quantum state
             await self._update_session_quantum_state(session_id)
 
-            # Check if the category exists in handlers
+            # Validate category exists
             if category not in handlers:
-                logger.error(f"Unknown category received: {category}")
                 return {
                     "status": "error",
                     "message": f"Unknown category: {category}. Available categories: {list(handlers.keys())}"
                 }
 
-            # Check if the action exists within the category
+            # Validate action exists
             category_handlers = handlers[category]
             if action not in category_handlers:
-                logger.error(f"Unknown action received: {action} for category {category}")
                 return {
                     "status": "error",
                     "message": f"Unknown action: {action} for category: {category}. Available actions: {list(category_handlers.keys())}"
                 }
 
-            # Call the appropriate handler for the action
+            # Get and execute handler
             handler = category_handlers[action]
             logger.debug(f"Calling handler for {category}/{action}")
-            
-            # Track quantum metrics if applicable
+
+            # Track quantum operations
             if category in ['homomorphic', 'quantum_proof', 'quantum_metrics']:
                 self.quantum_metrics['total_operations'] += 1
-            
+
+            # Execute handler
             response = await handler(session_id, websocket, data)
-            
-            # Add quantum metrics to response for quantum operations
+
+            # Add quantum metrics for quantum operations
             if category in ['homomorphic', 'quantum_proof', 'quantum_metrics']:
                 quantum_state = self.sessions[session_id]['quantum_state']
                 response['quantum_state_metrics'] = {
@@ -10073,7 +11289,7 @@ class QuantumBlockchainWebSocketServer:
                     'purity': float(np.trace(quantum_state @ quantum_state)),
                     'timestamp': time.time()
                 }
-            
+
             logger.debug(f"Handler response: {response}")
             return response
 
@@ -10085,9 +11301,276 @@ class QuantumBlockchainWebSocketServer:
                 "message": str(e)
             }
             
+    async def handle_verify_contract(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle contract verification"""
+        try:
+            contract_address = data.get('contract_address')
+            if not contract_address:
+                return {'status': 'error', 'message': 'Contract address required'}
+
+            # Get contract
+            contract = await self.vm.get_contract(contract_address)
+            if not contract:
+                return {'status': 'error', 'message': 'Contract not found'}
+
+            # Verify contract bytecode and state
+            is_valid = await self.vm.verify_contract_bytecode(contract_address)
+            
+            return {
+                'status': 'success',
+                'verified': is_valid,
+                'contract_address': contract_address,
+                'contract_type': contract.__class__.__name__,
+                'deployment_time': contract.deployment_time if hasattr(contract, 'deployment_time') else None
+            }
+
+        except Exception as e:
+            logger.error(f"Contract verification error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+    async def handle_create_nft_collection(self, session_id: str, websocket, data: dict) -> dict:
+        """Handle NFT collection creation"""
+        try:
+            sender = data.get('sender')
+            collection_data = data.get('data', {})
+            
+            if not sender or not collection_data:
+                return {'status': 'error', 'message': 'Missing required parameters'}
+
+            # Calculate gas
+            gas_estimate = await self.vm.gas_system.calculate_gas(
+                tx_type=EnhancedGasTransactionType.NFT_CREATION, # Now properly imported
+                data_size=len(str(collection_data).encode())
+            )
+            
+            total_gas, gas_price = gas_estimate
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            # Check balance
+            balance = await self.vm.get_balance(sender)
+            if balance < gas_cost:
+                return {'status': 'error', 'message': 'Insufficient balance for gas'}
+
+            # Create NFT collection
+            collection_id = await self.vm.create_nft_collection(
+                creator_address=sender,
+                metadata=collection_data
+            )
+            
+            # Update metrics
+            self.transaction_metrics['nft_metrics']['total_minted'] += 1
+            self.transaction_metrics['nft_metrics']['unique_creators'].add(sender)
+            self.transaction_metrics['nft_metrics']['gas_used'] += total_gas
+            
+            # Deduct gas
+            await self.vm.update_balance(sender, -gas_cost)
+            
+            return {
+                'status': 'success',
+                'collection_id': collection_id,
+                'gas_used': total_gas,
+                'gas_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"NFT collection creation error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+
+    async def handle_get_proof_metrics(self, session_id: str, data: dict) -> dict:
+        """Handle proof metrics request"""
+        try:
+            # Get session data
+            session = self.sessions.get(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
+
+            # Get specific proof metrics if an ID is provided
+            proof_id = data.get('proof_id')
+            if proof_id:
+                return await self._get_specific_proof_metrics(proof_id, session)
+
+            # Otherwise return overall metrics
+            return await self._get_overall_proof_metrics(session)
+
+        except Exception as e:
+            logger.error(f"Error getting proof metrics: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def _get_specific_proof_metrics(self, proof_id: str, session: dict) -> dict:
+        """Get metrics for a specific proof"""
+        try:
+            stored_proof = self.quantum_proof_store.get(proof_id)
+            if not stored_proof:
+                return {'status': 'error', 'message': 'Proof not found'}
+
+            # Calculate time-based decoherence
+            current_time = time.time()
+            time_elapsed = current_time - stored_proof['timestamp']
+            decoherence_factor = np.exp(-0.1 * time_elapsed)
+
+            # Update quantum state with decoherence
+            evolved_state = self.quantum_decoherence.lindblad_evolution(
+                stored_proof['quantum_state'],
+                t=time_elapsed,
+                gamma=0.01
+            )[-1]
+
+            # Calculate various metrics
+            metrics = {
+                'proof_age': time_elapsed,
+                'decoherence': {
+                    'current': float(self._calculate_decoherence(evolved_state)),
+                    'factor': float(decoherence_factor),
+                    'initial': float(self._calculate_decoherence(stored_proof['quantum_state']))
+                },
+                'quantum_state': {
+                    'purity': float(np.trace(evolved_state @ evolved_state)),
+                    'size': evolved_state.shape[0]
+                },
+                'foam_metrics': {
+                    'betti_numbers': [
+                        stored_proof['foam_structure'].get('betti_0', 0),
+                        stored_proof['foam_structure'].get('betti_1', 0)
+                    ],
+                    'euler_characteristic': stored_proof['foam_structure'].get('euler_characteristic', 0)
+                },
+                'verification_status': {
+                    'last_verified': stored_proof.get('last_verification', None),
+                    'verification_count': stored_proof.get('verification_count', 0)
+                }
+            }
+
+            return {
+                'status': 'success',
+                'proof_id': proof_id,
+                'metrics': metrics,
+                'timestamp': current_time
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting specific proof metrics: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def _get_overall_proof_metrics(self, session: dict) -> dict:
+        """Get overall proof system metrics"""
+        try:
+            current_time = time.time()
+            
+            # Calculate various system-wide metrics
+            total_proofs = len(self.quantum_proof_store)
+            active_proofs = sum(
+                1 for proof in self.quantum_proof_store.values()
+                if current_time - proof['timestamp'] < 3600  # Active in last hour
+            )
+            
+            # Calculate average decoherence
+            decoherence_values = []
+            for proof in self.quantum_proof_store.values():
+                time_elapsed = current_time - proof['timestamp']
+                evolved_state = self.quantum_decoherence.lindblad_evolution(
+                    proof['quantum_state'],
+                    t=time_elapsed,
+                    gamma=0.01
+                )[-1]
+                decoherence_values.append(self._calculate_decoherence(evolved_state))
+            
+            avg_decoherence = np.mean(decoherence_values) if decoherence_values else 0
+
+            # Get quantum state metrics
+            quantum_state = session['quantum_state']
+            foam_structure = session['foam_structure']
+
+            system_metrics = {
+                'proof_statistics': {
+                    'total_proofs': total_proofs,
+                    'active_proofs': active_proofs,
+                    'average_decoherence': float(avg_decoherence),
+                    'verification_success_rate': (
+                        self.quantum_metrics['verification_stats']['successful'] /
+                        max(self.quantum_metrics['verification_stats']['total'], 1)
+                    )
+                },
+                'quantum_state': {
+                    'current_decoherence': float(self._calculate_decoherence(quantum_state)),
+                    'state_purity': float(np.trace(quantum_state @ quantum_state)),
+                    'entropy': float(self.quantum_proofs.get_quantum_entropy(
+                        quantum_state,
+                        foam_structure
+                    ))
+                },
+                'foam_topology': {
+                    'current_euler_characteristic': foam_structure.get('euler_characteristic', 0),
+                    'betti_numbers': [
+                        foam_structure.get('betti_0', 0),
+                        foam_structure.get('betti_1', 0)
+                    ]
+                },
+                'performance_metrics': {
+                    'average_verification_time': sum(
+                        proof.get('verification_time', 0) 
+                        for proof in self.quantum_proof_store.values()
+                    ) / max(total_proofs, 1),
+                    'total_quantum_operations': self.quantum_metrics['total_operations'],
+                    'successful_proofs': self.quantum_metrics['successful_proofs']
+                }
+            }
+
+            # Add historical data
+            system_metrics['historical_data'] = {
+                'decoherence_events': self.quantum_metrics['decoherence_events'][-10:],
+                'verification_history': [
+                    {
+                        'timestamp': event['timestamp'],
+                        'success': event.get('success', False)
+                    }
+                    for event in self.quantum_metrics.get('verification_history', [])[-10:]
+                ]
+            }
+
+            return {
+                'status': 'success',
+                'metrics': system_metrics,
+                'timestamp': current_time
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting overall proof metrics: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
+    async def handle_quantum_proof_operations(self, session_id: str, data: dict) -> dict:
+        """Handle quantum proof operations"""
+        try:
+            action = data.get("action")
+            if not action:
+                return {'status': 'error', 'message': 'No action specified'}
+
+            handlers = {
+                "generate": self.handle_generate_quantum_proof,
+                "verify": self.handle_verify_quantum_proof,
+                "get_metrics": self.handle_get_proof_metrics,
+                "batch_verify": self.handle_batch_verify_proofs
+            }
+
+            if action not in handlers:
+                return {
+                    'status': 'error',
+                    'message': f'Unknown action: {action}. Available actions: {list(handlers.keys())}'
+                }
+
+            return await handlers[action](session_id, data)
+
+        except Exception as e:
+            logger.error(f"Error in quantum proof operation: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
             
     async def handle_homomorphic_operations(self, session_id: str, data: dict) -> dict:
-        """Handle homomorphic encryption operations with quantum enhancement"""
+        """Route homomorphic operations to appropriate handlers"""
         try:
             action = data.get("action")
             if not action:
@@ -10111,7 +11594,9 @@ class QuantumBlockchainWebSocketServer:
 
         except Exception as e:
             logger.error(f"Error in homomorphic operation: {str(e)}")
+            logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
+
 
     async def _handle_homomorphic_encrypt(self, session_id: str, data: dict) -> dict:
         """Handle quantum-enhanced homomorphic encryption"""
@@ -10121,13 +11606,17 @@ class QuantumBlockchainWebSocketServer:
                 return {'status': 'error', 'message': 'Value must be positive'}
 
             # Get session quantum state
-            quantum_state = self.sessions[session_id]['quantum_state']
-            foam_structure = self.sessions[session_id]['foam_structure']
+            session = self.sessions.get(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
+                
+            quantum_state = session['quantum_state']
+            foam_structure = session['foam_structure']
 
             # Encrypt with quantum enhancement
             cipher, operation_id = await self.homomorphic_system.encrypt(value)
             
-            # Apply quantum corrections
+            # Apply quantum corrections using quantum proofs system
             quantum_correction = self.quantum_proofs.nc_geometry.modified_dispersion(
                 np.array([float(value), 0, 0]),
                 float(value)
@@ -10138,15 +11627,25 @@ class QuantumBlockchainWebSocketServer:
                 'cipher': cipher,
                 'quantum_state': quantum_state.copy(),
                 'foam_structure': foam_structure,
-                'quantum_correction': quantum_correction
+                'quantum_correction': quantum_correction,
+                'timestamp': time.time()
             }
 
             # Calculate quantum metrics
             quantum_metrics = {
                 'decoherence': self._calculate_decoherence(quantum_state),
                 'foam_entropy': self.quantum_proofs.get_quantum_entropy(quantum_state, foam_structure),
-                'quantum_correction': float(quantum_correction)
+                'quantum_correction': float(quantum_correction),
+                'state_purity': float(np.trace(quantum_state @ quantum_state))
             }
+
+            # Update session quantum state
+            evolved_state = self.quantum_decoherence.lindblad_evolution(
+                quantum_state,
+                t=0.1,  # Evolution time
+                gamma=0.01  # Decoherence rate
+            )[-1]
+            session['quantum_state'] = evolved_state
 
             return {
                 'status': 'success',
@@ -10157,7 +11656,9 @@ class QuantumBlockchainWebSocketServer:
 
         except Exception as e:
             logger.error(f"Encryption error: {str(e)}")
+            logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
+
 
     async def _handle_homomorphic_decrypt(self, session_id: str, data: dict) -> dict:
         """Handle quantum-enhanced homomorphic decryption"""
@@ -10170,25 +11671,41 @@ class QuantumBlockchainWebSocketServer:
             if not stored_data:
                 return {'status': 'error', 'message': 'Encrypted value not found'}
 
+            # Get session quantum state
+            session = self.sessions.get(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
+
+            # Evolve stored quantum state
+            current_time = time.time()
+            time_elapsed = current_time - stored_data.get('timestamp', current_time)
+            evolved_state = self.quantum_decoherence.lindblad_evolution(
+                stored_data['quantum_state'],
+                t=time_elapsed,
+                gamma=0.01
+            )[-1]
+
             # Decrypt with quantum enhancement
             value, metadata = await self.homomorphic_system.decrypt(stored_data['cipher'])
             
             # Apply inverse quantum correction
             value = Decimal(str(float(value) / float(stored_data['quantum_correction'])))
 
-            # Update quantum state
-            evolved_state = self.quantum_proofs.quantum_system.lindblad_evolution(
-                stored_data['quantum_state'],
-                0.1,  # Evolution time
-                0.01  # Decoherence rate
-            )[-1]
-
             # Calculate final metrics
             final_metrics = {
                 'decoherence': self._calculate_decoherence(evolved_state),
                 'foam_topology': stored_data['foam_structure'],
-                'quantum_correction_applied': float(stored_data['quantum_correction'])
+                'quantum_correction_applied': float(stored_data['quantum_correction']),
+                'evolution_time': time_elapsed,
+                'state_purity': float(np.trace(evolved_state @ evolved_state))
             }
+
+            # Update quantum metrics
+            self.quantum_metrics['decoherence_events'].append({
+                'timestamp': current_time,
+                'decoherence': final_metrics['decoherence'],
+                'evolution_time': time_elapsed
+            })
 
             return {
                 'status': 'success',
@@ -10199,7 +11716,112 @@ class QuantumBlockchainWebSocketServer:
 
         except Exception as e:
             logger.error(f"Decryption error: {str(e)}")
+            logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
+
+    async def _handle_homomorphic_batch(self, session_id: str, data: dict) -> dict:
+        """Handle batch homomorphic operations with quantum enhancement"""
+        try:
+            operations = data.get("operations", [])
+            if not operations:
+                return {'status': 'error', 'message': 'No operations provided'}
+
+            # Get session data
+            session = self.sessions.get(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
+
+            results = []
+            batch_metrics = {
+                'total_decoherence': 0,
+                'total_entropy': 0,
+                'quantum_corrections': []
+            }
+
+            for op in operations:
+                op_type = op.get("type")
+                op_data = op.get("data", {})
+                # Add session_id to operation data
+                op_data['session_id'] = session_id
+                
+                try:
+                    if op_type == "encrypt":
+                        result = await self._handle_homomorphic_encrypt(session_id, op_data)
+                    elif op_type == "decrypt":
+                        result = await self._handle_homomorphic_decrypt(session_id, op_data)
+                    elif op_type == "add":
+                        result = await self._handle_homomorphic_add(session_id, op_data)
+                    elif op_type == "multiply":
+                        result = await self._handle_homomorphic_multiply(session_id, op_data)
+                    else:
+                        result = {
+                            'status': 'error',
+                            'message': f'Unknown operation type: {op_type}'
+                        }
+
+                    # Collect quantum metrics
+                    if result['status'] == 'success' and 'quantum_metrics' in result:
+                        metrics = result['quantum_metrics']
+                        batch_metrics['total_decoherence'] += metrics.get('decoherence', 0)
+                        batch_metrics['total_entropy'] += metrics.get('foam_entropy', 0)
+                        if 'quantum_correction' in metrics:
+                            batch_metrics['quantum_corrections'].append(metrics['quantum_correction'])
+
+                except Exception as op_error:
+                    result = {
+                        'status': 'error',
+                        'message': f'Operation failed: {str(op_error)}',
+                        'operation_type': op_type
+                    }
+
+                results.append(result)
+
+            # Calculate batch metrics
+            num_ops = len(operations)
+            if num_ops > 0:
+                batch_metrics['average_decoherence'] = batch_metrics['total_decoherence'] / num_ops
+                batch_metrics['average_entropy'] = batch_metrics['total_entropy'] / num_ops
+                batch_metrics['average_quantum_correction'] = (
+                    sum(batch_metrics['quantum_corrections']) / len(batch_metrics['quantum_corrections'])
+                    if batch_metrics['quantum_corrections'] else 0
+                )
+
+            # Update quantum metrics for the session
+            current_time = time.time()
+            evolved_state = self.quantum_decoherence.lindblad_evolution(
+                session['quantum_state'],
+                t=0.1 * num_ops,  # Scale evolution time with number of operations
+                gamma=0.01
+            )[-1]
+            
+            session['quantum_state'] = evolved_state
+            
+            # Update global metrics
+            self.quantum_metrics['total_operations'] += num_ops
+            self.quantum_metrics['quantum_states'].append({
+                'timestamp': current_time,
+                'decoherence': float(self._calculate_decoherence(evolved_state)),
+                'operations': num_ops
+            })
+
+            return {
+                'status': 'success',
+                'results': results,
+                'total_operations': num_ops,
+                'successful_operations': sum(1 for r in results if r['status'] == 'success'),
+                'batch_metrics': batch_metrics,
+                'quantum_state_metrics': {
+                    'final_decoherence': float(self._calculate_decoherence(evolved_state)),
+                    'final_purity': float(np.trace(evolved_state @ evolved_state)),
+                    'timestamp': current_time
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Batch operation error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {'status': 'error', 'message': str(e)}
+
 
     async def _handle_homomorphic_add(self, session_id: str, data: dict) -> dict:
         """Handle quantum-enhanced homomorphic addition"""
@@ -10216,11 +11838,25 @@ class QuantumBlockchainWebSocketServer:
             if not stored_data1 or not stored_data2:
                 return {'status': 'error', 'message': 'One or both encrypted values not found'}
 
-            # Combine quantum states
-            combined_state = self._combine_quantum_states(
-                stored_data1['quantum_state'],
-                stored_data2['quantum_state']
-            )
+            # Get session quantum state
+            session = self.sessions.get(session_id)
+            if not session:
+                return {'status': 'error', 'message': 'Invalid session'}
+
+            # Combine quantum states with time evolution
+            current_time = time.time()
+            states = []
+            for stored_data in [stored_data1, stored_data2]:
+                time_elapsed = current_time - stored_data.get('timestamp', current_time)
+                evolved = self.quantum_decoherence.lindblad_evolution(
+                    stored_data['quantum_state'],
+                    t=time_elapsed,
+                    gamma=0.01
+                )[-1]
+                states.append(evolved)
+
+            combined_state = (states[0] + states[1]) / 2
+            combined_state = combined_state / np.trace(combined_state)  # Normalize
 
             # Add encrypted values
             result_cipher = await self.homomorphic_system.add_encrypted(
@@ -10228,8 +11864,8 @@ class QuantumBlockchainWebSocketServer:
                 stored_data2['cipher']
             )
 
-            # Generate new foam structure
-            new_foam = self.homomorphic_system.foam_topology.generate_foam_structure(
+            # Generate new foam structure with combined volume
+            new_foam = self.foam_topology.generate_foam_structure(
                 volume=2.0,
                 temperature=300.0
             )
@@ -10246,26 +11882,36 @@ class QuantumBlockchainWebSocketServer:
                 'cipher': result_cipher,
                 'quantum_state': combined_state,
                 'foam_structure': new_foam,
-                'quantum_correction': combined_correction
+                'quantum_correction': combined_correction,
+                'timestamp': current_time
             }
+
+            # Calculate quantum metrics
+            quantum_metrics = {
+                'combined_decoherence': self._calculate_decoherence(combined_state),
+                'foam_entropy': self.quantum_proofs.get_quantum_entropy(
+                    combined_state,
+                    new_foam
+                ),
+                'quantum_correction': float(combined_correction),
+                'state_purity': float(np.trace(combined_state @ combined_state))
+            }
+
+            # Update quantum metrics
+            self.quantum_metrics['total_operations'] += 1
 
             return {
                 'status': 'success',
                 'operation_id': new_op_id,
                 'encrypted_result': base64.b64encode(result_cipher).decode('utf-8'),
-                'quantum_metrics': {
-                    'combined_decoherence': self._calculate_decoherence(combined_state),
-                    'foam_entropy': self.quantum_proofs.get_quantum_entropy(
-                        combined_state,
-                        new_foam
-                    ),
-                    'quantum_correction': float(combined_correction)
-                }
+                'quantum_metrics': quantum_metrics
             }
 
         except Exception as e:
             logger.error(f"Addition error: {str(e)}")
+            logger.error(traceback.format_exc())
             return {'status': 'error', 'message': str(e)}
+
 
     async def _handle_homomorphic_multiply(self, session_id: str, data: dict) -> dict:
         """Handle quantum-enhanced homomorphic multiplication"""
@@ -10543,17 +12189,22 @@ class QuantumBlockchainWebSocketServer:
         except Exception as e:
             logger.error(f"Error updating quantum state: {str(e)}")
             logger.error(traceback.format_exc())
-
     def _calculate_decoherence(self, quantum_state: np.ndarray) -> float:
         """Calculate decoherence from quantum state"""
         try:
+            # Calculate purity
             purity = np.trace(quantum_state @ quantum_state)
             dimension = quantum_state.shape[0]
+            
+            # Normalized decoherence measure
             decoherence = 1 - (purity - 1/dimension)/(1 - 1/dimension)
+            
             return float(decoherence)
+            
         except Exception as e:
             logger.error(f"Error calculating decoherence: {str(e)}")
             return 1.0  # Maximum decoherence on error
+
             
                 
     async def handle_get_quantum_metrics(self, session_id: str, data: dict) -> dict:
@@ -10787,8 +12438,38 @@ class QuantumBlockchainWebSocketServer:
 
     def _prepare_quantum_state(self) -> np.ndarray:
         """Prepare initial quantum state"""
-        system_size = self.homomorphic_system.quantum_decoherence.system_size
-        return np.eye(system_size) / system_size
+        try:
+            # Use the quantum_decoherence system we created directly
+            system_size = self.quantum_decoherence.system_size
+            
+            # Create initial maximally mixed state
+            initial_state = np.eye(system_size) / system_size
+            
+            # Apply initial decoherence
+            evolved_states = self.quantum_decoherence.lindblad_evolution(
+                initial_state,
+                t=0.1,  # Short evolution time
+                gamma=0.01  # Low decoherence rate
+            )
+            
+            # Take the final state
+            final_state = evolved_states[-1] if len(evolved_states) > 0 else initial_state
+            
+            # Update quantum metrics
+            self.quantum_metrics['quantum_states'].append({
+                'timestamp': time.time(),
+                'purity': float(np.trace(final_state @ final_state)),
+                'decoherence': float(self._calculate_decoherence(final_state))
+            })
+            
+            return final_state
+            
+        except Exception as e:
+            logger.error(f"Error preparing quantum state: {str(e)}")
+            # Return maximally mixed state as fallback
+            return np.eye(4) / 4
+
+
 
     async def handle_get_wallet_balance(self, session_id: str, websocket, data: dict) -> dict:
         """Handle get balance request"""
@@ -11716,7 +13397,7 @@ class QuantumBlockchainWebSocketServer:
 
     # Mining Handlers
     async def handle_start_mining(self, session_id: str, websocket, data: dict) -> dict:
-        """Start mining process"""
+        """Handle start mining request"""
         try:
             if not self.sessions[session_id].get('miner'):
                 return {
@@ -11730,14 +13411,37 @@ class QuantumBlockchainWebSocketServer:
                     "message": "Mining already in progress"
                 }
 
+            wallet_address = data.get("wallet_address")
+            if not wallet_address:
+                return {
+                    "status": "error",
+                    "message": "Wallet address required"
+                }
+
             duration = data.get("duration", 300)  # Default 5 minutes
+            
+            # Initialize mining performance data
             self.sessions[session_id]['performance_data'] = {
                 'blocks_mined': [],
                 'mining_times': [],
                 'hash_rates': [],
-                'start_time': time.time()
+                'start_time': time.time(),
+                'transactions': {}  # Initialize empty transactions dict
             }
 
+            # Initialize mining config
+            config = data.get('config', {})
+            mining_config = {
+                'use_quantum': config.get('use_quantum', True),
+                'batch_size': config.get('batch_size', 10),
+                'max_workers': config.get('max_workers', 4),
+                'wallet_address': wallet_address
+            }
+
+            # Store mining config in session
+            self.sessions[session_id]['mining_config'] = mining_config
+
+            # Create mining task
             mining_task = asyncio.create_task(
                 self.mining_loop(session_id, websocket, duration)
             )
@@ -11748,6 +13452,7 @@ class QuantumBlockchainWebSocketServer:
                 "message": "Mining started",
                 "duration": duration
             }
+
         except Exception as e:
             logger.error(f"Error starting mining: {str(e)}")
             return {
@@ -11756,42 +13461,120 @@ class QuantumBlockchainWebSocketServer:
             }
 
 
+
     async def mining_loop(self, session_id: str, websocket, duration: int):
-        """Main mining loop"""
-        session = self.sessions[session_id]
-        miner = session['miner']
-        start_time = time.time()
-        end_time = start_time + duration
-        previous_hash = "0" * 64
-        
+        """Main mining loop with proper transaction handling"""
         try:
-            while time.time() < end_time:
-                mine_start = time.time()
-                block = await miner.mine_block(
-                    previous_hash,
-                    f"block_data_{len(session['performance_data']['blocks_mined'])}",
-                    session['transactions'],
-                    Decimal("50"),
-                    session['wallet'].address
-                )
+            # Get session data and setup default config
+            session = self.sessions[session_id]
+            default_config = {
+                'quantum_enabled': True,
+                'batch_size': 10,
+                'max_workers': 4,
+                'mining_timeout': 300,
+                'min_confirmations': 6,
+                'quantum_threshold': 0.85,
+                'security_level': 20
+            }
+            
+            # Get mining config from session or use defaults
+            config = session.get('mining_config', {})
+            mining_config = {**default_config, **config}
+            
+            # Initialize or get miner
+            miner = session.get('miner')
+            if not miner:
+                logger.error(f"[{session_id}] Miner not initialized")
+                return
                 
-                if block:
-                    await self.handle_mined_block(session_id, websocket, block, time.time() - mine_start)
-                    previous_hash = block.hash
-
-                await asyncio.sleep(0)
-
+            performance_data = session.get('performance_data', {
+                'blocks_mined': [],
+                'mining_times': [],
+                'hash_rates': [],
+                'start_time': time.time(),
+                'transactions': {}
+            })
+            
+            start_time = time.time()
+            end_time = start_time + duration
+            previous_hash = "0" * 64
+            
+            while time.time() < end_time:
+                try:
+                    mine_start = time.time()
+                    
+                    # Get pending transactions
+                    pending_txs = list(performance_data['transactions'].values())
+                    
+                    # Create block with proper parameters matching the method signature
+                    block = await miner.mine_block(
+                        previous_hash=previous_hash,
+                        data="Mining block",  # Block data description
+                        transactions=pending_txs,  # Pass transactions list explicitly
+                        reward=Decimal("50"),  # Block reward
+                        miner_address=mining_config['wallet_address']
+                    )
+                    
+                    if block:
+                        mining_time = time.time() - mine_start
+                        metrics = await self._update_mining_metrics(
+                            session_id,
+                            block,
+                            mining_time,
+                            mining_config
+                        )
+                        
+                        # Send mining update to client
+                        await websocket.send(json.dumps({
+                            'type': 'mining_update',
+                            'metrics': metrics,
+                            'quantum_enabled': mining_config['quantum_enabled']
+                        }))
+                        
+                        previous_hash = block.hash
+                        performance_data['transactions'].clear()
+                        
+                    await asyncio.sleep(0.1)
+                    
+                except asyncio.CancelledError:
+                    raise
+                except Exception as loop_error:
+                    logger.error(f"Error in mining iteration: {str(loop_error)}")
+                    logger.error(traceback.format_exc())
+                    await asyncio.sleep(1)
+                    
+            # Send final mining summary
+            final_metrics = {
+                'blocks_mined': len(performance_data['blocks_mined']),
+                'total_mining_time': time.time() - start_time,
+                'average_mining_time': np.mean(performance_data['mining_times']) if performance_data['mining_times'] else 0,
+                'average_hash_rate': np.mean(performance_data['hash_rates']) if performance_data['hash_rates'] else 0,
+                'quantum_metrics': {
+                    'decoherence_events': miner.quantum_metrics['decoherence_events'],
+                    'average_fidelity': np.mean([e['fidelity'] for e in miner.quantum_metrics['decoherence_events']]) if miner.quantum_metrics['decoherence_events'] else 1.0,
+                    'total_quantum_ops': miner.quantum_metrics['total_operations']
+                },
+                'dag_metrics': miner.get_dag_metrics()
+            }
+            
+            await websocket.send(json.dumps({
+                'type': 'mining_complete',
+                'metrics': final_metrics
+            }))
+                
         except asyncio.CancelledError:
             logger.info(f"Mining cancelled for session: {session_id}")
         except Exception as e:
-            logger.error(f"Error in mining loop: {str(e)}")
+            logger.error(f"Fatal error in mining loop: {str(e)}")
+            logger.error(traceback.format_exc())
             await websocket.send(json.dumps({
-                "status": "error",
-                "message": f"Mining error: {str(e)}"
+                'status': 'error',
+                'message': f'Mining error: {str(e)}'
             }))
-        finally:
-            session['mining_task'] = None
-            await self.send_mining_complete(websocket, session_id)
+
+
+
+
     async def cleanup(self):
         """Clean up server resources"""
         try:
@@ -11812,6 +13595,54 @@ class QuantumBlockchainWebSocketServer:
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
             raise
+
+    async def _update_mining_metrics(self, session_id: str, block: 'QuantumBlock', 
+                                   mining_time: float, config: dict) -> dict:
+        """Update mining metrics after successful block mining"""
+        try:
+            session = self.sessions[session_id]
+            performance_data = session['performance_data']
+            
+            # Update performance data
+            performance_data['blocks_mined'].append(block)
+            performance_data['mining_times'].append(mining_time)
+            
+            # Calculate hash rate
+            hash_rate = block.nonce / max(mining_time, 0.001)
+            performance_data['hash_rates'].append(hash_rate)
+            
+            # Calculate metrics
+            metrics = {
+                'blocks_mined': len(performance_data['blocks_mined']),
+                'last_block': {
+                    'hash': block.hash,
+                    'timestamp': block.timestamp,
+                    'size': len(block.transactions),
+                    'transaction_count': len(block.transactions)
+                },
+                'performance': {
+                    'mining_time': mining_time,
+                    'hash_rate': hash_rate,
+                    'average_time': np.mean(performance_data['mining_times']),
+                    'average_hash_rate': np.mean(performance_data['hash_rates'])
+                },
+                'dag_metrics': session['miner'].get_dag_metrics(),
+                'quantum_metrics': {
+                    'enabled': config['quantum_enabled'],
+                    'decoherence': len(session['miner'].quantum_metrics['decoherence_events']),
+                    'fidelity': np.mean([e['fidelity'] for e in session['miner'].quantum_metrics['decoherence_events'][-10:]])
+                    if session['miner'].quantum_metrics['decoherence_events'] else 1.0
+                }
+            }
+            
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Error updating mining metrics: {str(e)}")
+            return {
+                'blocks_mined': 0,
+                'error': str(e)
+            }
 
 
 # Remaining Wallet Handlers
@@ -12378,13 +14209,22 @@ class QuantumBlockchainWebSocketServer:
             # Get initialization parameters
             difficulty = int(data.get("difficulty", 2))
             security_level = int(data.get("security_level", 20))
+            wallet_address = data.get("wallet_address")
+            quantum_enabled = data.get("quantum_enabled", True)
+
+            if not wallet_address:
+                return {
+                    "status": "error",
+                    "message": "Wallet address required for initialization"
+                }
+
             confirmation_params = data.get("confirmation_params", {
                 "quantum_threshold": 0.85,
                 "min_confirmations": 6,
                 "max_confirmations": 100
             })
 
-            # Create new DAGKnightMiner instance
+            # Create new DAGKnightMiner instance without wallet_address
             miner = DAGKnightMiner(
                 difficulty=difficulty,
                 security_level=security_level
@@ -12405,27 +14245,34 @@ class QuantumBlockchainWebSocketServer:
             if session_id not in self.sessions:
                 self.sessions[session_id] = {}
 
-            # Store miner in session
-            self.sessions[session_id]['miner'] = miner
-
-            # Initialize mining metrics
-            self.sessions[session_id]['performance_data'] = {
-                'blocks_mined': [],
-                'mining_times': [],
-                'hash_rates': [],
-                'start_time': time.time()
-            }
+            # Store miner and configuration in session
+            self.sessions[session_id].update({
+                'miner': miner,
+                'mining_config': {
+                    'wallet_address': wallet_address,
+                    'difficulty': difficulty,
+                    'security_level': security_level,
+                    'quantum_enabled': quantum_enabled
+                },
+                'performance_data': {
+                    'blocks_mined': [],
+                    'mining_times': [],
+                    'hash_rates': [],
+                    'start_time': time.time(),
+                    'transactions': {}
+                }
+            })
 
             logger.info(f"[{session_id}] Miner initialized successfully "
                        f"with difficulty {difficulty} and security level {security_level}")
 
-            # Return initialization success
             return {
                 "status": "success",
                 "message": "Miner initialized",
                 "settings": {
                     "difficulty": difficulty,
                     "security_level": security_level,
+                    "quantum_enabled": quantum_enabled,
                     "confirmation_params": confirmation_params
                 }
             }
@@ -12436,8 +14283,9 @@ class QuantumBlockchainWebSocketServer:
             logger.error(traceback.format_exc())
             return {
                 "status": "error",
-                "message": f"Failed to initialize miner: {str(e)}"
+                "message": error_msg
             }
+
 
     def verify_miner(self, session_id: str) -> bool:
         """Verify miner is properly initialized"""
@@ -12524,23 +14372,47 @@ class QuantumBlockchainWebSocketServer:
                 "message": f"Failed to validate block: {str(e)}"
             }
 
-    async def handle_mined_block(self, session_id: str, websocket, block, mining_time: float):
+    async def handle_mined_block(self, session_id: str, websocket, block, mining_time: float) -> dict:
         """Handle successful block mining"""
-        session = self.sessions[session_id]
-        perf_data = session['performance_data']
-        
-        # Update performance data
-        perf_data['blocks_mined'].append(block)
-        perf_data['mining_times'].append(mining_time)
-        hash_rate = block.nonce / mining_time if mining_time > 0 else 0
-        perf_data['hash_rates'].append(hash_rate)
-        
-        # Send progress update
-        await websocket.send(json.dumps({
-            "type": "mining_update",
-            "block_hash": block.hash,
-            "metrics": self.get_mining_metrics(session_id)
-        }))
+        try:
+            session = self.sessions[session_id]
+            performance_data = session['performance_data']
+            
+            # Update performance data
+            performance_data['blocks_mined'].append(block)
+            performance_data['mining_times'].append(mining_time)
+            
+            # Calculate hash rate
+            nonce = getattr(block, 'nonce', 0)
+            hash_rate = nonce / mining_time if mining_time > 0 else 0
+            performance_data['hash_rates'].append(hash_rate)
+            
+            # Calculate metrics
+            metrics = {
+                'blocks_mined': len(performance_data['blocks_mined']),
+                'last_block': {
+                    'hash': block.hash,
+                    'timestamp': block.timestamp,
+                    'size': len(block.transactions)
+                },
+                'performance': {
+                    'mining_time': mining_time,
+                    'hash_rate': hash_rate,
+                    'average_time': np.mean(performance_data['mining_times']),
+                    'average_hash_rate': np.mean(performance_data['hash_rates'])
+                },
+                'dag_metrics': session['miner'].get_dag_metrics()
+            }
+            
+            return metrics
+
+        except Exception as e:
+            logger.error(f"Error handling mined block: {str(e)}")
+            return {
+                'blocks_mined': 0,
+                'error': str(e)
+            }
+
 
     async def send_mining_complete(self, websocket, session_id: str):
         """Send mining completion notification"""

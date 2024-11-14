@@ -38,7 +38,7 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
-
+from DAGKnightGasSystem import EnhancedGasPrice,EnhancedGasTransactionType,EnhancedDAGKnightGasSystem
 logger = logging.getLogger(__name__)
 
 
@@ -401,6 +401,18 @@ class SimpleVM:
         self.initialized = False
         self.sql_contracts = {}
         self.sql_contract_code = {}
+        self.gas_system = EnhancedDAGKnightGasSystem()
+        # Network state for gas calculations
+        self.network_state = {
+            'avg_block_time': 30.0,
+            'network_load': 0.0,
+            'active_nodes': 0,
+            'quantum_entangled_pairs': 0,
+            'dag_depth': 0,
+            'total_compute': 0.0
+        }
+
+
         logger.info(f"SimpleVM initialized with gas_limit={gas_limit}, number_of_shards={number_of_shards}, nodes={nodes}")
     async def initialize(self):
         try:
@@ -425,6 +437,109 @@ class SimpleVM:
         self.total_supply = self.persistent_storage.load('total_supply')
         self.token_balances = self.persistent_storage.load('token_balances')
         self.nfts = self.persistent_storage.load('nfts')
+    async def calculate_transaction_gas(self, transaction: dict) -> tuple[int, EnhancedGasPrice]:
+        """Calculate gas cost for a transaction with quantum effects"""
+        try:
+            # Determine transaction type
+            tx_type = self._determine_transaction_type(transaction)
+            
+            # Calculate data size
+            data_size = len(str(transaction.get('data', '')).encode())
+            
+            # Check for quantum features
+            quantum_enabled = transaction.get('quantum_enabled', False)
+            entanglement_count = transaction.get('entanglement_count', 0)
+            
+            # Get gas calculation from enhanced system
+            total_gas, gas_price = await self.gas_system.calculate_gas(
+                tx_type=tx_type,
+                data_size=data_size,
+                quantum_enabled=quantum_enabled,
+                entanglement_count=entanglement_count
+            )
+            
+            return total_gas, gas_price
+            
+        except Exception as e:
+            logger.error(f"Error calculating transaction gas: {str(e)}")
+            raise
+
+    def _determine_transaction_type(self, transaction: dict) -> EnhancedGasTransactionType:
+        """Determine transaction type for gas calculation"""
+        if transaction.get('quantum_proof'):
+            return EnhancedGasTransactionType.QUANTUM_PROOF
+        elif transaction.get('quantum_entangle'):
+            return EnhancedGasTransactionType.QUANTUM_ENTANGLE
+        elif transaction.get('quantum_state'):
+            return EnhancedGasTransactionType.QUANTUM_STATE
+        elif transaction.get('smart_contract'):
+            return EnhancedGasTransactionType.SMART_CONTRACT
+        elif transaction.get('dag_reorg'):
+            return EnhancedGasTransactionType.DAG_REORG
+        elif transaction.get('data_size', 0) > 1000:
+            return EnhancedGasTransactionType.DATA_STORAGE
+        else:
+            return EnhancedGasTransactionType.STANDARD
+    async def update_network_state(self):
+        """Update network state for gas calculations"""
+        try:
+            current_time = time.time()
+            
+            # Calculate average block time
+            if len(self.chain) > 1:
+                recent_blocks = self.chain[-10:]
+                block_times = [b.timestamp for b in recent_blocks]
+                avg_block_time = sum(
+                    t2 - t1 for t1, t2 in zip(block_times[:-1], block_times[1:])
+                ) / (len(block_times) - 1)
+            else:
+                avg_block_time = 30.0
+
+            # Update network state
+            self.network_state.update({
+                'avg_block_time': avg_block_time,
+                'network_load': len(self.transaction_queue) / 1000,  # Normalize by capacity
+                'active_nodes': len(self.nodes) if self.nodes else 0,
+                'quantum_entangled_pairs': self._count_quantum_entanglements(),
+                'dag_depth': len(self.chain),
+                'total_compute': self._calculate_total_compute()
+            })
+
+            # Update gas system
+            await self.gas_system.update_network_metrics(self.network_state)
+
+        except Exception as e:
+            logger.error(f"Error updating network state: {str(e)}")
+            raise
+
+    def _count_quantum_entanglements(self) -> int:
+        """Count quantum entangled pairs in the system"""
+        try:
+            entangled_count = 0
+            for tx in self.transaction_queue:
+                if tx.get('quantum_enabled') and tx.get('entanglement_count', 0) > 0:
+                    entangled_count += tx.get('entanglement_count', 0)
+            return entangled_count
+        except Exception as e:
+            logger.error(f"Error counting quantum entanglements: {str(e)}")
+            return 0
+
+    def _calculate_total_compute(self) -> float:
+        """Calculate total computational work in the system"""
+        try:
+            total_work = 0.0
+            for block in self.chain:
+                # Add difficulty-based work
+                total_work += 2 ** self.difficulty
+                
+                # Add quantum operation work
+                if hasattr(block, 'quantum_signature'):
+                    total_work += len(block.quantum_signature) * 0.1
+            return total_work
+        except Exception as e:
+            logger.error(f"Error calculating total compute: {str(e)}")
+            return 0.0
+
     async def deploy_sql_contract(self, sender, contract_code):
         contract_address = self.generate_contract_address(sender)
         sql_contract = SQLContract(self, contract_address)
@@ -718,21 +833,126 @@ class SimpleVM:
             raise Exception("Unauthorized: User does not have execute permission")
         self.transaction_queue.append(transaction)
 
-    async def process_transactions(self):
-        loop = asyncio.get_event_loop()
+    async def process_transaction(self, transaction: dict) -> dict:
+        """Process a transaction with enhanced gas handling"""
+        try:
+            # Calculate gas
+            total_gas, gas_price = await self.calculate_transaction_gas(transaction)
+            
+            # Check sender balance
+            sender_balance = self.get_balance(transaction['sender'])
+            gas_cost = Decimal(str(total_gas)) * gas_price.total
+            
+            if sender_balance < gas_cost + Decimal(str(transaction.get('amount', 0))):
+                raise ValueError("Insufficient balance for transaction and gas")
+                
+            # Execute transaction
+            await self.execute_transaction_with_gas(
+                transaction,
+                total_gas,
+                gas_price
+            )
+            
+            # Update network state
+            await self.update_network_state()
+            
+            return {
+                'status': 'success',
+                'gas_used': total_gas,
+                'gas_price': float(gas_price.total),
+                'total_cost': float(gas_cost)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing transaction: {str(e)}")
+            raise
+    async def execute_transaction_with_gas(self, transaction: dict, 
+                                         gas_limit: int, 
+                                         gas_price: EnhancedGasPrice):
+        """Execute transaction with gas limit and quantum effects"""
+        gas_used = 0
+        
+        try:
+            # Track quantum operations
+            if transaction.get('quantum_enabled'):
+                # Add quantum operation cost
+                quantum_ops_cost = self._calculate_quantum_ops_cost(transaction)
+                gas_used += quantum_ops_cost
+                
+            # Process normal transaction operations
+            result = await self._process_transaction_ops(transaction, gas_limit - gas_used)
+            
+            # Deduct gas cost from sender
+            total_cost = Decimal(str(gas_used)) * gas_price.total
+            self.balances[transaction['sender']] -= total_cost
+            
+            # Add gas fee to rewards pool
+            self.miner_rewards_pool += total_cost
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error executing transaction: {str(e)}")
+            raise
+    def _calculate_quantum_ops_cost(self, transaction: dict) -> int:
+        """Calculate gas cost for quantum operations"""
+        base_cost = 50000  # Base cost for quantum operations
+        
+        # Add entanglement costs
+        if entanglement_count := transaction.get('entanglement_count', 0):
+            entanglement_cost = self._calculate_entanglement_cost(entanglement_count)
+            base_cost += entanglement_cost
+            
+        # Add decoherence penalty
+        if transaction.get('quantum_state'):
+            decoherence_penalty = self._calculate_decoherence_penalty(
+                transaction.get('quantum_state')
+            )
+            base_cost += decoherence_penalty
+            
+        return base_cost
 
-        async def execute_transaction(transaction):
-            await loop.run_in_executor(self.executor, self.execute_contract,
-                                       transaction["to"],
-                                       transaction["data"],
-                                       transaction.get("gas_limit", self.gas_limit),
-                                       transaction["user_id"],
-                                       transaction["sender_public_key"],
-                                       transaction["signature"])
+    def _calculate_entanglement_cost(self, entanglement_count: int) -> int:
+        """Calculate gas cost for quantum entanglement"""
+        # Non-linear scaling for entanglement cost
+        return int(10000 * (1 + np.log(1 + entanglement_count)))
 
-        tasks = [execute_transaction(transaction) for transaction in self.transaction_queue]
-        await asyncio.gather(*tasks)
-        self.transaction_queue.clear()
+    def _calculate_decoherence_penalty(self, quantum_state: dict) -> int:
+        """Calculate gas penalty for quantum decoherence"""
+        # Get decoherence rate from network state
+        decoherence_rate = 0.01  # Base rate
+        
+        # Calculate time factor
+        time_factor = np.exp(-decoherence_rate * 
+                           (time.time() - self.last_quantum_update))
+                           
+        return int(5000 * (1 - time_factor))
+    def get_gas_metrics(self) -> dict:
+        """Get comprehensive gas metrics"""
+        metrics = self.gas_system.metrics.get_metrics()
+        
+        # Add VM-specific metrics
+        metrics.update({
+            'network_state': self.network_state,
+            'quantum_metrics': {
+                'entangled_pairs': self._count_quantum_entanglements(),
+                'decoherence_rate': self._calculate_current_decoherence(),
+                'quantum_operations': self._count_quantum_operations()
+            }
+        })
+        
+        return metrics
+
+    def _calculate_current_decoherence(self) -> float:
+        """Calculate current quantum decoherence rate"""
+        try:
+            base_rate = 0.01
+            load_factor = 1 + (self.network_state['network_load'] * 0.5)
+            return base_rate * load_factor
+        except Exception as e:
+            logger.error(f"Error calculating decoherence: {str(e)}")
+            return 0.01
+
 
     def execute_contract(self, contract_address, input_data, gas_limit, user_id, sender_public_key, signature):
         shard_id = self.get_shard_for_contract(contract_address)

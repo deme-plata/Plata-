@@ -21,6 +21,7 @@ import logging
 from SecureHybridZKStark import SecureHybridZKStark
 from CryptoProvider import CryptoProvider
 from shared_logic import QuantumBlock
+from typing import Set
 
 from DAGKnightGasSystem import EnhancedDAGKnightGasSystem,EnhancedGasTransactionType
 
@@ -365,19 +366,27 @@ class DAGDiagnostics:
             issues.append("DAG contains disconnected components")
 
         diagnostics["issues"] = issues
-
 class DAGKnightMiner:
     def __init__(self, difficulty: int = 4, security_level: int = 20):
-        """Initialize DAGKnight miner with quantum parameters and gas metrics"""
+        """Initialize DAGKnight miner with DAG-specific parameters and quantum metrics"""
         # Basic mining parameters
         self.initial_difficulty = difficulty
         self.difficulty = difficulty
         self.security_level = security_level
         self.target = 2**(256-difficulty)
         
+        # DAG parameters
+        self.max_parents = 8  # Maximum number of parent references per transaction
+        self.min_parents = 2  # Minimum number of parent references for validation
+        self.max_branching = 4  # Maximum number of child references
+        self.confirmation_threshold = 6  # Number of confirming references needed
+        self.max_depth_difference = 10  # Maximum allowed depth difference between branches
+        
+        # Initialize DAG
+        self.dag = nx.DiGraph()
+        
         # Gas system parameters
         self.last_adjustment = time.time()
-        self.adjustment_interval = 60  # Adjust gas metrics every minute
         self.min_gas_price = Decimal('0.1')
         self.max_gas_price = Decimal('1000.0')
         self.base_gas_price = Decimal('1.0')
@@ -385,40 +394,61 @@ class DAGKnightMiner:
         # Quantum parameters
         self.quantum_entropy = 0.1      # Controls entropy-based corrections
         self.quantum_coupling = 0.15    # Controls quantum coupling strength
-        self.coupling_strength = 0.1    # For backward compatibility
+        self.coupling_strength = 0.15   # Same as quantum_coupling for backwards compatibility
         self.entanglement_threshold = 0.5
         self.decoherence_rate = 0.01   # Rate of quantum state decay
         self.system_size = 32          # Quantum system dimension
         
-        # DAG parameters
-        self.max_parents = 8
-        self.min_parents = 2
+        # Initialize quantum metrics
+        self.quantum_metrics = {
+            'total_operations': 0,
+            'decoherence_events': [],
+            'quantum_states': [],
+            'foam_structures': [],
+            'verification_stats': {
+                'total': 0,
+                'successful': 0,
+                'failed': 0
+            },
+            'entanglement_metrics': {
+                'fidelity': [],
+                'coupling_strength': [],
+                'decoherence_rate': []
+            }
+        }
         
-        # Initialize DAG
-        self.dag = nx.DiGraph()
-        
-        # Mining metrics
+        # Mining metrics focused on DAG properties
         self.mining_metrics = {
-            'blocks_mined': 0,
+            'transactions_processed': 0,
             'total_hash_calculations': 0,
-            'average_mining_time': 0,
-            'difficulty_history': [],
-            'hash_rate_history': [],
-            'last_block_time': time.time(),
-            'mining_start_time': time.time()
+            'average_processing_time': 0,
+            'dag_depth': 0,
+            'branching_factor': 0,
+            'confirmation_rates': [],
+            'path_diversity': 0,
+            'last_update': time.time(),
+            'start_time': time.time(),
+            'quantum_stats': {
+                'average_fidelity': 1.0,
+                'decoherence_events': 0,
+                'quantum_operations': 0
+            }
         }
         
         # Network state metrics
         self.network_metrics = {
-            'avg_block_time': 30.0,
+            'active_tips': 0,  # Number of unconfirmed tips in DAG
             'network_load': 0.0,
             'active_nodes': 0,
             'quantum_entangled_pairs': 0,
             'dag_depth': 0,
-            'total_compute': 0.0
+            'total_compute': 0.0,
+            'confirmation_latency': 0.0,  # Average time to reach confirmation threshold
+            'path_convergence': 0.0,  # Measure of how quickly paths converge
+            'quantum_sync_rate': 0.0   # Rate of quantum state synchronization
         }
         
-        # Base costs for different transaction types
+        # Transaction type base costs
         self.base_costs = {
             EnhancedGasTransactionType.STANDARD: 21000,
             EnhancedGasTransactionType.SMART_CONTRACT: 50000,
@@ -435,13 +465,26 @@ class DAGKnightMiner:
         self.H = self._initialize_hamiltonian()
         self.J = self._initialize_coupling()
         
+        # Initialize quantum state tracking
+        self.current_quantum_state = None
+        self.last_quantum_update = time.time()
+        
+        # Initialize decoherence tracking
+        self.decoherence_history = []
+        self.entanglement_pairs = {}
+        
         logger.info(f"Initialized DAGKnightMiner with:"
                    f"\n\tDifficulty: {difficulty}"
                    f"\n\tSecurity Level: {security_level}"
-                   f"\n\tQuantum Entropy: {self.quantum_entropy}"
-                   f"\n\tQuantum Coupling: {self.quantum_coupling}"
-                   f"\n\tCoupling Strength: {self.coupling_strength}"
-                   f"\n\tSystem Size: {self.system_size}")
+                   f"\n\tMin Parents: {self.min_parents}"
+                   f"\n\tMax Parents: {self.max_parents}"
+                   f"\n\tConfirmation Threshold: {self.confirmation_threshold}"
+                   f"\n\tQuantum Parameters:"
+                   f"\n\t\tEntropy: {self.quantum_entropy}"
+                   f"\n\t\tCoupling: {self.coupling_strength}"
+                   f"\n\t\tSystem Size: {self.system_size}"
+                   f"\n\t\tDecoherence Rate: {self.decoherence_rate}")
+
 
     def _initialize_hamiltonian(self) -> np.ndarray:
         """Initialize the Hamiltonian matrix for quantum operations"""
@@ -467,6 +510,44 @@ class DAGKnightMiner:
         except Exception as e:
             logger.error(f"Error initializing coupling matrix: {str(e)}")
             return np.zeros((self.system_size, self.system_size))  # Return zero matrix as fallback
+    def update_quantum_metrics(self, block_hash: str, quantum_state: np.ndarray):
+        """Update quantum metrics after block mining"""
+        try:
+            current_time = time.time()
+            
+            # Calculate decoherence
+            time_elapsed = current_time - self.last_quantum_update
+            decoherence = np.exp(-self.decoherence_rate * time_elapsed)
+            
+            # Update metrics
+            self.quantum_metrics['total_operations'] += 1
+            self.quantum_metrics['decoherence_events'].append({
+                'timestamp': current_time,
+                'block_hash': block_hash,
+                'decoherence': float(decoherence),
+                'fidelity': float(np.trace(quantum_state @ quantum_state))
+            })
+            
+            # Update quantum states
+            self.quantum_metrics['quantum_states'].append({
+                'timestamp': current_time,
+                'block_hash': block_hash,
+                'state': quantum_state
+            })
+            
+            # Update mining metrics
+            self.mining_metrics['quantum_stats']['decoherence_events'] += 1
+            self.mining_metrics['quantum_stats']['quantum_operations'] += 1
+            
+            # Calculate average fidelity
+            fidelities = [event['fidelity'] for event in self.quantum_metrics['decoherence_events']]
+            if fidelities:
+                self.mining_metrics['quantum_stats']['average_fidelity'] = np.mean(fidelities)
+            
+            self.last_quantum_update = current_time
+            
+        except Exception as e:
+            logger.error(f"Error updating quantum metrics: {str(e)}")
 
     def apply_quantum_correction(self, state: np.ndarray) -> np.ndarray:
         """Apply quantum corrections to state"""
@@ -601,23 +682,156 @@ class DAGKnightMiner:
             return 0.0
 
     def get_mining_metrics(self) -> Dict:
-        """Get comprehensive mining statistics"""
+        """Get comprehensive mining metrics"""
         current_time = time.time()
-        uptime = current_time - self.mining_metrics['mining_start_time']
+        uptime = current_time - self.mining_metrics['start_time']
         
-        return {
-            'current_difficulty': self.difficulty,
-            'blocks_mined': self.mining_metrics['blocks_mined'],
-            'average_mining_time': self.mining_metrics['average_mining_time'],
-            'total_hash_calculations': self.mining_metrics['total_hash_calculations'],
-            'hash_rate_history': self.mining_metrics['hash_rate_history'][-100:],  # Last 100 entries
-            'difficulty_history': self.mining_metrics['difficulty_history'][-100:],  # Last 100 entries
-            'uptime': uptime,
-            'blocks_per_hour': (self.mining_metrics['blocks_mined'] / uptime) * 3600 if uptime > 0 else 0,
-            'target_block_time': self.target_block_time,
-            'current_target': self.target,
-            'dag_metrics': self.get_dag_metrics()
-        }
+        try:
+            # Calculate core metrics
+            metrics = {
+                'current_difficulty': self.difficulty,
+                'blocks_mined': self.mining_metrics['transactions_processed'],  # Maintain backwards compatibility
+                'transactions_processed': self.mining_metrics['transactions_processed'],
+                'average_processing_time': self.mining_metrics['average_processing_time'],
+                'total_hash_calculations': self.mining_metrics['total_hash_calculations'],
+                'uptime': uptime,
+                'transactions_per_second': (
+                    self.mining_metrics['transactions_processed'] / uptime
+                ) if uptime > 0 else 0
+            }
+            
+            # Add DAG-specific metrics
+            dag_metrics = self.calculate_dag_metrics()
+            metrics.update({
+                'dag_metrics': dag_metrics,
+                'confirmation_rates': self.mining_metrics['confirmation_rates'][-100:],
+                'network_state': self.network_metrics
+            })
+            
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Error getting mining metrics: {str(e)}")
+            return {
+                'current_difficulty': self.difficulty,
+                'blocks_mined': 0,
+                'transactions_processed': 0,
+                'average_processing_time': 0,
+                'total_hash_calculations': 0,
+                'uptime': uptime,
+                'transactions_per_second': 0,
+                'dag_metrics': {},
+                'network_state': self.network_metrics
+            }
+
+    def calculate_dag_metrics(self) -> Dict:
+        """Calculate comprehensive DAG metrics"""
+        try:
+            if not self.dag.nodes:
+                return {
+                    'depth': 0,
+                    'width': 0,
+                    'tips': 0,
+                    'branching_factor': 0,
+                    'path_diversity': 0
+                }
+                
+            # Calculate DAG properties
+            tips = [n for n in self.dag.nodes() if self.dag.out_degree(n) == 0]
+            depths = []
+            for tip in tips:
+                paths = nx.single_source_shortest_path_length(self.dag, tip)
+                depths.append(max(paths.values()))
+                
+            # Calculate average branching factor
+            branching = [self.dag.out_degree(n) for n in self.dag.nodes()]
+            avg_branching = sum(branching) / len(branching) if branching else 0
+            
+            # Calculate path diversity (number of unique paths / total paths)
+            path_diversity = self._calculate_path_diversity()
+            
+            return {
+                'depth': max(depths) if depths else 0,
+                'width': len(set(n for n in self.dag.nodes() if self.dag.in_degree(n) == 1)),
+                'tips': len(tips),
+                'branching_factor': avg_branching,
+                'path_diversity': path_diversity,
+                'total_nodes': self.dag.number_of_nodes(),
+                'total_edges': self.dag.number_of_edges()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating DAG metrics: {str(e)}")
+            return {}
+    def _calculate_path_diversity(self) -> float:
+        """Calculate path diversity metric"""
+        try:
+            if not self.dag.nodes:
+                return 0.0
+                
+            # Get tips and roots
+            tips = [n for n in self.dag.nodes() if self.dag.out_degree(n) == 0]
+            roots = [n for n in self.dag.nodes() if self.dag.in_degree(n) == 0]
+            
+            if not tips or not roots:
+                return 0.0
+                
+            # Count unique paths
+            unique_paths = set()
+            total_paths = 0
+            
+            for root in roots:
+                for tip in tips:
+                    paths = list(nx.all_simple_paths(self.dag, root, tip))
+                    total_paths += len(paths)
+                    unique_paths.update(tuple(path) for path in paths)
+                    
+            return len(unique_paths) / max(1, total_paths)
+            
+        except Exception as e:
+            logger.error(f"Error calculating path diversity: {str(e)}")
+            return 0.0
+
+    async def update_mining_metrics(self, processing_time: float, hash_calculations: int):
+        """Update mining metrics after processing a transaction"""
+        try:
+            self.mining_metrics['transactions_processed'] += 1
+            self.mining_metrics['total_hash_calculations'] += hash_calculations
+            
+            # Update average processing time with exponential moving average
+            alpha = 0.2
+            old_avg = self.mining_metrics['average_processing_time']
+            self.mining_metrics['average_processing_time'] = (
+                alpha * processing_time + (1 - alpha) * old_avg
+            )
+            
+            # Update DAG metrics
+            dag_metrics = self.calculate_dag_metrics()
+            self.mining_metrics['dag_depth'] = dag_metrics['depth']
+            self.mining_metrics['branching_factor'] = dag_metrics['branching_factor']
+            self.mining_metrics['path_diversity'] = dag_metrics['path_diversity']
+            
+            # Update network metrics
+            self.network_metrics.update({
+                'active_tips': dag_metrics['tips'],
+                'dag_depth': dag_metrics['depth'],
+                'network_load': len(self.dag.nodes()) / 1000  # Normalize by expected capacity
+            })
+            
+            # Log updated metrics
+            logger.info(f"""
+            Updated mining metrics:
+            - Transactions processed: {self.mining_metrics['transactions_processed']}
+            - Average processing time: {self.mining_metrics['average_processing_time']:.2f}s
+            - Hash calculations: {hash_calculations}
+            - DAG depth: {dag_metrics['depth']}
+            - Active tips: {dag_metrics['tips']}
+            - Path diversity: {dag_metrics['path_diversity']:.4f}
+            """)
+            
+        except Exception as e:
+            logger.error(f"Error updating mining metrics: {str(e)}")
+            logger.error(traceback.format_exc())
 
     def reset_metrics(self):
         """Reset mining metrics while preserving difficulty settings"""
@@ -884,20 +1098,31 @@ class DAGKnightMiner:
         except Exception as e:
             logger.error(f"Error getting latest block: {str(e)}")
             return None
-
     async def mine_block(self, previous_hash: str, data: str, transactions: list,
                         reward: Decimal, miner_address: str) -> Optional['QuantumBlock']:
         """Mine block with proper temporal ordering and genesis handling"""
         try:
-            mining_start_time = time.time()
+            mining_start_time = int(time.time() * 1000)  # Use milliseconds
             hash_calculations = 0
             
             # Initialize genesis block if needed
             if not self.dag.nodes:
-                genesis_time = mining_start_time - 3600  # Set genesis 1 hour earlier
+                genesis_time = mining_start_time - 3600000  # Set genesis 1 hour earlier (in ms)
                 genesis_hash = "0" * 64
                 self.dag.add_node(genesis_hash, timestamp=genesis_time)
                 previous_hash = genesis_hash
+                # Initialize mining metrics for genesis
+                self.mining_metrics = {
+                    'transactions_processed': 0,
+                    'total_hash_calculations': 0,
+                    'average_processing_time': 0,
+                    'dag_depth': 0,
+                    'branching_factor': 0,
+                    'confirmation_rates': [],
+                    'path_diversity': 0,
+                    'last_update': time.time(),
+                    'start_time': time.time()
+                }
             
             # Set block timestamp ensuring proper ordering
             if previous_hash in self.dag:
@@ -912,49 +1137,38 @@ class DAGKnightMiner:
             # Process transactions with proper temporal ordering
             tx_list = []
             tx_nodes = set()
-            base_time = block_time - 0.5  # Transactions slightly before block
+            base_time = block_time - 500  # Transactions 500ms before block
             
             # Add transactions to working DAG
             for tx in transactions:
-                if hasattr(tx, 'tx_hash'):
-                    # Set transaction timestamp
-                    tx.timestamp = base_time
-                    if tx.tx_hash not in working_dag:
-                        working_dag.add_node(tx.tx_hash, timestamp=base_time, transaction=tx)
-                        tx_nodes.add(tx.tx_hash)
-                    tx_list.append(tx)
+                try:
+                    if hasattr(tx, 'tx_hash'):
+                        # Create a copy of transaction
+                        tx_copy = tx.model_copy(deep=True)
+                        # Set integer timestamp
+                        tx_copy.timestamp = int(base_time)
+                        
+                        if tx_copy.tx_hash not in working_dag:
+                            working_dag.add_node(tx_copy.tx_hash, timestamp=int(base_time), transaction=tx_copy)
+                            tx_nodes.add(tx_copy.tx_hash)
+                        tx_list.append(tx_copy)
+                except Exception as tx_error:
+                    logger.error(f"Error processing transaction: {str(tx_error)}")
+                    continue
             
             # Get parent blocks
-            parent_hashes = []
-            if previous_hash in working_dag:
-                prev_time = working_dag.nodes[previous_hash].get('timestamp', 0)
-                if block_time > prev_time:
-                    parent_hashes.append(previous_hash)
-            
-            # Add additional parents while maintaining temporal ordering
-            tips = [node for node in working_dag.nodes() 
-                   if working_dag.out_degree(node) == 0 and node != previous_hash]
-            
-            for tip in sorted(tips, 
-                             key=lambda x: working_dag.nodes[x].get('timestamp', 0), 
-                             reverse=True):
-                tip_time = working_dag.nodes[tip].get('timestamp', 0)
-                if block_time > tip_time and len(parent_hashes) < 2:
-                    parent_hashes.append(tip)
-            
-            # Ensure we have at least one parent unless it's genesis
-            if not parent_hashes and previous_hash and previous_hash != "0" * 64:
-                parent_hashes = [previous_hash]
+            parent_hashes = await self._select_parents(working_dag, previous_hash, block_time)
             
             # Mine block
             nonce = 0
-            max_mining_time = 30  # Maximum time to spend mining in seconds
+            max_mining_time = 30000  # Maximum time to spend mining in milliseconds
+            end_time = mining_start_time + max_mining_time
             
-            while mining_start_time + max_mining_time > time.time():
+            while int(time.time() * 1000) < end_time:
                 block_data = {
                     'data': data,
                     'transactions': [tx.tx_hash for tx in tx_list],
-                    'timestamp': block_time,
+                    'timestamp': int(block_time),
                     'nonce': nonce,
                     'parent_hashes': parent_hashes
                 }
@@ -970,7 +1184,7 @@ class DAGKnightMiner:
                     miner_address=miner_address,
                     nonce=nonce,
                     parent_hashes=parent_hashes,
-                    timestamp=block_time
+                    timestamp=int(block_time)
                 )
                 
                 block_hash = block.compute_hash()
@@ -983,41 +1197,115 @@ class DAGKnightMiner:
                     self.dag = working_dag.copy()
                     
                     # Add block to DAG
-                    self.dag.add_node(block_hash, block=block, timestamp=block_time)
+                    self.dag.add_node(block_hash, block=block, timestamp=int(block_time))
                     
-                    # Connect block to parents with proper temporal ordering
-                    for parent_hash in parent_hashes:
-                        if parent_hash in self.dag:
-                            parent_time = self.dag.nodes[parent_hash].get('timestamp', 0)
-                            if block_time > parent_time:
-                                self.dag.add_edge(parent_hash, block_hash)
-                    
-                    # Connect transactions to block
-                    for tx_hash in tx_nodes:
-                        if tx_hash in self.dag:
-                            tx_time = self.dag.nodes[tx_hash].get('timestamp', 0)
-                            if block_time > tx_time:
-                                self.dag.add_edge(tx_hash, block_hash)
-                    
-                    # Verify DAG properties
-                    if not nx.is_directed_acyclic_graph(self.dag):
-                        logger.error("Block addition created cycles in DAG")
+                    # Connect block to parents
+                    success = await self._connect_block_to_dag(block_hash, parent_hashes, tx_nodes, block_time)
+                    if not success:
                         return None
                     
-                    await self._update_mining_metrics(time.time() - mining_start_time, hash_calculations)
+                    # Update metrics
+                    mining_duration = int(time.time() * 1000) - mining_start_time
+                    self.mining_metrics['transactions_processed'] += 1
+                    self.mining_metrics['total_hash_calculations'] += hash_calculations
+                    
+                    # Update average processing time with exponential moving average
+                    alpha = 0.2
+                    old_avg = self.mining_metrics.get('average_processing_time', 0)
+                    new_avg = (alpha * (mining_duration / 1000) + (1 - alpha) * old_avg)
+                    self.mining_metrics['average_processing_time'] = new_avg
+                    
+                    # Update DAG metrics
+                    dag_metrics = self.calculate_dag_metrics()
+                    self.mining_metrics.update({
+                        'dag_depth': dag_metrics['depth'],
+                        'branching_factor': dag_metrics['branching_factor'],
+                        'path_diversity': dag_metrics['path_diversity'],
+                        'last_update': time.time()
+                    })
+                    
+                    logger.info(f"""
+                    Block mined successfully:
+                    - Hash: {block_hash}
+                    - Timestamp: {block_time}
+                    - Transactions: {len(tx_list)}
+                    - Mining time: {mining_duration}ms
+                    - Hash calculations: {hash_calculations}
+                    - Current DAG depth: {dag_metrics['depth']}
+                    - Path diversity: {dag_metrics['path_diversity']:.4f}
+                    """)
+                    
                     return block
                 
                 nonce += 1
                 if nonce % 100 == 0:
                     await asyncio.sleep(0)
             
-            logger.warning("Mining timed out")
+            logger.warning(f"Mining timed out after {max_mining_time}ms")
             return None
             
         except Exception as e:
             logger.error(f"Error mining block: {str(e)}")
             logger.error(traceback.format_exc())
             return None
+
+    async def _select_parents(self, working_dag: nx.DiGraph, previous_hash: str, block_time: int) -> List[str]:
+        """Select parent blocks maintaining temporal ordering"""
+        parent_hashes = []
+        
+        # Add previous hash if valid
+        if previous_hash in working_dag:
+            prev_time = working_dag.nodes[previous_hash].get('timestamp', 0)
+            if block_time > prev_time:
+                parent_hashes.append(previous_hash)
+        
+        # Add additional parents while maintaining temporal ordering
+        tips = [node for node in working_dag.nodes() 
+                if working_dag.out_degree(node) == 0 and node != previous_hash]
+        
+        # Sort tips by timestamp for deterministic ordering
+        for tip in sorted(tips, 
+                         key=lambda x: working_dag.nodes[x].get('timestamp', 0), 
+                         reverse=True):
+            tip_time = working_dag.nodes[tip].get('timestamp', 0)
+            if block_time > tip_time and len(parent_hashes) < 2:
+                parent_hashes.append(tip)
+        
+        # Ensure we have at least one parent unless it's genesis
+        if not parent_hashes and previous_hash and previous_hash != "0" * 64:
+            parent_hashes = [previous_hash]
+        
+        return parent_hashes
+
+    async def _connect_block_to_dag(self, block_hash: str, parent_hashes: List[str], 
+                                  tx_nodes: Set[str], block_time: int) -> bool:
+        """Connect block to DAG and verify structure"""
+        try:
+            # Connect block to parents
+            for parent_hash in parent_hashes:
+                if parent_hash in self.dag:
+                    parent_time = self.dag.nodes[parent_hash].get('timestamp', 0)
+                    if block_time > parent_time:
+                        self.dag.add_edge(parent_hash, block_hash)
+            
+            # Connect transactions to block
+            for tx_hash in tx_nodes:
+                if tx_hash in self.dag:
+                    tx_time = self.dag.nodes[tx_hash].get('timestamp', 0)
+                    if block_time > tx_time:
+                        self.dag.add_edge(tx_hash, block_hash)
+            
+            # Verify DAG properties
+            if not nx.is_directed_acyclic_graph(self.dag):
+                logger.error("Block addition created cycles in DAG")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error connecting block to DAG: {str(e)}")
+            return False
+
 
     async def _get_connected_parents(self, previous_hash: str) -> List[str]:
         """Get parent blocks ensuring DAG connectivity"""
