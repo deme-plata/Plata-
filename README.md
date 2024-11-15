@@ -46,23 +46,37 @@ Plata combines scarcity with exponential growth potential, aiming to follow Bitc
 
 ## Installation
 
-To install Plata Coin, follow these steps:
+To install **Plata Coin**, follow these steps:
 
-1. Clone the repository:
+1. **Clone the Repository**:
     ```bash
     git clone https://gitlab.com/dagknight/dagknight
     ```
 
-2. Set up a virtual environment:
+2. **Set Up a Virtual Environment**:
     ```bash
     python3 -m venv new_venv
     source new_venv/bin/activate
     ```
 
-3. Install the dependencies:
+3. **Install Dependencies**:
     ```bash
     pip install -r requirements.txt
     ```
+
+4. **Configure and Run the Setup Script**:
+    Navigate to the project directory if not already there, then update permissions and execute `setup.sh`:
+
+    ```bash
+    cd dagknight
+    chmod +x setup.sh
+    ./setup.sh
+    ```
+
+---
+
+This completes the installation and configuration of **Plata Coin** on your local machine.
+
 
 ## Usage
 
@@ -79,7 +93,7 @@ To run the Plata Coin project, use the following commands:
     export SECRET_KEY="your_secret_key"
     ```
 
-2. Start the gRPC server:
+2. Start the node server:
     ```bash
     python quantumdagknight.py
     ```
