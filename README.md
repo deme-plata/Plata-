@@ -133,6 +133,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 Viktor (@viktorakademe)
 Lead Architect of Plata (QuantumDAGKnight)
 I'm the lead architect behind Plata, a quantum-resistant blockchain that implements a novel combination of quantum mechanics principles with directed acyclic graph (DAG) technology. My work focuses on making blockchain technology future-proof through quantum resistance while maintaining high performance and scalability.
+
 🔬 Key Innovations:
 
 Pioneered the Quantum-DAG architecture, combining quantum-resistant cryptography with DAG structures
