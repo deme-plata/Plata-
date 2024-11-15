@@ -128,3 +128,51 @@ We welcome contributions to Plata Coin! If you’d like to contribute, please fo
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## About 
+Viktor (@viktorakademe)
+Lead Architect of Plata (QuantumDAGKnight)
+I'm the lead architect behind Plata, a quantum-resistant blockchain that implements a novel combination of quantum mechanics principles with directed acyclic graph (DAG) technology. My work focuses on making blockchain technology future-proof through quantum resistance while maintaining high performance and scalability.
+🔬 Key Innovations:
+
+Pioneered the Quantum-DAG architecture, combining quantum-resistant cryptography with DAG structures
+Developed novel quantum-entangled synchronization protocol for node state management
+Created SimpleVM, a flexible virtual machine supporting quantum-safe smart contracts
+Implemented DAGKnight consensus mechanism with quantum entropy for enhanced security
+
+🛠 Core Contributions:
+
+Designed and implemented quantum-resistant cryptographic primitives
+Created the quantum state synchronization system using Bell pair entanglement
+Architected the P2P network layer with quantum decoherence detection
+Built advanced zero-knowledge proof integration using Secure Hybrid ZK-STARK system
+
+🎯 Vision:
+My goal is to create a blockchain platform that will remain secure even in a post-quantum computing era. Plata represents a fundamental shift in how we think about distributed systems, incorporating principles from quantum mechanics to enhance security, scalability, and reliability.
+🌟 Project Highlights:
+
+Quantum-resistant by design
+High throughput through DAG architecture
+Real-time quantum state monitoring
+Advanced homomorphic encryption support
+Cross-chain compatibility through SimpleVM
+
+💡 Philosophy:
+"The future of blockchain isn't just about resisting quantum computers - it's about embracing quantum principles to create something extraordinary."
+🤝 Open Source:
+
+Core Developer: Plata
+Research Publications Forthcoming
+Regular Speaker at Blockchain & Quantum Computing Conferences
+
+📫 Contact:
+
+Twitter: @viktorakademe
+GitLab: gitlab.com/dagknight
+
+Feel free to reach out if you're interested in quantum-resistant blockchain technology or want to contribute to Plata. Together, we're building the quantum-secure future of decentralized systems.
+#QuantumBlockchain #DAG #Cryptography #BlockchainInnovation #OpenSource
+
+## PDFs 
+Please read PDFs 
+
