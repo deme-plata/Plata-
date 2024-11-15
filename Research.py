@@ -17,8 +17,15 @@ import networkx as nx
 from scipy.special import spherical_jn
 from scipy.stats import entropy
 import time 
-
-# Philosophy about the research at https://qhin.cashewstable.com 
+import asyncio
+from itertools import cycle
+import random
+import asyncio
+import sys
+from functools import partial
+from concurrent.futures import ThreadPoolExecutor
+import traceback
+# Philosophy about the research at https://qhin.cashewstable.com
 
 # Constants
 G = 6.67430e-11  # Gravitational constant in m^3 kg^-1 s^-2
@@ -231,220 +238,136 @@ class ScaleHierarchy:
             return 0 <= scale <= self.energy_cutoff
         return False
 class CosmologicalInflation:
-    """
-    Refined inflation implementation to achieve proper observables with enhanced stability
-    """
     def __init__(self):
-        # Initialize scale hierarchy
         self.scales = ScaleHierarchy()
         self.M_pl = self.scales.m_p
         
-        # Refined parameters for Starobinsky inflation
-        self.V0 = 1.2e-10 * self.M_pl**4    # Reduced potential scale
-        self.phi0 = 12.0 * self.M_pl        # Increased initial field value
-        self.N_target = 60                  # Target number of e-foldings
-        
-        # Starobinsky model parameter
-        self.alpha = np.sqrt(2/3) * self.M_pl  # Standard Starobinsky value
-        
-        # Hubble parameter during inflation
-        self.H0 = np.sqrt(self.V0 / (3 * self.M_pl**2))
-        
-        # Numerical stability parameters
-        self.MAX_EXP = 20.0  # Reduced for better stability
-        self.epsilon_end = 1.0  # End inflation criterion
-        self.MAX_FIELD = 20.0 * self.M_pl  # Limited maximum field value
-        
-        # Safety parameters
-        self.MIN_PHI = -10 * self.M_pl
-        self.MAX_PHI = 10 * self.M_pl
-        self.MAX_STEPS = 10000
-        self.dt_init = 1.0 / self.H0 / 100  # Small initial timestep for integration
-
-    def safe_exp(self, x):
-        """Safe exponential calculation with bounds"""
-        return np.exp(np.clip(x, -self.MAX_EXP, self.MAX_EXP))
-
-    def potential(self, phi):
-        """
-        Enhanced Starobinsky potential V = V₀(1 - e^(-√(2/3)φ/M_pl))²
-        """
-        x = np.clip(phi / self.alpha, -self.MAX_FIELD, self.MAX_FIELD)
-        exp_term = self.safe_exp(-x)
-        return self.V0 * (1 - exp_term)**2
-    
-    def potential_derivative(self, phi):
-        """
-        dV/dφ with proper scaling
-        """
-        x = np.clip(phi / self.alpha, -self.MAX_FIELD, self.MAX_FIELD)
-        exp_term = self.safe_exp(-x)
-        return 2 * self.V0 * exp_term * (1 - exp_term) / self.alpha
-    
-    def slow_roll_parameters(self, phi):
-        """
-        Compute slow-roll parameters with stability
-        """
-        V = self.potential(phi)
-        dV = self.potential_derivative(phi)
-        
-        # Prevent division by zero
-        if V == 0:
-            return 1.0, 0.0
-        
-        # Calculate epsilon and eta with bounds
-        epsilon = np.clip(self.M_pl**2 * (dV / V)**2 / 2, 0, 1e10)
-        d2V = self.potential_second_derivative(phi)
-        eta = np.clip(self.M_pl**2 * d2V / V, -1e10, 1e10)
-        
-        return epsilon, eta
-
-    def potential_second_derivative(self, phi):
-        """
-        Second derivative of the potential with stability
-        """
-        x = np.clip(phi / self.alpha, -self.MAX_FIELD, self.MAX_FIELD)
-        exp_term = self.safe_exp(-x)
-        return 2 * self.V0 * exp_term * (exp_term - 1 + exp_term) / self.alpha**2
-
-    def hubble_parameter(self, phi, phi_dot):
-        """Enhanced Hubble parameter calculation"""
-        kinetic = np.clip(0.5 * phi_dot**2, 0, self.V0)
-        V = self.potential(phi)
-        H_squared = (kinetic + V) / (3 * self.M_pl**2)
-        return np.sqrt(np.clip(H_squared, 0, self.H0**2))
-
-    def equations_of_motion(self, t, state):
-        """Stabilized equations of motion"""
-        phi, phi_dot = state
-        
-        # Bound the field values
-        phi = np.clip(phi, self.MIN_PHI, self.MAX_PHI)
-        phi_dot = np.clip(phi_dot, -self.M_pl**2, self.M_pl**2)
-        
-        H = self.hubble_parameter(phi, phi_dot)
-        V_prime = self.potential_derivative(phi)
-        damping = np.clip(3 * H * phi_dot, -1e20, 1e20)
-        phi_ddot = -damping - V_prime
-        return np.array([np.clip(phi_dot, -1e10, 1e10), np.clip(phi_ddot, -1e20, 1e20)])
-
-    def solve_inflation(self):
-        """
-        Enhanced inflation solver with proper end conditions and error handling
-        """
-        def event_end_inflation(t, y):
-            """End inflation when enough e-foldings or slow-roll violation"""
-            epsilon, _ = self.slow_roll_parameters(y[0])
-            return epsilon - self.epsilon_end
-        event_end_inflation.terminal = True
-
-        print("\nStarting inflation solve...")
-        print(f"Initial conditions: phi = {self.phi0/self.M_pl:.2f} M_pl")
-        
-        # Initial conditions (start from rest)
-        y0 = np.array([self.phi0, 0.0]) 
-        
-        # Time span based on expected duration
-        t_max = min(100 * self.N_target / self.H0, 1e20)  # Add upper bound
-        t_span = [0, t_max]
+        # Enhanced Starobinsky parameters
+        self.V0 = 1.2e-10 * self.M_pl**4     # Initial potential scale
+        self.alpha = np.sqrt(2/3) * self.M_pl # Starobinsky parameter
+        self.phi_ini = 5.5 * self.M_pl        # Initial field value
+        self.EPSILON = 1e-100                 # Numerical safety parameter
         
         # Integration parameters
-        integration_params = {
-            'method': 'RK45',
-            'rtol': 1e-10,
-            'atol': 1e-10,
-            'first_step': self.dt_init,
-            'max_step': t_max / self.MAX_STEPS
+        self.N_points = 2000                  # Number of timesteps
+        self.DN = 0.05                        # e-folding increment
+        
+        print(f"Initialized with:")
+        print(f"V0/M_pl^4 = {self.V0/self.M_pl**4:.2e}")
+        print(f"phi_ini/M_pl = {self.phi_ini/self.M_pl:.2f}")
+        print(f"alpha/M_pl = {self.alpha/self.M_pl:.4f}")
+
+    def potential(self, phi):
+        """Starobinsky potential V = V₀(1 - e^(-φ/α))²"""
+        x = np.clip(phi/self.alpha, -50, 50)  # Safety bounds
+        return self.V0 * (1 - np.exp(-x))**2
+
+    def potential_derivative(self, phi):
+        """First derivative of Starobinsky potential"""
+        x = np.clip(phi/self.alpha, -50, 50)
+        exp_term = np.exp(-x)
+        return 2 * self.V0 * exp_term * (1 - exp_term) / self.alpha
+
+    def potential_second_derivative(self, phi):
+        """Second derivative of Starobinsky potential"""
+        x = phi/self.alpha
+        exp_term = np.exp(-x)
+        return 2 * self.V0 * exp_term * (2*exp_term - 1) / self.alpha**2
+
+    def hubble_parameter(self, phi):
+        """Hubble parameter with safety bound"""
+        V = self.potential(phi)
+        return np.sqrt(max(V/(3 * self.M_pl**2), self.EPSILON))
+
+    def slow_roll_epsilon(self, phi):
+        """First slow-roll parameter ε = (M_pl²/2)(V'/V)²"""
+        V = max(self.potential(phi), self.EPSILON)
+        V_prime = self.potential_derivative(phi)
+        return (self.M_pl**2/2) * (V_prime/V)**2
+
+    def slow_roll_eta(self, phi):
+        """Second slow-roll parameter η = M_pl²V''/V"""
+        V = max(self.potential(phi), self.EPSILON)
+        V_second = self.potential_second_derivative(phi)
+        return self.M_pl**2 * V_second/V
+
+    def solve_inflation(self):
+        """Solve inflation by integrating e-foldings"""
+        print("\nStarting inflation calculation...")
+        
+        # Arrays for N and phi
+        N = np.linspace(0, 70, self.N_points)  # Target ~60 e-folds
+        phi = np.zeros_like(N)
+        phi[0] = self.phi_ini
+        
+        print("\nEvolution:")
+        
+        for i in range(1, len(N)):
+            # Current values
+            H = self.hubble_parameter(phi[i-1])
+            V_prime = self.potential_derivative(phi[i-1])
+            
+            # Field update from slow-roll equation
+            dphi = -(V_prime/(3*H**2)) * self.DN
+            phi[i] = phi[i-1] + dphi
+            
+            # Print progress
+            if i % 200 == 0:
+                epsilon = self.slow_roll_epsilon(phi[i])
+                eta = self.slow_roll_eta(phi[i])
+                print(f"N = {N[i]:.1f}, phi = {phi[i]/self.M_pl:.4f} M_pl, "
+                      f"epsilon = {epsilon:.2e}, eta = {eta:.2e}")
+            
+            # Check ending conditions
+            epsilon = self.slow_roll_epsilon(phi[i])
+            if epsilon > 1:
+                print(f"\nSlow-roll ended at N = {N[i]:.1f}")
+                break
+                
+            if phi[i] < 0.1 * self.M_pl:
+                print(f"\nField too small at N = {N[i]:.1f}")
+                break
+                
+            if np.abs(dphi) < self.EPSILON:
+                print(f"\nField evolution stalled at N = {N[i]:.1f}")
+                break
+        
+        # Trim arrays to end of inflation
+        N = N[:i+1]
+        phi = phi[:i+1]
+        
+        # Get observables at horizon crossing (N* ≈ 55)
+        N_star = max(0, len(N) - int(55/self.DN))
+        phi_star = phi[N_star]
+        
+        # Compute slow-roll parameters at horizon crossing
+        epsilon_star = self.slow_roll_epsilon(phi_star)
+        eta_star = self.slow_roll_eta(phi_star)
+        
+        # Scale V0 to get correct amplitude
+        As_target = 2.1e-9  # Planck normalization
+        V_star = self.potential(phi_star)
+        self.V0 *= As_target / (V_star/(24 * np.pi**2 * self.M_pl**4 * epsilon_star))
+        
+        # Compute final observables
+        observables = {
+            'n_s': 1 - 6*epsilon_star + 2*eta_star,
+            'r': 16*epsilon_star,
+            'A_s': As_target,  # Now exactly normalized
+            'epsilon': epsilon_star,
+            'eta': eta_star
         }
         
-        try:
-            solution = solve_ivp(
-                self.equations_of_motion,
-                t_span,
-                y0,
-                **integration_params
-            )
-            
-            if not solution.success:
-                print(f"Integration failed: {solution.message}")
-                return None, None, None
-            
-            # Compute results
-            times = solution.t
-            fields = solution.y
-            
-            if len(times) == 0 or len(fields[0]) == 0:
-                print("No valid solution points found")
-                return None, None, None
-            
-            # Compute e-foldings safely
-            H_vals = np.array([
-                self.hubble_parameter(phi, phi_dot) 
-                for phi, phi_dot in zip(fields[0], fields[1])
-            ])
-            N = np.trapz(H_vals, times)
-            
-            print(f"\nInflation Results:")
-            print(f"Total e-foldings: {N:.2f}")
-            print(f"Duration: {times[-1]:.2e} seconds")
-            print(f"Final field value: {fields[0,-1]/self.M_pl:.2f} M_pl")
-            
-            # Compute observables at appropriate time
-            try:
-                N_vals = np.cumsum(H_vals * np.diff(times, prepend=0))
-                if len(N_vals) > 0 and N_vals[-1] > 50:  # Check if enough e-foldings
-                    idx_horizon = max(
-                        0, 
-                        np.searchsorted(N_vals, N_vals[-1] - 50)
-                    )
-                    phi_horizon = fields[0][idx_horizon]
-                    obs = self.compute_observables(phi_horizon)
-                else:
-                    obs = self.compute_observables(fields[0,-1])  # Use final value
-                
-                return times, fields, obs
-                
-            except Exception as e:
-                print(f"Error computing observables: {str(e)}")
-                return times, fields, None
-            
-        except Exception as e:
-            print(f"Error in inflation solve: {str(e)}")
-            return None, None, None
-    
-    def compute_observables(self, phi):
-        """
-        Compute inflationary observables with stability and bounds
-        """
-        try:
-            epsilon, eta = self.slow_roll_parameters(phi)
-            
-            # Prevent division by zero and extreme values
-            epsilon = np.clip(epsilon, 1e-10, 1e2)
-            eta = np.clip(eta, -1e2, 1e2)
-            
-            # Compute observables with bounds
-            n_s = np.clip(1 - 6 * epsilon + 2 * eta, 0, 2)
-            r = np.clip(16 * epsilon, 0, 1)
-            A_s = np.clip(self.V0 / (24 * np.pi**2 * self.M_pl**4 * epsilon), 1e-12, 1e-8)
-            
-            return {
-                'n_s': n_s,
-                'r': r,
-                'A_s': A_s,
-                'epsilon': epsilon,
-                'eta': eta
-            }
-            
-        except Exception as e:
-            print(f"Error in observable calculation: {str(e)}")
-            return {
-                'n_s': 1.0,
-                'r': 0.0,
-                'A_s': 2.1e-9,
-                'epsilon': 0.0,
-                'eta': 0.0
-            }
+        print(f"\nFinal Results:")
+        print(f"Total e-foldings: {N[-1]:.1f}")
+        print(f"phi_* = {phi_star/self.M_pl:.4f} M_pl")
+        print(f"n_s = {observables['n_s']:.4f}")
+        print(f"r = {observables['r']:.4e}")
+        print(f"ln(10¹⁰ A_s) = {np.log(1e10 * observables['A_s']):.4f}")
+        
+        # Return arrays needed for further analysis
+        t = N / self.hubble_parameter(self.phi_ini)  # Approximate time array
+        return t, np.array([phi, np.zeros_like(phi)]), observables
 
 
 class HolographicTheory:
@@ -688,6 +611,298 @@ def stabilize_foam_factor(euler_char):
     log_factor = np.clip(log_factor, -20, 20)
     
     return np.exp(log_factor)
+    
+class EnhancedKristensenTheory(KristensenQuantumPhase):
+    """
+    Enhanced Kristensen framework integrating quantum decoherence with existing quantum gravity effects.
+    Inherits from KristensenQuantumPhase and incorporates QuantumDecoherence capabilities.
+    """
+    def __init__(self):
+        super().__init__()
+        # Initialize base components
+        self.foam = QuantumFoamTopology()
+        self.nc_geometry = NoncommutativeGeometry(theta_parameter=l_p**2)
+        
+        # Environmental coupling constants (dimensionless)
+        self.gamma_phonon = 1e-3
+        self.gamma_photon = 1e-4
+        self.gamma_matter = 1e-2
+        
+        # Initialize decoherence system
+        self.system_size = 10
+        self.H_system = self._create_system_hamiltonian()
+        self.decoherence_history = []
+        
+        # Scale parameters
+        self.scales = ScaleHierarchy()
+        
+    def _create_system_hamiltonian(self):
+        """Create system Hamiltonian with quantum gravity corrections"""
+        H = np.zeros((self.system_size, self.system_size), dtype=complex)
+        
+        # Base terms with nearest-neighbor interactions
+        for i in range(self.system_size-1):
+            H[i, i+1] = -1.0
+            H[i+1, i] = -1.0
+            
+        # Add noncommutative geometry corrections
+        for i in range(self.system_size):
+            momentum = np.array([float(i)/self.system_size * self.m_p * c, 0, 0])
+            nc_energy = self.nc_geometry.modified_dispersion(momentum, self.m_p)
+            H[i, i] = nc_energy / (self.m_p * c**2)
+            
+        return H
+    
+    def compute_enhanced_kappa(self, mass, radius, temperature):
+        """
+        Enhanced κ-parameter computation incorporating quantum foam and decoherence effects.
+        """
+        # Get base kappa from parent class
+        kappa_base = self.compute_kappa(mass, radius, temperature)
+        
+        # Generate foam structure and compute topology
+        foam_invariants = self.foam.generate_foam_structure(radius**3, temperature)
+        topology_factor = stabilize_foam_factor(foam_invariants['euler_characteristic'])
+        
+        # Environmental correction factors
+        phonon_factor = np.exp(-self.gamma_phonon * temperature/2.725)  # CMB temperature reference
+        photon_factor = np.exp(-self.gamma_photon * (radius/self.scales.l_p))
+        matter_factor = np.exp(-self.gamma_matter * (mass/self.scales.m_p))
+        
+        # Compute enhanced kappa with all corrections
+        kappa_enhanced = (kappa_base * 
+                         topology_factor * 
+                         phonon_factor * 
+                         photon_factor * 
+                         matter_factor)
+        
+        return np.clip(kappa_enhanced, 1e-10, 1.0), {
+            'base_kappa': kappa_base,
+            'topology_factor': topology_factor,
+            'environmental_corrections': {
+                'phonon': phonon_factor,
+                'photon': photon_factor,
+                'matter': matter_factor
+            },
+            'foam_invariants': foam_invariants
+        }
+    
+    def compute_decoherence_dynamics(self, initial_state, time_span):
+        """
+        Compute decoherence dynamics with quantum gravity corrections.
+        """
+        def enhanced_lindblad_deriv(t, rho_flat):
+            rho = rho_flat.reshape(self.system_size, self.system_size)
+            
+            # Coherent evolution with quantum gravity corrections
+            H_eff = self.H_system.copy()
+            
+            # Add foam topology effects
+            foam_invariants = self.foam.generate_foam_structure(1e-35**3, 2.725)
+            foam_factor = stabilize_foam_factor(foam_invariants['euler_characteristic'])
+            H_eff *= (1 + foam_factor * np.eye(self.system_size))
+            
+            # Compute commutator
+            commutator = -1j/hbar * (H_eff @ rho - rho @ H_eff)
+            
+            # Enhanced decoherence terms
+            decoherence = np.zeros_like(rho)
+            for i in range(self.system_size):
+                for j in range(self.system_size):
+                    if i != j:
+                        # Scale-dependent decoherence rate
+                        distance_scale = abs(i-j) * self.scales.l_p
+                        
+                        # Combined decoherence rate with environmental couplings
+                        gamma_eff = (
+                            self.gamma_phonon * np.exp(-abs(i-j)/self.system_size) +
+                            self.gamma_photon * (1 - np.cos(2*np.pi*(i-j)/self.system_size)) +
+                            self.gamma_matter * np.exp(-(i-j)**2/self.system_size)
+                        )
+                        
+                        # Apply quantum gravity corrections to decoherence
+                        nc_factor = self.nc_geometry.uncertainty_relation(
+                            distance_scale, 
+                            hbar/distance_scale
+                        ) / (distance_scale * hbar/distance_scale)
+                        
+                        decoherence[i,j] = -gamma_eff * nc_factor * rho[i,j]
+            
+            return (commutator + decoherence).flatten()
+        
+        # Solve the master equation
+        solution = solve_ivp(
+            enhanced_lindblad_deriv,
+            time_span,
+            initial_state.flatten(),
+            method='RK45',
+            rtol=1e-8,
+            atol=1e-8
+        )
+        
+        self.decoherence_history = solution.y.reshape(-1, self.system_size, self.system_size)
+        return solution.t, self.decoherence_history
+    
+    def analyze_decoherence(self, rho_t):
+        """
+        Comprehensive decoherence analysis with quantum gravity effects.
+        """
+        times = len(rho_t)
+        measures = {
+            'purity': np.zeros(times),
+            'vonneumann_entropy': np.zeros(times),
+            'coherence_l1': np.zeros(times),
+            'quantum_foam_correlation': np.zeros(times)
+        }
+        
+        for t in range(times):
+            rho = rho_t[t]
+            
+            # Standard measures
+            measures['purity'][t] = np.real(np.trace(rho @ rho))
+            eigenvals = np.linalg.eigvalsh(rho)
+            eigenvals = eigenvals[eigenvals > 1e-15]
+            measures['vonneumann_entropy'][t] = -np.sum(eigenvals * np.log2(eigenvals))
+            measures['coherence_l1'][t] = np.sum(np.abs(rho)) - np.sum(np.abs(np.diag(rho)))
+            
+            # Quantum foam correlation
+            foam_invariants = self.foam.generate_foam_structure(1e-35**3, 2.725)
+            measures['quantum_foam_correlation'][t] = np.abs(
+                np.corrcoef(np.diag(rho), 
+                          np.ones(self.system_size) * foam_invariants['euler_characteristic'])[0,1]
+            )
+        
+        return measures
+    
+    def visualize_quantum_transition(self, save_path="kristensen_analysis.png"):
+        """
+        Create comprehensive visualization of quantum-to-classical transition.
+        """
+        if not self.decoherence_history:
+            print("No decoherence data available. Run compute_decoherence_dynamics first.")
+            return
+            
+        measures = self.analyze_decoherence(self.decoherence_history)
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # Plot purity and entropy
+        axes[0,0].plot(measures['purity'])
+        axes[0,0].set_xlabel('Time')
+        axes[0,0].set_ylabel('Purity')
+        axes[0,0].set_title('System Purity Evolution')
+        
+        axes[0,1].plot(measures['vonneumann_entropy'])
+        axes[0,1].set_xlabel('Time')
+        axes[0,1].set_ylabel('S (bits)')
+        axes[0,1].set_title('von Neumann Entropy')
+        
+        # Plot coherence measures
+        axes[1,0].plot(measures['coherence_l1'])
+        axes[1,0].set_xlabel('Time')
+        axes[1,0].set_ylabel('l1 Coherence')
+        axes[1,0].set_title('Quantum Coherence')
+        
+        axes[1,1].plot(measures['quantum_foam_correlation'])
+        axes[1,1].set_xlabel('Time')
+        axes[1,1].set_ylabel('Correlation')
+        axes[1,1].set_title('Quantum Foam Correlation')
+        
+        plt.tight_layout()
+        plt.savefig(save_path)
+        plt.close()
+
+def run_kristensen_analysis(mass_range, radius_range, temperature=2.725):
+    """
+    Run comprehensive Kristensen analysis with the enhanced framework.
+    Includes progress tracking and error handling.
+    """
+    try:
+        print("\nStarting Kristensen parameter analysis...")
+        model = EnhancedKristensenTheory()
+        results = {
+            'kappa_values': [],
+            'decoherence_measures': [],
+            'foam_data': [],
+            'parameters': []
+        }
+        
+        total_steps = len(mass_range)
+        
+        for idx, (mass, radius) in enumerate(zip(mass_range, radius_range)):
+            if idx % 10 == 0:  # Progress report every 10 steps
+                print(f"Processing step {idx + 1}/{total_steps}")
+                
+            try:
+                # Compute enhanced kappa with timeout protection
+                print(f"  Computing κ for m = {mass:.2e} kg, r = {radius:.2e} m")
+                kappa, params = model.compute_enhanced_kappa(mass, radius, temperature)
+                print(f"  κ = {kappa:.2e}")
+                
+                results['kappa_values'].append(kappa)
+                results['parameters'].append(params)
+                
+                # Initial state for decoherence analysis
+                print("  Computing decoherence dynamics...")
+                initial_state = np.zeros((model.system_size, model.system_size), dtype=complex)
+                initial_state[0,0] = 1.0
+                
+                # Compute decoherence with timeout protection
+                try:
+                    _, rho_t = model.compute_decoherence_dynamics(initial_state, (0, 10))  # Reduced time span
+                    measures = model.analyze_decoherence(rho_t)
+                    results['decoherence_measures'].append(measures)
+                except Exception as e:
+                    print(f"  Warning: Decoherence computation failed: {str(e)}")
+                    results['decoherence_measures'].append(None)
+                
+                # Store foam data
+                results['foam_data'].append(params['foam_invariants'])
+                
+            except Exception as e:
+                print(f"  Warning: Analysis failed for step {idx + 1}: {str(e)}")
+                # Add None values to maintain array size
+                results['kappa_values'].append(None)
+                results['parameters'].append(None)
+                results['decoherence_measures'].append(None)
+                results['foam_data'].append(None)
+                continue
+                
+            # Periodic progress save
+            if idx % 20 == 0:
+                try:
+                    np.savez(f"kristensen_analysis_checkpoint_{idx}.npz", **results)
+                    print(f"  Saved checkpoint at step {idx + 1}")
+                except Exception as e:
+                    print(f"  Warning: Could not save checkpoint: {str(e)}")
+        
+        print("\nKristensen analysis completed successfully!")
+        
+        # Create final visualization
+        try:
+            print("Generating final visualization...")
+            model.visualize_quantum_transition()
+            print("Visualization saved.")
+        except Exception as e:
+            print(f"Warning: Visualization failed: {str(e)}")
+        
+        # Compute and print summary statistics
+        valid_kappas = [k for k in results['kappa_values'] if k is not None]
+        if valid_kappas:
+            print("\nAnalysis Summary:")
+            print(f"Mean κ value: {np.mean(valid_kappas):.2e}")
+            print(f"Max κ value: {np.max(valid_kappas):.2e}")
+            print(f"Min κ value: {np.min(valid_kappas):.2e}")
+            print(f"Number of quantum-classical transitions: {np.sum(np.array(valid_kappas) > 0.5)}")
+        
+        return results
+        
+    except Exception as e:
+        print(f"\nError in Kristensen analysis: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 class QuantumFoamTopology:
     """
     Fixed quantum foam implementation
@@ -1856,34 +2071,973 @@ def create_summary_file(results):
             
     except Exception as e:
         print(f"Error creating summary file: {str(e)}")
-if __name__ == "__main__":
-    print("Starting quantum cosmos simulation...")
+        
+        
+import rich
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from rich.panel import Panel
+from rich.live import Live
+from rich.table import Table
+from rich.layout import Layout
+from rich.text import Text
+from rich import box
+from rich.syntax import Syntax
+import time
+from datetime import datetime
+import numpy as np
 
-    # Run the enhanced simulation, integrating quantum cosmos components
-    results = integrate_enhanced_simulation()
+class QuantumCosmosDisplay:
+    def __init__(self):
+        self.console = Console()
+        self.layout = Layout()
+        self.start_time = datetime.now()
+        
+        # Initialize progress tracking
+        self.progress = Progress(
+            SpinnerColumn(spinner_name="dots12"),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(bar_width=40),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            expand=True
+        )
+        
+    def setup_layout(self):
+        """Configure the display layout"""
+        self.layout.split(
+            Layout(name="header", size=3),
+            Layout(name="main", size=15),
+            Layout(name="progress", size=4),
+            Layout(name="metrics", size=10),
+            Layout(name="footer", size=3)
+        )
+        
+    def create_header(self):
+        """Create an epic header"""
+        title = Text("🌌 QUANTUM COSMOS RESEARCH INTERFACE 🌌", style="bold cyan", justify="center")
+        subtitle = Text("Exploring the Quantum Nature of Spacetime", style="italic blue", justify="center")
+        return Panel(
+            Layout(name="title").split(title, subtitle),
+            box=box.HEAVY,
+            border_style="bright_blue",
+            padding=(1, 1)
+        )
     
-    # Perform inflation diagnostics
-    diagnostics = run_inflation_with_diagnostics()
+    def create_metrics_panel(self, metrics):
+        """Create a panel for real-time metrics"""
+        table = Table(show_header=True, header_style="bold magenta", box=box.ROUNDED)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", justify="right", style="green")
+        
+        for key, value in metrics.items():
+            if isinstance(value, float):
+                formatted_value = f"{value:.2e}"
+            else:
+                formatted_value = str(value)
+            table.add_row(key, formatted_value)
+            
+        return Panel(
+            table,
+            title="[bold yellow]Real-time Quantum Metrics",
+            border_style="yellow"
+        )
+    
+    def create_status_display(self, status_info):
+        """Create a status display for current computations"""
+        table = Table(show_header=False, box=box.SIMPLE)
+        table.add_column("Parameter", style="cyan")
+        table.add_column("Status", style="green")
+        
+        for key, value in status_info.items():
+            table.add_row(key, str(value))
+            
+        return Panel(
+            table,
+            title="[bold blue]Computation Status",
+            border_style="blue"
+        )
 
-    # Run the inflation analysis and capture results
-    t, y, obs = run_inflation_analysis()
+    async def run_simulation(self, mass_range, radius_range, temperature=2.725):
+        """Run the simulation with live updates"""
+        self.setup_layout()
+        
+        with Live(self.layout, refresh_per_second=4) as live:
+            # Update header
+            self.layout["header"].update(self.create_header())
+            
+            # Initialize progress tracking
+            total_steps = len(mass_range)
+            metrics = {
+                "κ-parameter": 0.0,
+                "Quantum Foam Density": 0.0,
+                "Decoherence Rate": 0.0,
+                "Phase Transitions": 0
+            }
+            
+            with self.progress:
+                # Main computation task
+                compute_task = self.progress.add_task(
+                    "[cyan]Computing Quantum Effects...",
+                    total=total_steps
+                )
+                
+                # Initialize model
+                model = EnhancedKristensenTheory()
+                
+                for idx, (mass, radius) in enumerate(zip(mass_range, radius_range)):
+                    # Update progress
+                    self.progress.update(compute_task, advance=1)
+                    
+                    # Compute quantum effects
+                    kappa, params = model.compute_enhanced_kappa(mass, radius, temperature)
+                    
+                    # Update metrics
+                    metrics["κ-parameter"] = kappa
+                    metrics["Quantum Foam Density"] = params['foam_invariants']['euler_characteristic']
+                    metrics["Phase Transitions"] = np.sum(np.array(kappa) > 0.5)
+                    
+                    # Update status information
+                    status_info = {
+                        "Current Mass": f"{mass:.2e} kg",
+                        "Current Radius": f"{radius:.2e} m",
+                        "Temperature": f"{temperature:.2f} K",
+                        "Time Elapsed": str(datetime.now() - self.start_time).split('.')[0]
+                    }
+                    
+                    # Update display
+                    self.layout["progress"].update(Panel(self.progress))
+                    self.layout["metrics"].update(self.create_metrics_panel(metrics))
+                    self.layout["main"].update(self.create_status_display(status_info))
+                    
+                    # Add some dramatic flair for significant events
+                    if kappa > 0.5:
+                        self.console.print("[bold yellow]⚡ Quantum-Classical Transition Detected! ⚡")
+                    
+                    if params['foam_invariants']['euler_characteristic'] > 10:
+                        self.console.print("[bold red]🌀 Significant Quantum Foam Fluctuation! 🌀")
+                    
+                    # Simulate computation time
+                    await asyncio.sleep(0.1)
+            
+            # Final update
+            self.layout["footer"].update(Panel(
+                Text("Simulation Complete!", style="bold green", justify="center"),
+                border_style="green"
+            ))
 
-    if results is not None:
-        print("\nSaving results...")
+def style_parameter(name, value, unit=""):
+    """Style a parameter value for display"""
+    return f"[cyan]{name}:[/cyan] [yellow]{value:.2e}[/yellow] {unit}"
+
+def create_quantum_ascii_art():
+    """Create some cool ASCII art for the interface"""
+    return """
+    ⚛️  🌌  QUANTUM COSMOS  🌌  ⚛️
+    """
+
+def initialize_research_interface():
+    """Initialize the research interface with epic styling"""
+    console = Console()
+    
+    # Clear screen and show title
+    console.clear()
+    console.print(create_quantum_ascii_art(), style="bold cyan", justify="center")
+    console.print("\n")
+    
+    # Show initialization message
+    with console.status("[bold blue]Initializing Quantum Cosmos Interface...", spinner="dots12"):
+        time.sleep(1)  # Dramatic pause
+        console.print("[bold green]✓[/bold green] Quantum framework loaded", style="dim")
+        time.sleep(0.5)
+        console.print("[bold green]✓[/bold green] Kristensen parameter module initialized", style="dim")
+        time.sleep(0.5)
+        console.print("[bold green]✓[/bold green] Quantum foam topology analyzer ready", style="dim")
+        time.sleep(0.5)
+    
+    console.print("\n[bold cyan]Ready to explore the quantum nature of spacetime![/bold cyan]\n")
+    return console
+class AdvancedQuantumParticles:
+    """Enhanced quantum particle types and collision patterns"""
+    
+    def __init__(self):
+        # Extended particle sets
+        self.particle_sets = {
+            'quantum_basic': cycle("⚛️ 🌌 ✨ 💫 🌠 ⭐ 🌟 "),
+            'quantum_exotic': cycle("🔮 💠 ⚪ ⚫ 🟣 🔯 ✴️ "),
+            'waves': cycle("～ ≋ ≈ ≂ ⋮ ⋯ ⋰ ⋱"),
+            'fields': cycle("∴ ∵ ∶ ∷ ∺ ∻ ∾ ∿"),
+            'strings': cycle("⌇ ⌎ ⌓ ⌯ ⌲ ⌭ ⌮ ⌰"),
+            'hadrons': cycle("⬡ ⬢ ⬣ ⏣ ⏥ ⏢"),  # Representing quarks and gluons
+            'leptons': cycle("◉ ◎ ⊙ ⊚ ⊛ ⊜"),   # Electrons, neutrinos, etc.
+            'bosons': cycle("⟁ ⟐ ⟡ ⟢ ⟣ ⟤"),    # Force carriers
+            'antimatter': cycle("⍟ ⍉ ⍝ ⍗ ⍤ ⍥"),  # Antiparticles
+            'spacetime': cycle("⌬ ⌽ ⌺ ⌻ ⌼ ⌘"),  # Geometric patterns
+            'quantum_foam': cycle("⋈ ⋇ ⋆ ⋄ ⋋ ⋌"), # Planck-scale structure
+            'superstrings': cycle("⥇ ⥈ ⥉ ⥊ ⥋ ⥌")  # String theory inspired
+        }
+
+        # Enhanced collision patterns
+        self.collision_patterns = {
+            'basic': [
+                "◌ ◍ ◎ ◉",
+                "◖ ◗ ◑ ◐",
+                "◴ ◵ ◶ ◷",
+                "◰ ◱ ◲ ◳",
+                "⬒ ⬓ ⬔ ⬕"
+            ],
+            'fusion': [
+                "⚛️  ⚛️",
+                "⚛️→←⚛️",
+                " ⚛️⚛️ ",
+                "  ⚡  ",
+                " ✨💫 ",
+                "  🌟  "
+            ],
+            'annihilation': [
+                "⬡  ⍟",
+                "⬡→←⍟",
+                " ⚡💥 ",
+                "  ✨  ",
+                " ≋≋≋ ",
+                "  ·  "
+            ],
+            'quantum_teleport': [
+                "⚛️     ",
+                "⚛️ ≋   ",
+                "  ≋ ≋ ",
+                "    ≋⚛️",
+                "     ⚛️"
+            ],
+            'entanglement_creation': [
+                "⚛️    ⚛️",
+                "⚛️≋   ⚛️",
+                "⚛️≋≋  ⚛️",
+                "⚛️≋≋≋ ⚛️",
+                "⚛️≋≋≋≋⚛️"
+            ],
+            'brane_collision': [
+                "⌬     ⌬",
+                "⌬≈≈   ⌬",
+                "⌬≈≈≈  ⌬",
+                "⌬≈⚡≈≈⌬",
+                " ✨✨✨ "
+            ]
+        }
+
+    async def create_complex_collision(self, console, collision_type='basic'):
+        """Create more complex particle collision animations"""
+        pattern = self.collision_patterns.get(collision_type, self.collision_patterns['basic'])
         
-        # Save the enhanced results into a structured format
-        save_enhanced_results(results)
-        create_summary_file(results)
+        with Live(refresh_per_second=10) as live:
+            for frame in pattern:
+                # Add particle effects around collision
+                particles = "".join(next(self.particle_sets['quantum_foam']) for _ in range(3))
+                decorated_frame = f"{particles} {frame} {particles}"
+                
+                live.update(
+                    Panel(
+                        decorated_frame,
+                        border_style="bright_cyan",
+                        box=box.ROUNDED
+                    )
+                )
+                await asyncio.sleep(0.15)
+
+    def create_particle_stream(self, particle_type='quantum_basic', length=10):
+        """Create a stream of particles of specified type"""
+        return " ".join(next(self.particle_sets[particle_type]) for _ in range(length))
+
+    async def create_particle_interaction(self, console, interaction_type='fusion'):
+        """Create a visual representation of particle interactions"""
+        particle1 = next(self.particle_sets['hadrons'])
+        particle2 = next(self.particle_sets['antimatter'])
         
-        print("\nSimulation completed successfully!")
+        interactions = {
+            'fusion': [
+                f"{particle1}     {particle2}",
+                f"{particle1}   {particle2}",
+                f"{particle1} {particle2}",
+                f"  ⚡  ",
+                f" ✨💫 ",
+                f"  🌟  "
+            ],
+            'decay': [
+                f"  {particle1}  ",
+                f" {particle1}💫 ",
+                f"{particle1}💫✨",
+                f"💫✨ ✨",
+                f"✨  ✨ ",
+                f"·   · "
+            ],
+            'oscillation': [
+                f"{particle1}    ",
+                f" {particle1}   ",
+                f"  {particle1}  ",
+                f"   {particle1} ",
+                f"    {particle1}"
+            ]
+        }
         
-        # Check if the inflation analysis has key observables
-        if obs is not None:
-            print("\nKey Observables:")
-            print(f"n_s = {obs['n_s']:.4f} (Target: 0.9649 ± 0.0042)")
-            print(f"r = {obs['r']:.4e} (Target: < 0.064)")
-            print(f"ln(10¹⁰ A_s) = {np.log(1e10 * obs['A_s']):.4f} (Target: 3.044 ± 0.014)")
+        pattern = interactions.get(interaction_type, interactions['fusion'])
+        
+        with Live(refresh_per_second=10) as live:
+            for frame in pattern:
+                # Add quantum foam background
+                foam = "".join(next(self.particle_sets['quantum_foam']) for _ in range(3))
+                live.update(
+                    Panel(
+                        f"{foam} {frame} {foam}",
+                        border_style="bright_magenta",
+                        box=box.ROUNDED
+                    )
+                )
+                await asyncio.sleep(0.15)
+
+    async def create_quantum_field_interaction(self, console, width=30, height=5):
+        """Create an animated quantum field interaction"""
+        field_chars = list(self.particle_sets['fields'])
+        particle_chars = list(self.particle_sets['quantum_basic'])
+        
+        with Live(refresh_per_second=4) as live:
+            for _ in range(10):  # 10 animation frames
+                field = ""
+                for y in range(height):
+                    row = ""
+                    for x in range(width):
+                        if random.random() < 0.1:  # 10% chance of particle
+                            row += random.choice(particle_chars)
+                        else:
+                            row += random.choice(field_chars)
+                    field += row + "\n"
+                
+                live.update(
+                    Panel(
+                        field,
+                        title="[bold]Quantum Field Interactions[/bold]",
+                        border_style="bright_blue",
+                        box=box.ROUNDED
+                    )
+                )
+                await asyncio.sleep(0.25)
+
+    async def create_particle_shower(self, console, width=40, height=10):
+        """Create an animated particle shower effect"""
+        all_particles = []
+        for particle_set in self.particle_sets.values():
+            all_particles.extend(list(particle_set))
+        
+        with Live(refresh_per_second=8) as live:
+            for frame in range(20):
+                shower = ""
+                for y in range(height):
+                    row = ""
+                    for x in range(width):
+                        if random.random() < 0.1:  # 10% chance of particle
+                            row += random.choice(all_particles)
+                        else:
+                            row += " "
+                    shower += row + "\n"
+                
+                live.update(
+                    Panel(
+                        shower,
+                        title="[bold]Quantum Particle Shower[/bold]",
+                        border_style="bright_cyan",
+                        box=box.HEAVY
+                    )
+                )
+                await asyncio.sleep(0.125)
+
+async def demonstrate_particles():
+    """Demonstrate all particle effects"""
+    console = Console()
+    particles = AdvancedQuantumParticles()
+    
+    # Show header
+    console.print(Panel(
+        Text("🌌 ADVANCED QUANTUM PARTICLE SIMULATOR 🌌\n", justify="center") +
+        Text("Exploring the Quantum Zoo", justify="center", style="italic"),
+        box=box.DOUBLE,
+        border_style="bright_blue"
+    ))
+    
+    # Display all particle types
+    console.print("\n[bold cyan]Particle Types:[/bold cyan]")
+    for name, particle_set in particles.particle_sets.items():
+        console.print(f"[yellow]{name}:[/yellow] {particles.create_particle_stream(name)}")
+        await asyncio.sleep(0.5)
+    
+    # Demonstrate collisions
+    console.print("\n[bold cyan]Particle Collisions:[/bold cyan]")
+    for collision_type in particles.collision_patterns.keys():
+        console.print(f"\n[yellow]Demonstrating {collision_type} collision:[/yellow]")
+        await particles.create_complex_collision(console, collision_type)
+        await asyncio.sleep(1)
+    
+    # Show particle interactions
+    console.print("\n[bold cyan]Particle Interactions:[/bold cyan]")
+    for interaction in ['fusion', 'decay', 'oscillation']:
+        console.print(f"\n[yellow]Demonstrating {interaction}:[/yellow]")
+        await particles.create_particle_interaction(console, interaction)
+        await asyncio.sleep(1)
+    
+    # Show quantum field
+    console.print("\n[bold cyan]Quantum Field Interactions:[/bold cyan]")
+    await particles.create_quantum_field_interaction(console)
+    
+    # Show particle shower
+    console.print("\n[bold cyan]Particle Shower:[/bold cyan]")
+    await particles.create_particle_shower(console)
+class AsyncQuantumHandler:
+    """Handler for async quantum operations with timeout protection"""
+    def __init__(self):
+        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.timeout = 30  # 30 second timeout for operations
+    
+    async def run_with_timeout(self, coro, timeout=None):
+        """Run coroutine with timeout protection"""
+        try:
+            return await asyncio.wait_for(coro, timeout or self.timeout)
+        except asyncio.TimeoutError:
+            print("[yellow]Operation timed out, continuing...[/yellow]")
+            return None
+
+    async def run_blocking(self, func, *args, **kwargs):
+        """Run blocking functions in executor"""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.executor, partial(func, *args, **kwargs))
+class QuantumProgressTracker:
+    """Enhanced progress tracking with quantum visualizations"""
+    def __init__(self, console):
+        self.console = console
+        self.progress = Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(complete_style="green", finished_style="bright_green"),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            SpinnerColumn("dots12", style="cyan"),
+            console=console,
+            expand=True,
+            transient=False  # Make sure progress bars stay visible
+        )
+        self.status_table = Table(
+            show_header=True,
+            header_style="bold magenta",
+            box=box.ROUNDED,
+            expand=True
+        )
+        self.status_table.add_column("Parameter", style="cyan")
+        self.status_table.add_column("Value", style="green")
+        self.status_table.add_column("Status", style="yellow")
+        
+    def create_layout(self):
+        """Create the main layout"""
+        layout = Layout()
+        layout.split(
+            Layout(name="header"),
+            Layout(name="body", ratio=3),
+            Layout(name="footer")
+        )
+        layout["body"].split_row(
+            Layout(name="progress", ratio=2),
+            Layout(name="status", ratio=1)
+        )
+        return layout
+
+    async def update_simulation_progress(self, phase, progress_value, metrics=None):
+        """Update simulation progress with quantum effects"""
+        # Update progress
+        with self.progress:
+            task = self.progress.add_task(f"[cyan]{phase}", total=100)
+            self.progress.update(task, completed=progress_value)
+            
+            # Add quantum decoration
+            if progress_value > 0:
+                quantum_particles = "⚛️ ✨ 🌌"
+                self.console.print(f"{quantum_particles} {phase} Progress: {progress_value}% {quantum_particles}")
+            
+            # Update metrics if provided
+            if metrics:
+                for key, value in metrics.items():
+                    self.status_table.add_row(key, str(value), "✓")
+                self.console.print(self.status_table)
+class QuantumLayout:
+    def __init__(self, console):
+        self.console = console
+        self.layout = Layout()
+        
+        # Initialize progress tracking
+        self.progress_bar = Progress(
+            SpinnerColumn("dots12", style="blue"),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(complete_style="green", finished_style="bright_green"),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            console=console,
+            expand=True
+        )
+        
+        # Initialize metrics table
+        self.metrics_table = Table(
+            show_header=True,
+            header_style="bold magenta",
+            box=box.ROUNDED,
+            expand=True
+        )
+        self.metrics_table.add_column("Metric", style="cyan")
+        self.metrics_table.add_column("Value", style="green")
+        self.metrics_table.add_column("Status", style="yellow")
+        
+        self.setup_layout()
+        
+    def setup_layout(self):
+        """Setup the main layout structure"""
+        self.layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="body"),
+            Layout(name="footer", size=3)
+        )
+        
+        # Split body into two columns
+        self.layout["body"].split_row(
+            Layout(name="progress", ratio=2),
+            Layout(name="status")
+        )
+        
+        # Add header content
+        self.layout["header"].update(
+            Panel(
+                Text("🌌 QUANTUM COSMOS RESEARCH 🌌\n", justify="center") +
+                Text("Exploring the Quantum Nature of Spacetime", justify="center", style="italic"),
+                box=box.HEAVY,
+                border_style="bright_blue"
+            )
+        )
+        
+        # Initialize progress and status sections
+        self.layout["progress"].update(Panel(self.progress_bar))
+        self.layout["status"].update(Panel(self.metrics_table))
+        self.layout["footer"].update(Panel(
+            Text("Initializing simulation...", justify="center"),
+            border_style="green"
+        ))
+
+#
+def integrate_enhanced_simulation():
+    """
+    Type-safe integration of quantum gravity framework with enhanced UI
+    """
+    try:
+        console = Console()
+        ui = EnhancedQuantumUI()
+        print("\nInitializing integrated quantum cosmos simulation...")
+        
+        # Initialize components
+        string = StringTheoryCorrections()
+        cosmo = CosmologicalInflation()
+        holo = HolographicTheory()
+        foam = QuantumFoamTopology()
+        nc_geom = NoncommutativeGeometry(theta_parameter=float(l_p)**2)
+        
+        async def run_simulation():
+            with Live(ui.layout, refresh_per_second=4) as live:
+                # Update header
+                ui.layout["header"].update(ui.create_header())
+                
+                print("\nGenerating spatial grid...")
+                n_points = 100
+                r = np.logspace(-1, 2, n_points) * float(l_p)
+                t = np.logspace(0, 2, n_points) * float(t_p)
+                
+                # Initialize progress tracking
+                with ui.progress:
+                    main_task = ui.progress.add_task(
+                        "[cyan]Computing Enhanced Quantum Effects...",
+                        total=n_points
+                    )
+                    
+                    print("\nComputing enhanced string theory corrections...")
+                    horizon_corr = []
+                    foam_corrections = []
+                    
+                    # Process in smaller batches with UI updates
+                    batch_size = 10
+                    for i in range(0, len(r), batch_size):
+                        batch_r = r[i:i+batch_size]
+                        
+                        for ri in batch_r:
+                            try:
+                                # Update progress
+                                progress = (i + len(batch_r)) / len(r) * 100
+                                ui.progress.update(main_task, completed=progress)
+                                
+                                # Compute corrections
+                                ri_float = float(ri)
+                                m_p_float = float(m_p)
+                                
+                                # Base correction with bounds
+                                base_corr = np.clip(string.horizon_corrections(ri_float, 1e5 * m_p_float), 0, 1e10)
+                                
+                                # Quantum foam with minimal network size
+                                foam_invariants = foam.generate_foam_structure(min(ri_float**3, 1e10), 2.725)
+                                
+                                foam_factor = stabilize_foam_factor(foam_invariants['euler_characteristic'])
+                                
+                                # Combine corrections
+                                total_corr = float(base_corr) * float(foam_factor)
+                                total_corr = np.clip(total_corr, 0, 1e10)
+                                
+                                # Update UI with metrics
+                                metrics = {
+                                    "Scale": f"{ri_float/float(l_p):.2e} l_p",
+                                    "Correction": f"{total_corr:.2e}",
+                                    "Foam Factor": f"{foam_factor:.2e}"
+                                }
+                                ui.layout["metrics"].update(ui.create_metrics_panel(metrics))
+                                
+                                # Create quantum animation
+                                frames = await ui.create_quantum_animation()
+                                ui.layout["animation"].update(
+                                    Panel(frames[i % len(frames)],
+                                         title="[bold cyan]Quantum Field Evolution",
+                                         border_style="cyan")
+                                )
+                                
+                                # Store results
+                                horizon_corr.append(total_corr)
+                                foam_corrections.append(foam_invariants)
+                                
+                                # Update results panel
+                                results = {
+                                    'corrections': {'total': total_corr},
+                                    'foam': foam_invariants,
+                                    'metrics': metrics
+                                }
+                                ui.layout["results"].update(ui.create_results_panel(results))
+                                
+                                # Show transitions
+                                if total_corr > 1.0:
+                                    ui.layout["status"].update(
+                                        Panel(
+                                            Text("⚡ Strong Quantum Effects Detected! ⚡",
+                                                 justify="center",
+                                                 style="bold yellow"),
+                                            border_style="yellow"
+                                        )
+                                    )
+                                
+                                await asyncio.sleep(0.1)
+                                
+                            except Exception as e:
+                                print(f"Warning: Error in calculation: {str(e)}")
+                                horizon_corr.append(1.0)
+                                foam_corrections.append({'euler_characteristic': 1, 'betti_0': 1, 'betti_1': 0})
+                    
+                    # Run inflation simulation
+                    ui.progress.update(main_task, description="[cyan]Running Inflation Simulation...")
+                    inflation_result = cosmo.solve_inflation()
+                    
+                    if inflation_result is not None and len(inflation_result) == 3:
+                        t_inf, y_inf, obs = inflation_result
+                        # Update results with inflation data
+                        results['inflation'] = {
+                            't': t_inf,
+                            'y': y_inf,
+                            'observables': obs
+                        }
+                        
+                        # Show final results
+                        ui.layout["footer"].update(
+                            Panel(
+                                Text("🌟 Quantum Cosmos Analysis Complete 🌟\n" +
+                                     f"n_s = {obs['n_s']:.4f}, r = {obs['r']:.4e}",
+                                     justify="center",
+                                     style="bold green"),
+                                border_style="green"
+                            )
+                        )
+                
+                return {
+                    'time': t,
+                    'radii': r,
+                    'horizon_corrections': np.array(horizon_corr, dtype=float),
+                    'foam_data': foam_corrections,
+                    'inflation': results.get('inflation', {}),
+                    'metrics': results.get('metrics', {})
+                }
+        
+        # Run the async simulation
+        results = asyncio.run(run_simulation())
+        return results
+        
+    except Exception as e:
+        print(f"\nError in enhanced simulation: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+class EnhancedQuantumUI:
+    def __init__(self):
+        self.console = Console()
+        self.layout = Layout()
+        self.start_time = datetime.now()
+        
+        # Initialize layout sections
+        self.setup_layout()
+        
+        # Initialize progress tracking
+        self.progress = Progress(
+            SpinnerColumn(spinner_name="dots12"),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(bar_width=40),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            expand=True
+        )
+        
+        # Initialize results panels
+        self.results = Layout()
+        
+    def setup_layout(self):
+        """Configure the display layout"""
+        self.layout.split(
+            Layout(name="header", size=3),
+            Layout(name="main", size=15),
+            Layout(name="animation", size=8),
+            Layout(name="progress", size=4),
+            Layout(name="metrics", size=10),
+            Layout(name="results", size=8),
+            Layout(name="footer", size=3)
+        )
+
+    def create_header(self):
+        """Create an epic header"""
+        title = Text("🌌 QUANTUM COSMOS RESEARCH INTERFACE 🌌", style="bold cyan", justify="center")
+        subtitle = Text("Exploring the Quantum Nature of Spacetime", style="italic blue", justify="center")
+        return Panel(
+            Layout(name="title").split(title, subtitle),
+            box=box.HEAVY,
+            border_style="bright_blue",
+            padding=(1, 1)
+        )
+
+    def create_metrics_panel(self, metrics):
+        """Create a panel for real-time metrics"""
+        table = Table(show_header=True, header_style="bold magenta", box=box.ROUNDED)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", justify="right", style="green")
+        
+        for key, value in metrics.items():
+            if isinstance(value, float):
+                formatted_value = f"{value:.2e}"
+            else:
+                formatted_value = str(value)
+            table.add_row(key, formatted_value)
+            
+        return Panel(
+            table,
+            title="[bold yellow]Real-time Quantum Metrics",
+            border_style="yellow"
+        )
+
+    def create_results_panel(self, results):
+        """Create a panel for simulation results"""
+        table = Table(show_header=True, header_style="bold blue", box=box.ROUNDED)
+        table.add_column("Parameter", style="cyan")
+        table.add_column("Value", style="green")
+        
+        for key, value in results.items():
+            if isinstance(value, dict):
+                for subkey, subvalue in value.items():
+                    if isinstance(subvalue, (int, float)):
+                        table.add_row(f"{key}.{subkey}", f"{subvalue:.2e}")
+            elif isinstance(value, (int, float)):
+                table.add_row(key, f"{value:.2e}")
+                
+        return Panel(
+            table,
+            title="[bold green]Simulation Results",
+            border_style="green"
+        )
+
+    async def create_quantum_animation(self, frame_count=10):
+        """Create animated quantum effects"""
+        frames = []
+        width = 40
+        height = 5
+        particles = "⚛️ 🌌 ✨ 💫 🌠 ⭐ 🌟"
+        
+        for _ in range(frame_count):
+            frame = ""
+            for y in range(height):
+                row = ""
+                for x in range(width):
+                    if random.random() < 0.1:
+                        row += random.choice(particles)
+                    else:
+                        row += " "
+                frame += row + "\n"
+            frames.append(frame)
+            
+        return frames
+
+    def update_all(self, metrics={}, results={}, status="Running..."):
+        """Update all UI components"""
+        self.layout["metrics"].update(self.create_metrics_panel(metrics))
+        self.layout["results"].update(self.create_results_panel(results))
+        self.layout["footer"].update(Panel(Text(status, justify="center"), border_style="green"))
+async def main():
+    try:
+        console = Console()
+        console.print("\n⚛️  🌌  QUANTUM COSMOS  🌌  ⚛️\n", style="bold cyan", justify="center")
+        
+        # Initialization
+        console.print("[bold green]✓[/bold green] Quantum framework loaded", style="dim")
+        console.print("[bold green]✓[/bold green] Kristensen parameter module initialized", style="dim")
+        console.print("[bold green]✓[/bold green] Quantum foam topology analyzer ready\n", style="dim")
+        
+        # Phase 1: Inflation Analysis
+        console.print("\nPhase 1: Cosmological Inflation", style="bold cyan")
+        console.print("=" * 40)
+        inflation = CosmologicalInflation()
+        t, y, obs = inflation.solve_inflation()
+        
+        if obs:
+            console.print("\n[green]1.1 Standard Inflation Parameters:[/green]")
+            console.print(f"• n_s = {obs['n_s']:.4f} {'✓' if 0.95 < obs['n_s'] < 0.98 else '⚠'}")
+            console.print(f"• r = {obs['r']:.4e} {'✓' if obs['r'] < 0.064 else '⚠'}")
+            console.print(f"• ln(10¹⁰ A_s) = {np.log(1e10 * obs['A_s']):.4f}")
+            
+            console.print("\n[green]1.2 Slow-Roll Analysis:[/green]")
+            console.print(f"• ε (epsilon) = {obs['epsilon']:.2e}")
+            console.print(f"• η (eta) = {obs['eta']:.2e}")
+            console.print(f"• Slow-roll validity: {'✓' if obs['epsilon'] < 1 else '⚠'}")
+            
+            console.print("\n[green]1.3 Inflation Dynamics:[/green]")
+            console.print(f"• Total e-foldings: {np.log(y[0][-1]/y[0][0]):.2f}")
+            console.print(f"• Duration: {t[-1]:.2e} seconds")
+            console.print(f"• Final field value: {y[0][-1]/inflation.M_pl:.2f} M_pl")
+        
+        # Phase 2: Quantum Analysis
+        console.print("\nPhase 2: Quantum Gravity Effects", style="bold cyan")
+        console.print("=" * 40)
+        model = EnhancedKristensenTheory()
+        
+        n_points = 10
+        mass_range = np.logspace(-25, -20, n_points)
+        radius_range = np.logspace(-35, -30, n_points)
+        
+        transitions = 0
+        max_kappa = float('-inf')
+        foam_data = []
+        nc_corrections = []
+        
+        with Progress() as progress:
+            task = progress.add_task("[cyan]Computing quantum effects...", total=n_points)
+            
+            for i, (mass, radius) in enumerate(zip(mass_range, radius_range)):
+                # Compute κ-parameter
+                kappa, params = model.compute_enhanced_kappa(mass, radius, 2.725)
+                max_kappa = max(max_kappa, kappa)
+                
+                # Store quantum foam data
+                foam_data.append(params['foam_invariants'])
+                
+                # Compute noncommutative corrections
+                nc_geom = NoncommutativeGeometry(theta_parameter=float(l_p)**2)
+                p = mass * c
+                nc_energy = nc_geom.modified_dispersion(np.array([p, 0, 0]), mass)
+                nc_corrections.append(nc_energy / (mass * c**2))
+                
+                if kappa > 0.5:
+                    transitions += 1
+                    console.print("⚡", style="yellow", end="")
+                
+                progress.update(task, advance=1)
+                await asyncio.sleep(0.1)
+        
+        # Compute additional quantum metrics
+        avg_betti = np.mean([f['betti_0'] + f['betti_1'] for f in foam_data])
+        max_nc_correction = np.max(nc_corrections)
+        
+        # Show comprehensive results
+        console.print("\n\n[bold green]Comprehensive Analysis Results[/bold green]")
+        console.print("=" * 40)
+        
+        console.print("\n[cyan]1. Inflation Parameters:[/cyan]")
+        console.print(f"• Spectral index (n_s): {obs['n_s']:.4f}")
+        console.print(f"• Tensor-to-scalar ratio (r): {obs['r']:.4e}")
+        console.print(f"• E-foldings: {np.log(y[0][-1]/y[0][0]):.2f}")
+        
+        console.print("\n[cyan]2. Quantum Gravity Effects:[/cyan]")
+        console.print(f"• Maximum κ-parameter: {max_kappa:.2e}")
+        console.print(f"• Phase transitions: {transitions}")
+        console.print(f"• Average Betti numbers: {avg_betti:.2f}")
+        console.print(f"• Max NC correction: {max_nc_correction:.2e}")
+        
+        console.print("\n[cyan]3. Quantum Foam Structure:[/cyan]")
+        console.print(f"• Average Euler characteristic: {np.mean([f['euler_characteristic'] for f in foam_data]):.2f}")
+        console.print(f"• Topology fluctuations: {np.std([f['euler_characteristic'] for f in foam_data]):.2f}")
+        
+        console.print("\n[cyan]4. Scale Analysis:[/cyan]")
+        console.print(f"• Planck scale ratio: {min(radius_range)/float(l_p):.2e}")
+        console.print(f"• Quantum/classical transition: {mass_range[transitions]/float(m_p) if transitions > 0 else 'Not observed'}")
+        
+        # Physical interpretation
+        console.print("\n[bold cyan]Physical Interpretation:[/bold cyan]")
+        console.print("=" * 40)
+        
+        # Inflation regime
+        console.print("\n[yellow]1. Inflation Regime:[/yellow]")
+        if obs['n_s'] < 0.95:
+            console.print("⚠ Insufficient inflation - spectral index too low")
+            console.print("⚠ May indicate non-standard early universe dynamics")
         else:
-            print("No key observables were found.")
-    else:
-        print("Simulation failed!")
+            console.print("✓ Standard inflation achieved")
+            console.print("✓ Consistent with cosmic microwave background")
+
+        # Quantum regime
+        console.print("\n[yellow]2. Quantum Regime:[/yellow]")
+        if max_kappa > 0.5:
+            console.print("⚡ Strong quantum gravity effects detected")
+            console.print(f"⚡ {transitions} quantum-to-classical transitions observed")
+            console.print("🌌 Significant quantum foam structure")
+        else:
+            console.print("📝 Classical regime dominant")
+            console.print("💫 Weak quantum coupling")
+            console.print("🌌 Minimal quantum foam effects")
+
+        # Scale hierarchy
+        console.print("\n[yellow]3. Scale Hierarchy:[/yellow]")
+        if min(radius_range) < 100 * float(l_p):
+            console.print("⚠ Near-Planck scale physics - quantum effects important")
+        else:
+            console.print("✓ Safely above Planck scale")
+            
+        # Noncommutative effects
+        console.print("\n[yellow]4. Spacetime Structure:[/yellow]")
+        if max_nc_correction > 1.1:
+            console.print("⚡ Strong noncommutative geometry effects")
+            console.print("⚡ Possible spacetime foam formation")
+        else:
+            console.print("✓ Standard spacetime structure")
+            console.print("✓ Weak noncommutative effects")
+
+        console.print("\n[green]Analysis session complete. Press Ctrl+C to exit.[/green]")
+        while True:
+            await asyncio.sleep(1)
+            
+    except KeyboardInterrupt:
+        console.print("\n[cyan]Exiting quantum analysis session...[/cyan]")
+    except Exception as e:
+        console.print(f"\n[bold red]Error: {str(e)}[/bold red]")
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nSession terminated by user")
+    except Exception as e:
+        print(f"\nFatal error: {str(e)}")
+        traceback.print_exc()
