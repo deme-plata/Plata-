@@ -1,6 +1,6 @@
 # Plata Coin
 
-🚀 **Introducing Plata Coin** - the future of blockchain technology! Our Quantum DAGKnight node leverages the Quantum Holographic Information Network (QHIN) for unparalleled security and efficiency. Join us in revolutionizing decentralized finance with quantum-resistant protocols and a cutting-edge virtual machine! #Blockchain #QuantumComputing #CryptoInnovation #BitKnightCoin #QHIN #TechRevolution 💎 [Learn more here](https://qhin.cashewstable.com)  [Research document here]([[https://qhin.cashewstable.com]()](https://qhin.cashewstable.com/static/images/reseach_ccc_v1.html))
+🚀 **Introducing Plata Coin** - the future of blockchain technology! Our Quantum DAGKnight node leverages the Quantum Holographic Information Network (QHIN) for unparalleled security and efficiency. Join us in revolutionizing decentralized finance with quantum-resistant protocols and a cutting-edge virtual machine! #Blockchain #QuantumComputing #CryptoInnovation #BitKnightCoin #QHIN #TechRevolution 💎 [Learn more here](https://qhin.cashewstable.com)  Research document here https://qhin.cashewstable.com/static/images/reseach_ccc_v1.html
 
 ## Table of Contents
 
