@@ -1292,32 +1292,334 @@ class BootstrapManager:
         except Exception as e:
             self.logger.error(f"Error connecting to peer {peer_address}: {str(e)}")
 class ChallengeRole(Enum):
+    """Role in the challenge-response protocol"""
     SERVER = "server"
     CLIENT = "client"
 
 class ChallengeState:
+    """State of a challenge with enhanced tracking"""
     def __init__(self, challenge: str, role: ChallengeRole):
         self.challenge = challenge
         self.role = role
         self.timestamp = time.time()
         self.attempts = 0
         self.verified = False
+        self.last_attempt = None
+        self.responses = []  # Track all received responses
 
 class ChallengeManager:
+    """Manages challenge storage and retrieval with thread safety"""
     def __init__(self):
         self.challenges: Dict[str, Dict[str, ChallengeState]] = {}
+        self._lock = asyncio.Lock()
         self.logger = logging.getLogger("ChallengeManager")
-    def store_challenge(self, peer: str, challenge_id: str, challenge: str, role: ChallengeRole) -> None:
-        """Store a base64 encoded challenge."""
-        if peer not in self.challenges:
-            self.challenges[peer] = {}
-        self.challenges[peer][challenge_id] = ChallengeState(challenge, role)
+        self.CHALLENGE_TIMEOUT = 30  # seconds
+        self.MAX_ATTEMPTS = 3
+        self.MAX_CHALLENGES_PER_PEER = 5
 
-    def get_challenge(self, peer: str, challenge_id: str) -> Optional[ChallengeState]:
-        """Get a stored challenge."""
-        return self.challenges.get(peer, {}).get(challenge_id)
+    async def store_challenge(self, peer: str, challenge_id: str, challenge: str, role: ChallengeRole) -> bool:
+        """
+        Store a challenge with validation and limits.
+        
+        Args:
+            peer: Peer address
+            challenge_id: Unique challenge identifier
+            challenge: Base64 encoded challenge string
+            role: Role in the challenge (server/client)
+            
+        Returns:
+            bool: True if challenge was stored successfully
+            
+        Raises:
+            ValueError: If inputs are invalid
+        """
+        try:
+            # Validate inputs
+            if not all([peer, challenge_id, challenge]):
+                raise ValueError("Missing required challenge parameters")
 
+            # Validate base64 challenge
+            try:
+                base64.b64decode(challenge)
+            except Exception:
+                raise ValueError("Challenge must be valid base64")
+
+            async with self._lock:
+                # Initialize peer dict if needed
+                if peer not in self.challenges:
+                    self.challenges[peer] = {}
+                
+                # Check challenge limits
+                if len(self.challenges[peer]) >= self.MAX_CHALLENGES_PER_PEER:
+                    # Remove oldest challenge
+                    oldest = min(
+                        self.challenges[peer].items(),
+                        key=lambda x: x[1].timestamp
+                    )
+                    del self.challenges[peer][oldest[0]]
+                    self.logger.warning(f"Removed old challenge {oldest[0]} for peer {peer}")
+
+                # Store new challenge
+                self.challenges[peer][challenge_id] = ChallengeState(
+                    challenge=challenge,
+                    role=role
+                )
+                
+                self.logger.debug(
+                    f"Stored challenge for peer {peer}:\n"
+                    f"  ID: {challenge_id}\n"
+                    f"  Role: {role.value}\n"
+                    f"  Active Challenges: {len(self.challenges[peer])}"
+                )
+                return True
+
+        except Exception as e:
+            self.logger.error(f"Error storing challenge: {str(e)}")
+            return False
+
+    async def get_challenge(self, peer: str, challenge_id: str) -> Optional[ChallengeState]:
+        """
+        Get a stored challenge with validation and tracking.
+        
+        Args:
+            peer: Peer address
+            challenge_id: Challenge identifier
+            
+        Returns:
+            Optional[ChallengeState]: Challenge state if found and valid
+        """
+        try:
+            async with self._lock:
+                # Get challenge state
+                challenge = self.challenges.get(peer, {}).get(challenge_id)
+                if not challenge:
+                    self.logger.warning(f"No challenge found for {peer} with ID {challenge_id}")
+                    return None
+
+                # Check expiration
+                if time.time() - challenge.timestamp > self.CHALLENGE_TIMEOUT:
+                    await self.remove_challenge(peer, challenge_id)
+                    self.logger.warning(f"Challenge {challenge_id} expired for {peer}")
+                    return None
+
+                # Check attempts
+                if challenge.attempts >= self.MAX_ATTEMPTS:
+                    await self.remove_challenge(peer, challenge_id)
+                    self.logger.warning(f"Max attempts exceeded for challenge {challenge_id}")
+                    return None
+
+                # Update attempt tracking
+                challenge.attempts += 1
+                challenge.last_attempt = time.time()
+
+                self.logger.debug(
+                    f"Retrieved challenge for peer {peer}:\n"
+                    f"  ID: {challenge_id}\n"
+                    f"  Role: {challenge.role.value}\n"
+                    f"  Attempts: {challenge.attempts}/{self.MAX_ATTEMPTS}"
+                )
+                return challenge
+
+        except Exception as e:
+            self.logger.error(f"Error retrieving challenge: {str(e)}")
+            return None
+
+    async def remove_challenge(self, peer: str, challenge_id: str) -> None:
+        """Safely remove a challenge."""
+        async with self._lock:
+            if peer in self.challenges and challenge_id in self.challenges[peer]:
+                del self.challenges[peer][challenge_id]
+                if not self.challenges[peer]:
+                    del self.challenges[peer]
+
+    async def cleanup_expired(self) -> None:
+        """Clean up expired challenges."""
+        try:
+            current_time = time.time()
+            async with self._lock:
+                for peer in list(self.challenges.keys()):
+                    for challenge_id, state in list(self.challenges[peer].items()):
+                        if current_time - state.timestamp > self.CHALLENGE_TIMEOUT:
+                            await self.remove_challenge(peer, challenge_id)
+                            self.logger.debug(f"Cleaned up expired challenge {challenge_id} for {peer}")
+        except Exception as e:
+            self.logger.error(f"Error cleaning up challenges: {str(e)}")
+
+    async def get_active_challenges(self, peer: str) -> Dict[str, ChallengeState]:
+        """Get all active challenges for a peer."""
+        async with self._lock:
+            return self.challenges.get(peer, {}).copy()
+class ConnectionState:
+    INIT = "server_init"
+    KEY_EXCHANGED = "key_exchanged"
+    CHALLENGE_SENT = "challenge_sent"
+    VERIFIED = "verified"
+    CONNECTED = "connected"
+class ChallengeVerificationSystem:
+    """Enhanced challenge verification system with port mapping and state tracking"""
+
+    def __init__(self, node: 'P2PNode'):
+        self.node = node
+        self.logger = logging.getLogger("ChallengeVerification")
+        self.port_mappings = {}  # Track original:mapped port pairs
+        self.active_challenges = {}
+        self.verification_lock = asyncio.Lock()
+
+    async def verify_challenge_response(self, peer: str, incoming_challenge_id: str, response_payload: dict) -> bool:
+        """Verify challenge response with guaranteed challenge matching."""
+        try:
+            # Initial logging
+            self.logger.info(f"\n[VERIFY] {'='*20} Verifying Response {'='*20}")
+            
+            # Normalize addresses with proper port handling
+            peer_ip, peer_port = peer.split(':')
+            client_port = '50510'  # Original client port
+            client_address = f"{peer_ip}:{client_port}"
+            
+            self.logger.debug(f"[VERIFY] Client address: {client_address}")
+            self.logger.debug(f"[VERIFY] Original challenge ID: {incoming_challenge_id}")
+
+            # Get latest challenge stored for the client address
+            client_challenges = await self.challenge_manager.get_active_challenges(client_address)
+            if not client_challenges:
+                self.logger.error(f"[VERIFY] No challenges found for client {client_address}")
+                return False
+                
+            # Get most recent challenge
+            recent_challenge = None
+            recent_id = None
+            
+            # First try to find the incoming challenge ID
+            if incoming_challenge_id in client_challenges:
+                recent_challenge = client_challenges[incoming_challenge_id]
+                recent_id = incoming_challenge_id
+                self.logger.debug(f"[VERIFY] Found exact matching challenge: {incoming_challenge_id}")
+            else:
+                # Get most recent challenge by timestamp
+                sorted_challenges = sorted(
+                    client_challenges.items(),
+                    key=lambda x: x[1].timestamp if hasattr(x[1], 'timestamp') else 0,
+                    reverse=True
+                )
+                if sorted_challenges:
+                    recent_id, recent_challenge = sorted_challenges[0]
+                    self.logger.debug(f"[VERIFY] Using most recent challenge: {recent_id}")
+
+            if not recent_challenge:
+                self.logger.error("[VERIFY] No valid challenge found")
+                self.logger.debug(f"[VERIFY] Available challenges: {list(client_challenges.keys())}")
+                return False
+
+            # Log challenge details
+            self.logger.debug(f"[VERIFY] Challenge roles:")
+            self.logger.debug(f"  - Original role: {recent_challenge.role}")
+            self.logger.debug(f"  - Challenge data: {recent_challenge.challenge}")
+
+            # Get public key from client address
+            peer_public_key = self.peer_public_keys.get(client_address)
+            if not peer_public_key:
+                self.logger.error(f"[VERIFY] No public key found for {client_address}")
+                return False
+
+            try:
+                # Verify signature
+                signature = base64.b64decode(response_payload['signature'])
+                challenge_bytes = recent_challenge.challenge.encode()
+                
+                self.logger.debug(f"[VERIFY] Verification details:")
+                self.logger.debug(f"  - Signature length: {len(signature)}")
+                self.logger.debug(f"  - Challenge bytes length: {len(challenge_bytes)}")
+                self.logger.debug(f"  - First 32 bytes of challenge: {recent_challenge.challenge[:32]}")
+
+                peer_public_key.verify(
+                    signature,
+                    challenge_bytes,
+                    padding.PSS(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH
+                    ),
+                    hashes.SHA256()
+                )
+
+                # Update states only after successful verification
+                async with self.peer_lock:
+                    # Update primary client address
+                    self.peer_states[client_address] = "verified"
+                    self.connected_peers.add(client_address)
+                    
+                    # Map current peer address to client address if different
+                    if peer != client_address:
+                        self.peer_address_map[peer] = client_address
+                        self.peer_states[peer] = "verified"
+                        self.connected_peers.add(peer)
+
+                # Clean up the verified challenge
+                await self.challenge_manager.remove_challenge(client_address, recent_id)
+                
+                self.logger.info(f"[VERIFY] ✓ Challenge verification successful")
+                self.logger.info(f"[VERIFY] {'='*50}\n")
+                return True
+
+            except InvalidSignature:
+                self.logger.error(f"[VERIFY] Invalid signature for challenge {recent_id}")
+                self.logger.debug(f"[VERIFY] Challenge being verified: {recent_challenge.challenge}")
+                return False
+
+            except Exception as e:
+                self.logger.error(f"[VERIFY] Verification error: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                return False
+
+        except Exception as e:
+            self.logger.error(f"[VERIFY] Fatal error: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return False
+    def get_possible_addresses(self, ip: str, port: int) -> Set[str]:
+        """Get all possible address combinations for a peer"""
+        addresses = {f"{ip}:{port}"}  # Original address
+        
+        # Add mapped ports
+        for orig_port, mapped_port in self.port_mappings.items():
+            if port in (orig_port, mapped_port):
+                addresses.add(f"{ip}:{orig_port}")
+                addresses.add(f"{ip}:{mapped_port}")
+
+        return addresses
+
+    def add_port_mapping(self, original_port: int, mapped_port: int):
+        """Add a new port mapping"""
+        self.port_mappings[original_port] = mapped_port
+        self.logger.debug(f"Added port mapping: {original_port} -> {mapped_port}")
 import logging
+class ImprovedChallengeManager:
+    """Manages challenges with enhanced port mapping and ID tracking"""
+
+    def __init__(self):
+        self.challenges = {}
+        self.port_mappings = {}  # original_port -> mapped_port
+        self.challenge_map = {}  # challenge_id -> peer_address
+        self.logger = logging.getLogger("ChallengeManager")
+
+    def add_port_mapping(self, original_port: int, mapped_port: int):
+        """Track port mappings for a peer"""
+        self.port_mappings[original_port] = mapped_port
+        self.logger.debug(f"Added port mapping: {original_port} -> {mapped_port}")
+
+    def get_all_peer_addresses(self, peer: str) -> set:
+        """Get all possible addresses for a peer including port mappings"""
+        addresses = {peer}
+        peer_ip, peer_port = peer.split(':')
+        peer_port = int(peer_port)
+
+        # Add mapped port variations
+        if peer_port in self.port_mappings:
+            addresses.add(f"{peer_ip}:{self.port_mappings[peer_port]}")
+        # Check reverse mapping
+        for orig, mapped in self.port_mappings.items():
+            if mapped == peer_port:
+                addresses.add(f"{peer_ip}:{orig}")
+
+        return addresses
 
 logger = logging.getLogger(__name__)
 class P2PNode:
@@ -1332,6 +1634,11 @@ class P2PNode:
         try:
             # Load environment variables first
             load_dotenv()
+            self.peer_address_map = {}
+            self.peer_ports = {}        # Tracks original connection ports
+            self.challenge_verifier = ChallengeVerificationSystem(self)
+            self.challenge_manager = ImprovedChallengeManager()
+
 
             # Basic node configuration
             self.host = os.getenv('P2P_HOST', host)
@@ -2533,39 +2840,54 @@ class P2PNode:
                     await self.connect_to_peer(KademliaNode(node['node_id'], node['ip'], node['port']))
         except Exception as e:
             self.logger.error(f"Error finding new peers: {str(e)}")
-    async def complete_connection(self, peer: str):
-        """Complete connection setup with proper state management."""
+    async def complete_connection(self, peer: str) -> bool:
+        """Complete connection setup with proper state verification."""
         try:
-            self.logger.info(f"[COMPLETE] Completing connection with peer {peer}")
+            peer_normalized = self.normalize_peer_address(peer)
+            self.logger.info(f"[COMPLETE] Completing connection with peer {peer_normalized}")
+
+            # Wait for verified state with timeout
+            start_time = time.time()
+            timeout = 30.0  # 30 seconds timeout
             
-            # Only proceed if peer is verified
-            if self.peer_states.get(peer) != "verified":
-                self.logger.warning(f"Cannot complete connection with unverified peer {peer}")
-                return False
+            while time.time() - start_time < timeout:
+                async with self.peer_lock:
+                    state = self.peer_states.get(peer_normalized)
+                    self.logger.debug(f"[COMPLETE] Current state: {state}")
+                    
+                    if state == "verified":
+                        # Update peer state
+                        self.peer_states[peer_normalized] = "connected"
+                        if peer_normalized not in self.connected_peers:
+                            self.connected_peers.add(peer_normalized)
+                        
+                        # Start message handler for this peer
+                        websocket = self.peers.get(peer_normalized)
+                        if websocket:
+                            asyncio.create_task(self.handle_messages(websocket, peer_normalized))
+                            asyncio.create_task(self.keep_connection_alive(websocket, peer_normalized))
 
-            async with self.peer_lock:
-                self.peer_states[peer] = "connected"
-                self.connected_peers.add(peer)
-                
-            # Sync with new peer
-            await self.sync_new_peer(peer)
-            
-            # Start message handler for this peer
-            websocket = self.peers.get(peer)
-            if websocket:
-                asyncio.create_task(self.handle_messages(websocket, peer))
-                asyncio.create_task(self.keep_connection_alive(websocket, peer))
+                        # Initialize quantum components if available
+                        if hasattr(self, 'quantum_sync') and self.quantum_initialized:
+                            await self.establish_quantum_entanglement(peer_normalized)
 
-            # If quantum components are initialized, establish quantum entanglement
-            if hasattr(self, 'quantum_sync') and self.quantum_initialized:
-                await self.establish_quantum_entanglement(peer)
+                        self.logger.info(f"[COMPLETE] ✓ Connection completed with peer {peer_normalized}")
+                        return True
+                    
+                    elif state == "challenge_response_sent":
+                        # Still waiting for verification
+                        await asyncio.sleep(0.1)
+                        continue
+                        
+                    else:
+                        self.logger.warning(f"[COMPLETE] Cannot complete connection - invalid state: {state}")
+                        return False
 
-            self.logger.info(f"[COMPLETE] ✓ Connection completed with peer {peer}")
-            return True
+            self.logger.error(f"[COMPLETE] Timeout waiting for verification from {peer_normalized}")
+            return False
 
         except Exception as e:
-            self.logger.error(f"Error completing connection with peer {peer}: {str(e)}")
-            await self.remove_peer(peer)
+            self.logger.error(f"[COMPLETE] Error completing connection: {str(e)}")
             return False
     async def sync_transactions(self, peer):
         try:
@@ -2876,52 +3198,140 @@ class P2PNode:
             self.logger.error(f"Failed to send public key to {peer}: {str(e)}")
             return False
     async def send_challenge(self, peer: str) -> Optional[str]:
-        """Send base64 encoded challenge."""
+        """Send challenge with single challenge enforcement."""
         try:
             peer_normalized = self.normalize_peer_address(peer)
-            challenge_id, challenge = await self.create_challenge()
+            if not peer_normalized:
+                raise ValueError(f"Invalid peer address: {peer}")
 
-            self.challenge_manager.store_challenge(
-                peer_normalized,
-                challenge_id,
-                challenge,
-                ChallengeRole.SERVER
-            )
+            self.logger.info(f"\n[CHALLENGE] {'='*20} Sending Challenge {'='*20}")
+            self.logger.info(f"[CHALLENGE] Peer: {peer_normalized}")
 
-            self.logger.info(f"[CHALLENGE] Sending challenge to {peer_normalized}")
-            self.logger.debug(f"[CHALLENGE] ID: {challenge_id}")
-            self.logger.debug(f"[CHALLENGE] Data: {challenge}")
+            # Check existing challenges
+            async with self.peer_lock:
+                current_state = self.peer_states.get(peer_normalized)
+                
+                # Return existing challenge if one exists
+                if current_state == "challenge_sent":
+                    active_challenges = await self.challenge_manager.get_active_challenges(peer_normalized)
+                    if active_challenges:
+                        challenge_id = next(iter(active_challenges.keys()))
+                        self.logger.info(f"[CHALLENGE] Using existing challenge: {challenge_id}")
+                        return challenge_id
 
-            challenge_message = Message(
+                # Verify state is valid for new challenge
+                if current_state not in ['connecting', 'key_exchanged']:
+                    self.logger.error(f"[CHALLENGE] Invalid state for challenge: {current_state}")
+                    return None
+
+                self.peer_states[peer_normalized] = "processing_challenge"
+
+            # Create and store new challenge
+            try:
+                challenge_id, challenge = await self.create_challenge()
+                if not challenge_id or not challenge:
+                    raise RuntimeError("Failed to create challenge")
+
+                stored = await self.challenge_manager.store_challenge(
+                    peer_normalized,
+                    challenge_id,
+                    challenge,
+                    ChallengeRole.SERVER
+                )
+                
+                if not stored:
+                    raise RuntimeError("Failed to store challenge")
+
+                self.logger.debug(f"[CHALLENGE] New challenge created: {challenge_id}")
+
+            except Exception as e:
+                self.logger.error(f"[CHALLENGE] Challenge creation failed: {str(e)}")
+                async with self.peer_lock:
+                    self.peer_states[peer_normalized] = "key_exchanged"
+                return None
+
+            # Send challenge message
+            message = Message(
                 type=MessageType.CHALLENGE.value,
                 payload={
                     'challenge': f"{challenge_id}:{challenge}",
                     'role': ChallengeRole.SERVER.value
                 },
-                challenge_id=challenge_id,
-                sender=self.node_id
+                challenge_id=challenge_id
             )
 
-            await self.send_raw_message(peer_normalized, challenge_message)
-            return challenge_id
+            # Send with retries
+            for attempt in range(3):
+                try:
+                    await asyncio.wait_for(
+                        self.send_raw_message(peer_normalized, message),
+                        timeout=10.0
+                    )
+                    
+                    async with self.peer_lock:
+                        self.peer_states[peer_normalized] = "challenge_sent"
 
-        except Exception as e:
-            self.logger.error(f"Error sending challenge: {str(e)}")
+                    # Start timeout monitor
+                    timeout_task = asyncio.create_task(
+                        self.monitor_challenge_timeout(peer_normalized, challenge_id)
+                    )
+                    
+                    self.logger.info(f"[CHALLENGE] ✓ Challenge sent successfully")
+                    return challenge_id
+
+                except Exception as e:
+                    self.logger.warning(f"[CHALLENGE] Send attempt {attempt + 1} failed: {str(e)}")
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+            # If all retries failed
+            await self.cleanup_failed_challenge(peer_normalized, challenge_id)
             return None
 
+        except Exception as e:
+            self.logger.error(f"[CHALLENGE] Error sending challenge: {str(e)}")
+            if peer_normalized and challenge_id:
+                await self.cleanup_failed_challenge(peer_normalized, challenge_id)
+            return None
 
-
+    async def cleanup_failed_challenge(self, peer: str, challenge_id: str):
+        """Clean up resources for failed challenge."""
+        try:
+            # Remove challenge state
+            await self.challenge_manager.remove_challenge(peer, challenge_id)
+            
+            # Cancel timeout task if exists
+            if hasattr(self, 'challenge_timeout_tasks') and challenge_id in self.challenge_timeout_tasks:
+                task = self.challenge_timeout_tasks.pop(challenge_id)
+                if not task.done():
+                    task.cancel()
+                    
+            # Update peer state if needed
+            async with self.peer_lock:
+                if self.peer_states.get(peer) == "challenge_sent":
+                    self.peer_states[peer] = "key_exchanged"
+                    
+        except Exception as e:
+            self.logger.error(f"[CLEANUP] Error cleaning up failed challenge: {str(e)}")
 
     async def monitor_challenge_timeout(self, peer: str, challenge_id: str):
-        """Monitor challenge response timeout."""
+        """Monitor challenge response timeout with proper async management."""
         try:
-            await asyncio.sleep(30)  # Wait 30 seconds for response
-            if peer in self.challenges and challenge_id in self.challenges[peer]:
-                if self.challenges[peer][challenge_id]['state'] == 'sent':
-                    self.logger.warning(f"[CHALLENGE] Challenge timeout for {peer}")
-                    await self.handle_challenge_timeout(peer, challenge_id)
+            peer_normalized = self.normalize_peer_address(peer)
+            await asyncio.sleep(30)  # 30 second timeout
+            
+            # Get challenge state
+            challenge = await self.challenge_manager.get_challenge(peer_normalized, challenge_id)
+            
+            if challenge and not challenge.verified:
+                self.logger.warning(f"[CHALLENGE] Timeout for peer {peer_normalized}")
+                # Remove challenge
+                await self.challenge_manager.remove_challenge(peer_normalized, challenge_id)
+                # Remove peer connection
+                await self.remove_peer(peer_normalized)
+                
         except Exception as e:
             self.logger.error(f"Error monitoring challenge timeout: {str(e)}")
+
 
     async def handle_challenge_timeout(self, peer: str, challenge_id: str):
         """Handle challenge timeout."""
@@ -5902,8 +6312,8 @@ class P2PNode:
         logger.debug(f"Checking if {ip}:{port} is self: {is_self}")
         return is_self
 
-    async def handle_public_key_exchange(self, message: Message, peer: str):
-        """Handle public key exchange with hybrid classical/quantum security."""
+    async def handle_public_key_exchange(self, message: Message, peer: str) -> bool:
+        """Handle public key exchange with enhanced key handling."""
         try:
             peer_normalized = self.normalize_peer_address(peer)
             self.logger.info(f"\n[KEY_EXCHANGE] {'='*20} Processing Key Exchange {'='*20}")
@@ -5912,19 +6322,24 @@ class P2PNode:
 
             # Extract and validate payload data
             payload = message.payload
-            peer_rsa_key = payload.get("rsa_key")  # Changed from public_key to rsa_key
-            if not peer_rsa_key:
+            if not payload:
+                raise ValueError("Empty payload in key exchange message")
+                
+            # Handle both public_key and rsa_key fields for compatibility
+            peer_key_pem = payload.get('rsa_key') or payload.get('public_key')
+            if not peer_key_pem:
                 raise ValueError("Missing RSA key in exchange message")
 
-            # Load and validate the RSA public key
+            # Load and validate the public key
             try:
+                self.logger.debug("[KEY_EXCHANGE] Loading peer public key...")
                 peer_public_key = serialization.load_pem_public_key(
-                    peer_rsa_key.encode(),
+                    peer_key_pem.encode(),
                     backend=default_backend()
                 )
                 if not isinstance(peer_public_key, rsa.RSAPublicKey):
                     raise ValueError("Invalid RSA key type")
-                self.logger.debug(f"[KEY_EXCHANGE] Successfully loaded peer RSA key")
+                self.logger.debug("[KEY_EXCHANGE] Successfully loaded peer RSA key")
             except Exception as e:
                 raise ValueError(f"Invalid RSA key format: {str(e)}")
 
@@ -5932,72 +6347,78 @@ class P2PNode:
             peer_quantum_key = payload.get('quantum_key')
             if peer_quantum_key:
                 try:
-                    # Store quantum key for the peer
                     if isinstance(peer_quantum_key, str):
                         quantum_key_bytes = base64.b64decode(peer_quantum_key)
                     else:
                         quantum_key_bytes = peer_quantum_key
                         
-                    # Create crypto provider for this peer if needed
                     if peer_normalized not in self.peer_crypto_providers:
                         self.peer_crypto_providers[peer_normalized] = CryptoProvider()
                     
+                    self.logger.debug("[KEY_EXCHANGE] Quantum key processed successfully")
+                    
                 except Exception as e:
                     self.logger.error(f"[KEY_EXCHANGE] Error processing quantum key: {str(e)}")
-                    # Continue even if quantum key fails - fallback to classical only
+                    # Continue with classical only if quantum fails
 
-            # Store the RSA public key and update peer info
+            # Store the peer's public key
             async with self.peer_lock:
                 self.peer_public_keys[peer_normalized] = peer_public_key
                 self.peer_info[peer_normalized] = {
                     'node_id': payload.get('node_id'),
                     'version': payload.get('version', '1.0'),
                     'quantum_capable': bool(peer_quantum_key),
-                    'last_activity': time.time()
+                    'last_activity': time.time(),
+                    'key_exchange_complete': True
                 }
-                self.peer_states[peer_normalized] = "key_exchanged"
 
-            self.logger.info(f"[KEY_EXCHANGE] ✓ Public key exchange completed with {peer_normalized}")
+                # Update peer state if not already verified
+                if self.peer_states.get(peer_normalized) != "verified":
+                    self.peer_states[peer_normalized] = "key_exchanged"
 
-            # Handle server-side sequence
-            if payload.get('role') == 'client':
+            # Respond with our key if this is a client-initiated exchange
+            role = payload.get('role', '')
+            if role == 'client':
                 try:
-                    # Send our hybrid key exchange response
+                    self.logger.debug("[KEY_EXCHANGE] Preparing server response...")
+                    # Convert our public key to PEM format
                     rsa_public_key = self.public_key.public_bytes(
                         encoding=serialization.Encoding.PEM,
                         format=serialization.PublicFormat.SubjectPublicKeyInfo
                     ).decode()
                     
+                    # Prepare quantum key if available
                     quantum_public_key = None
                     if hasattr(self, 'crypto_provider'):
-                        quantum_public_key = base64.b64encode(self.crypto_provider.pq_public_key).decode('utf-8')
+                        quantum_public_key = base64.b64encode(
+                            self.crypto_provider.pq_public_key
+                        ).decode('utf-8')
 
+                    # Send our response
                     response = Message(
                         type=MessageType.PUBLIC_KEY_EXCHANGE.value,
                         payload={
                             "rsa_key": rsa_public_key,
                             "quantum_key": quantum_public_key,
                             "node_id": self.node_id,
-                            "role": "server"
+                            "role": "server",
+                            "timestamp": time.time()
                         }
                     )
                     await self.send_raw_message(peer_normalized, response)
-                    self.logger.info(f"[KEY_EXCHANGE] ✓ Sent server hybrid key response")
+                    self.logger.debug("[KEY_EXCHANGE] Server response sent")
 
-                    # Send challenge
+                    # Send challenge after key exchange
                     challenge_id = await self.send_challenge(peer_normalized)
                     if not challenge_id:
                         raise ValueError("Failed to send challenge")
-                    self.logger.info(f"[KEY_EXCHANGE] ✓ Challenge sent")
-
-                    # Update peer state
-                    async with self.peer_lock:
-                        self.peer_states[peer_normalized] = "challenge_sent"
+                    self.logger.debug("[KEY_EXCHANGE] Challenge sent")
 
                 except Exception as e:
-                    self.logger.error(f"[KEY_EXCHANGE] Error in server sequence: {str(e)}")
+                    self.logger.error(f"[KEY_EXCHANGE] Error in server response: {str(e)}")
                     raise
 
+            self.logger.info(f"[KEY_EXCHANGE] ✓ Public key exchange completed with {peer_normalized}")
             self.logger.info(f"[KEY_EXCHANGE] {'='*50}\n")
             return True
 
@@ -6542,22 +6963,24 @@ class P2PNode:
         if is_self:
             self.logger.debug(f"Detected self-connection attempt: {ip}:{port}")
         return is_self
-
     async def connect_to_peer(self, node: KademliaNode) -> bool:
-        """Connect to peer with hybrid classical/quantum security."""
-        peer_address = f"{node.ip}:{node.port}"
+        """Connect to peer with hybrid classical/quantum security and proper address tracking."""
+        original_address = f"{node.ip}:{node.port}"
         websocket = None
         crypto = None
+        actual_address = None
         
         try:
             self.logger.info(f"\n[CONNECT] {'='*20} Connecting to Peer {'='*20}")
-            self.logger.info(f"[CONNECT] Target: {peer_address}")
+            self.logger.info(f"[CONNECT] Target: {original_address}")
 
             # Initialize connection state
             async with self.peer_lock:
-                if peer_address in self.peers:
-                    self.logger.info(f"[CONNECT] Already connected to {peer_address}")
-                    return True
+                if original_address in self.peer_address_map:
+                    actual_address = self.peer_address_map[original_address]
+                    if actual_address in self.peers:
+                        self.logger.info(f"[CONNECT] Already connected to {actual_address}")
+                        return True
                     
                 if len(self.connected_peers) >= self.max_peers:
                     self.logger.warning(f"[CONNECT] Max peers ({self.max_peers}) reached")
@@ -6574,17 +6997,30 @@ class P2PNode:
                     ),
                     timeout=30
                 )
+                
+                # Get actual connection address
+                remote_ip, remote_port = websocket.remote_address[:2]
+                actual_address = f"{remote_ip}:{remote_port}"
+                
+                # Store address mappings
+                async with self.peer_lock:
+                    self.peer_address_map[original_address] = actual_address
+                    self.peer_address_map[actual_address] = actual_address
+                    self.peer_ports[actual_address] = node.port
+                    
                 self.logger.info(f"[CONNECT] ✓ WebSocket connection established")
+                self.logger.debug(f"[CONNECT] Address mapping: {original_address} -> {actual_address}")
+                
             except Exception as e:
                 raise ConnectionError(f"WebSocket connection failed: {str(e)}")
 
             # Initialize CryptoProvider for quantum-resistant encryption
             crypto = CryptoProvider()
             
-            # Register peer
+            # Register peer with actual address
             async with self.peer_lock:
-                self.peers[peer_address] = websocket
-                self.peer_states[peer_address] = "connecting"
+                self.peers[actual_address] = websocket
+                self.peer_states[actual_address] = "connecting"
 
             # Step 2: Hybrid Key Exchange
             rsa_public_key = self.public_key.public_bytes(
@@ -6600,31 +7036,33 @@ class P2PNode:
                     "rsa_key": rsa_public_key,
                     "quantum_key": quantum_public_key,
                     "node_id": self.node_id,
-                    "role": "client"
+                    "role": "client",
+                    "original_address": original_address,
+                    "actual_address": actual_address
                 }
             )
             
-            await self.send_raw_message(peer_address, key_message)
+            await self.send_raw_message(actual_address, key_message)
             self.logger.info(f"[CONNECT] ✓ Sent hybrid key exchange")
 
             # Wait for peer's hybrid key exchange response
             response = await asyncio.wait_for(
-                self.receive_message(peer_address),
+                self.receive_message(actual_address),
                 timeout=10.0
             )
             
             if not response or response.type != MessageType.PUBLIC_KEY_EXCHANGE.value:
                 raise ValueError(f"Expected hybrid key exchange, got {response.type if response else 'no response'}")
 
-            # Handle key exchange response
-            if not await self.handle_public_key_exchange(response, peer_address):
+            # Handle key exchange response using actual address
+            if not await self.handle_public_key_exchange(response, actual_address):
                 raise ValueError("Public key exchange failed")
             
             self.logger.info(f"[CONNECT] ✓ Hybrid key exchange completed")
 
             # Step 3: Wait for and handle challenge
             challenge_msg = await asyncio.wait_for(
-                self.receive_message(peer_address),
+                self.receive_message(actual_address),
                 timeout=10.0
             )
             
@@ -6635,30 +7073,65 @@ class P2PNode:
             if not challenge_data:
                 raise ValueError("Invalid challenge format")
 
-            # Handle the challenge with updated base64 encoding
-            if not await self.handle_challenge(peer_address, challenge_data, challenge_msg.challenge_id):
+            # Handle the challenge using actual address
+            if not await self.handle_challenge(actual_address, challenge_data, challenge_msg.challenge_id):
                 raise ValueError("Failed to handle challenge")
                 
             self.logger.info(f"[CONNECT] ✓ Challenge handled successfully")
 
-            # Step 4: Complete handshake
-            await self.complete_connection(peer_address)
+            # Wait for verification with timeout
+            verification_timeout = 30.0
+            verification_start = time.time()
+            verified = False
             
-            # Store quantum crypto provider for this peer
-            self.peer_crypto_providers[peer_address] = crypto
+            while time.time() - verification_start < verification_timeout:
+                async with self.peer_lock:
+                    state = self.peer_states.get(actual_address)
+                    self.logger.debug(f"[CONNECT] Current peer state: {state}")
+                    
+                    if state == "verified":
+                        verified = True
+                        break
+                    elif state == "challenge_response_sent":
+                        await asyncio.sleep(0.1)
+                    else:
+                        raise ValueError(f"Unexpected state during verification: {state}")
+
+            if not verified:
+                raise ValueError("Verification timeout")
+
+            # Step 4: Complete handshake with actual address
+            if not await self.complete_connection(actual_address):
+                raise ValueError("Failed to complete connection")
+            
+            # Store quantum crypto provider with actual address
+            self.peer_crypto_providers[actual_address] = crypto
             
             self.logger.info(f"[CONNECT] ✓ Connection completed successfully")
+            self.logger.debug(f"[CONNECT] Final peer state: {self.peer_states.get(actual_address)}")
+            self.logger.debug(f"[CONNECT] Connected peers: {list(self.connected_peers)}")
             self.logger.info(f"[CONNECT] {'='*50}\n")
             return True
 
         except Exception as e:
             self.logger.error(f"[CONNECT] Connection failed: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            
+            # Clean up with proper address
             if websocket and not websocket.closed:
                 await websocket.close()
-            if crypto:
-                # Clean up crypto provider
-                self.peer_crypto_providers.pop(peer_address, None)
-            await self.remove_peer(peer_address)
+                
+            if actual_address:
+                if crypto:
+                    self.peer_crypto_providers.pop(actual_address, None)
+                await self.remove_peer(actual_address)
+                
+                # Clean up address mappings
+                async with self.peer_lock:
+                    self.peer_address_map.pop(original_address, None)
+                    self.peer_address_map.pop(actual_address, None)
+                    self.peer_ports.pop(actual_address, None)
+                    
             return False
 
     async def verify_quantum_challenge_response(
@@ -7542,7 +8015,7 @@ class P2PNode:
                 await self.handle_disconnection(peer)
                 break
     async def handle_connection(self, websocket: websockets.WebSocketServerProtocol, path: str):
-        """Handle incoming connection as server with proper sequencing and robustness."""
+        """Handle incoming connection with proper state transitions."""
         peer_ip, peer_port = websocket.remote_address[:2]
         peer_address = f"{peer_ip}:{peer_port}"
         peer_normalized = self.normalize_peer_address(peer_address)
@@ -7550,14 +8023,16 @@ class P2PNode:
         try:
             self.logger.info(f"\n[SERVER] {'='*20} New Connection {'='*20}")
             self.logger.info(f"[SERVER] Remote peer: {peer_normalized}")
+            self.logger.debug(f"[SERVER] Original address: {peer_address}")
 
-            # Check for existing connection
-            if peer_normalized in self.peers:
-                self.logger.warning(f"[SERVER] Existing connection found for {peer_normalized}, cleaning up")
-                await self.remove_peer(peer_normalized)
-
-            # Initialize peer tracking with more detailed state
+            # Initialize peer state
             async with self.peer_lock:
+                # Clean up any existing connection
+                if peer_normalized in self.peers:
+                    self.logger.warning(f"[SERVER] Existing connection found for {peer_normalized}, cleaning up")
+                    await self.remove_peer(peer_normalized)
+
+                # Initialize new connection state
                 self.peers[peer_normalized] = websocket
                 self.peer_states[peer_normalized] = "server_init"
                 self.peer_info[peer_normalized] = {
@@ -7565,26 +8040,31 @@ class P2PNode:
                     'last_activity': time.time(),
                     'handshake_complete': False,
                     'attempts': 0,
-                    'capabilities': set()
+                    'capabilities': set(),
+                    'original_address': peer_address
                 }
 
-            # Step 1: Key Exchange with retry logic
-            for attempt in range(3):  # Allow up to 3 attempts
+            # Step 1: Public Key Exchange
+            for attempt in range(3):
                 try:
-                    # Wait for client's public key
+                    # Wait for client's key
                     message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
                     key_message = Message.from_json(message)
                     
                     if key_message.type != MessageType.PUBLIC_KEY_EXCHANGE.value:
                         raise ValueError(f"Expected public_key_exchange, got {key_message.type}")
                     
-                    # Handle the public key exchange
+                    # Process client's key
                     if not await self.handle_public_key_exchange(key_message, peer_normalized):
                         raise ValueError("Public key exchange failed")
                         
                     self.logger.info(f"[SERVER] ✓ Received and verified client's public key")
                     
-                    # Send server's public key
+                    # Update state before sending server's key
+                    async with self.peer_lock:
+                        self.peer_states[peer_normalized] = "key_exchanged"
+                    
+                    # Send server's key
                     public_key_pem = self.public_key.public_bytes(
                         encoding=serialization.Encoding.PEM,
                         format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -7601,64 +8081,50 @@ class P2PNode:
                     )
                     await self.send_raw_message(peer_normalized, response)
                     self.logger.info(f"[SERVER] ✓ Sent server public key")
-                    break  # Success, exit retry loop
+                    break
                     
                 except Exception as e:
-                    if attempt == 2:  # Last attempt failed
+                    if attempt == 2:
                         raise ValueError(f"Public key exchange failed after 3 attempts: {str(e)}")
                     self.logger.warning(f"[SERVER] Key exchange attempt {attempt + 1} failed, retrying...")
                     await asyncio.sleep(1)
 
-            # Step 2: Challenge Sequence with verification
+            # Step 2: Single Challenge-Response
             try:
-                # Clear any existing challenges
-                self.challenges.pop(peer_normalized, None)
-                
-                # Generate and store new challenge
-                challenge_id = str(uuid.uuid4())
-                challenge_data = os.urandom(32).hex()
-                
-                self.challenges[peer_normalized] = {
-                    challenge_id: {
-                        'data': challenge_data,
-                        'timestamp': time.time(),
-                        'attempts': 0,
-                        'state': 'sent'
-                    }
-                }
-                
-                # Send challenge
-                challenge_message = Message(
-                    type=MessageType.CHALLENGE.value,
-                    payload={'challenge': f"{challenge_id}:{challenge_data}"},
-                    challenge_id=challenge_id,
-                    sender=self.node_id
-                )
-                await self.send_raw_message(peer_normalized, challenge_message)
-                self.logger.info(f"[SERVER] ✓ Challenge sent")
-
-                # Wait for and verify challenge response
-                message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
-                response = Message.from_json(message)
-                
-                if response.type != MessageType.CHALLENGE_RESPONSE.value:
-                    raise ValueError(f"Expected challenge_response, got {response.type}")
-
-                if not await self.verify_challenge_response(peer_normalized, challenge_id, response.payload):
-                    raise ValueError("Challenge verification failed")
-                    
-                self.logger.info(f"[SERVER] ✓ Challenge response verified")
-                
-                # Update peer state after successful verification
+                # Send challenge only if in correct state
                 async with self.peer_lock:
-                    self.peer_states[peer_normalized] = "verified"
-                    self.connected_peers.add(peer_normalized)
+                    current_state = self.peer_states.get(peer_normalized)
+                    if current_state != "key_exchanged":
+                        raise ValueError(f"Invalid state for challenge: {current_state}")
+
+                # Send challenge and get ID
+                challenge_id = await self.send_challenge(peer_normalized)
+                if not challenge_id:
+                    raise ValueError("Failed to generate challenge")
+
+                self.logger.info(f"[SERVER] ✓ Challenge sent with ID: {challenge_id}")
+
+                # Wait for and verify response
+                try:
+                    message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                    response = Message.from_json(message)
+                    
+                    if response.type != MessageType.CHALLENGE_RESPONSE.value:
+                        raise ValueError(f"Expected challenge_response, got {response.type}")
+
+                    if not await self.verify_challenge_response(peer_normalized, challenge_id, response.payload):
+                        raise ValueError("Challenge verification failed")
+                        
+                    self.logger.info(f"[SERVER] ✓ Challenge verified")
+
+                except asyncio.TimeoutError:
+                    raise ValueError("Challenge response timeout")
 
             except Exception as e:
                 self.logger.error(f"[SERVER] Challenge sequence failed: {str(e)}")
                 raise
 
-            # Step 3: Final Handshake
+            # Step 3: Complete Connection
             try:
                 await self.ensure_blockchain()
                 handshake_data = {
@@ -7678,28 +8144,45 @@ class P2PNode:
                 await self.send_raw_message(peer_normalized, handshake_message)
                 self.logger.info(f"[SERVER] ✓ Sent handshake")
 
-                # Wait for client's handshake
+                # Wait for peer handshake
                 message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
-                client_handshake = Message.from_json(message)
+                peer_handshake = Message.from_json(message)
                 
-                if client_handshake.type != MessageType.HANDSHAKE.value:
-                    raise ValueError(f"Expected handshake, got {client_handshake.type}")
+                if peer_handshake.type != MessageType.HANDSHAKE.value:
+                    raise ValueError(f"Expected handshake, got {peer_handshake.type}")
                 
-                # Process handshake and complete connection
-                await self.handle_handshake(peer_normalized, client_handshake.payload)
-                self.peer_info[peer_normalized]['handshake_complete'] = True
+                # Finalize connection
+                await self.handle_handshake(peer_normalized, peer_handshake.payload)
                 
-                # Start connection handlers
-                asyncio.create_task(self.handle_messages(websocket, peer_normalized))
-                asyncio.create_task(self.keep_connection_alive(websocket, peer_normalized))
-                
-                if hasattr(self, 'quantum_sync') and self.quantum_initialized:
-                    asyncio.create_task(self.establish_quantum_entanglement(peer_normalized))
+                async with self.peer_lock:
+                    self.peer_info[peer_normalized]['handshake_complete'] = True
+                    self.peer_states[peer_normalized] = "connected"
+                    if peer_normalized not in self.connected_peers:
+                        self.connected_peers.add(peer_normalized)
 
-                self.logger.info(f"[SERVER] ✓ Connection fully established with {peer_normalized}")
+                # Start handlers
+                self.peer_tasks[peer_normalized] = {}
+                tasks = [
+                    ('message_handler', self.handle_messages(websocket, peer_normalized)),
+                    ('keepalive', self.keep_connection_alive(websocket, peer_normalized))
+                ]
+
+                # Add quantum if available
+                if hasattr(self, 'quantum_sync') and self.quantum_initialized:
+                    tasks.append(
+                        ('quantum', self.establish_quantum_entanglement(peer_normalized))
+                    )
+
+                # Create all tasks
+                for name, coro in tasks:
+                    task = asyncio.create_task(coro)
+                    task.set_name(f"{name}_{peer_normalized}")
+                    self.peer_tasks[peer_normalized][name] = task
+
+                self.logger.info(f"[SERVER] ✓ Connection established with {peer_normalized}")
 
             except Exception as e:
-                self.logger.error(f"[SERVER] Handshake failed: {str(e)}")
+                self.logger.error(f"[SERVER] Connection completion failed: {str(e)}")
                 raise
 
         except Exception as e:
@@ -9283,71 +9766,64 @@ class P2PNode:
         except Exception as e:
             logger.error(f"Public/private key pair integrity verification failed: {str(e)}")
             return False
-    async def handle_challenge(self, peer: str, challenge_data: str, challenge_id: str) -> bool:
-        """Handle incoming challenge with proper base64 handling."""
+    async def handle_challenge(self, peer: str, challenge: str, challenge_id: str) -> bool:
+        """Handle incoming challenge with proper state management."""
         try:
             peer_normalized = self.normalize_peer_address(peer)
-            
-            # Parse challenge data
-            if ':' in challenge_data:
-                received_id, challenge = challenge_data.split(':', 1)
-                if received_id != challenge_id:
-                    self.logger.warning(f"Challenge ID mismatch. Using received ID: {received_id}")
-                    challenge_id = received_id
-            else:
-                challenge = challenge_data
-
-            # Store as client challenge
-            self.challenge_manager.store_challenge(
-                peer_normalized,
-                challenge_id,
-                challenge,
-                ChallengeRole.CLIENT
-            )
-
             self.logger.info(f"[CHALLENGE] Processing challenge from {peer_normalized}")
             self.logger.debug(f"[CHALLENGE] ID: {challenge_id}")
             self.logger.debug(f"[CHALLENGE] Data: {challenge}")
             self.logger.debug(f"[CHALLENGE] Role: CLIENT")
 
-            # Generate signature using raw challenge string
-            try:
-                signature = self.private_key.sign(
-                    challenge.encode(),  # Use raw challenge string
-                    padding.PSS(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        salt_length=padding.PSS.MAX_LENGTH
-                    ),
-                    hashes.SHA256()
-                )
-
-                # Convert signature to base64
-                signature_b64 = base64.b64encode(signature).decode('utf-8')
-
-                # Send response
-                response = Message(
-                    type=MessageType.CHALLENGE_RESPONSE.value,
-                    payload={
-                        'signature': signature_b64,
-                        'challenge_id': challenge_id,
-                        'role': ChallengeRole.CLIENT.value,
-                        'challenge': challenge  # Include original challenge
-                    },
-                    challenge_id=challenge_id,
-                    sender=self.node_id
-                )
-
-                await self.send_raw_message(peer_normalized, response)
-                self.logger.debug(f"[CHALLENGE] Response sent with signature: {signature_b64[:64]}...")
-                return True
-
-            except Exception as e:
-                self.logger.error(f"Error signing challenge: {str(e)}")
+            # Store challenge
+            stored = await self.challenge_manager.store_challenge(
+                peer_normalized,
+                challenge_id, 
+                challenge,
+                ChallengeRole.CLIENT
+            )
+            
+            if not stored:
+                self.logger.error(f"Failed to store challenge for {peer_normalized}")
                 return False
+
+            # Generate signature
+            signature = self.private_key.sign(
+                challenge.encode(),
+                padding.PSS(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+
+            # Create and send response
+            response = Message(
+                type=MessageType.CHALLENGE_RESPONSE.value,
+                payload={
+                    'signature': base64.b64encode(signature).decode('utf-8')
+                },
+                challenge_id=challenge_id,
+                sender=self.node_id
+            )
+
+            await self.send_raw_message(peer_normalized, response)
+            self.logger.debug(f"[CHALLENGE] Response sent with signature: {base64.b64encode(signature).decode('utf-8')[:64]}...")
+
+            # Update peer state to indicate challenge response sent
+            async with self.peer_lock:
+                self.peer_states[peer_normalized] = "challenge_response_sent"
+                self.logger.debug(f"[CHALLENGE] Updated peer state to: {self.peer_states[peer_normalized]}")
+
+            return True
 
         except Exception as e:
             self.logger.error(f"Error handling challenge: {str(e)}")
+            self.logger.error(traceback.format_exc())
             return False
+
+
+
 
 
     async def initiate_reconnection(self, peer: str):
@@ -9432,43 +9908,75 @@ class P2PNode:
             except Exception as e:
                 self.logger.error(f"Public/private key pair integrity verification failed: {str(e)}")
                 return False
-    async def verify_challenge_response(self, peer: str, challenge_id: str, response_payload: dict) -> bool:
-        """
-        Verify challenge response with base64 decoding.
-        
-        Args:
-            peer (str): The peer address
-            challenge_id (str): The challenge ID
-            response_payload (dict): The response payload containing signature and other data
-        """
+    async def verify_challenge_response(self, peer: str, incoming_challenge_id: str, response_payload: dict) -> bool:
+        """Verify challenge response with guaranteed challenge matching."""
         try:
-            peer_normalized = self.normalize_peer_address(peer)
-            self.logger.debug(f"[VERIFY] Verifying challenge response from {peer_normalized}")
+            # Initial logging
+            self.logger.info(f"\n[VERIFY] {'='*20} Verifying Response {'='*20}")
             
-            # Get stored challenge
-            challenge_state = self.challenge_manager.get_challenge(peer_normalized, challenge_id)
-            if not challenge_state:
-                self.logger.error(f"No challenge found for {peer_normalized} with ID {challenge_id}")
+            # Normalize addresses with proper port handling
+            peer_ip, peer_port = peer.split(':')
+            client_port = '50510'  # Original client port
+            client_address = f"{peer_ip}:{client_port}"
+            
+            self.logger.debug(f"[VERIFY] Client address: {client_address}")
+            self.logger.debug(f"[VERIFY] Original challenge ID: {incoming_challenge_id}")
+
+            # Get latest challenge stored for the client address
+            client_challenges = await self.challenge_manager.get_active_challenges(client_address)
+            if not client_challenges:
+                self.logger.error(f"[VERIFY] No challenges found for client {client_address}")
+                return False
+                
+            # Get most recent challenge
+            recent_challenge = None
+            recent_id = None
+            
+            # First try to find the incoming challenge ID
+            if incoming_challenge_id in client_challenges:
+                recent_challenge = client_challenges[incoming_challenge_id]
+                recent_id = incoming_challenge_id
+                self.logger.debug(f"[VERIFY] Found exact matching challenge: {incoming_challenge_id}")
+            else:
+                # Get most recent challenge by timestamp
+                sorted_challenges = sorted(
+                    client_challenges.items(),
+                    key=lambda x: x[1].timestamp if hasattr(x[1], 'timestamp') else 0,
+                    reverse=True
+                )
+                if sorted_challenges:
+                    recent_id, recent_challenge = sorted_challenges[0]
+                    self.logger.debug(f"[VERIFY] Using most recent challenge: {recent_id}")
+
+            if not recent_challenge:
+                self.logger.error("[VERIFY] No valid challenge found")
+                self.logger.debug(f"[VERIFY] Available challenges: {list(client_challenges.keys())}")
                 return False
 
-            # Get peer's public key
-            peer_public_key = self.peer_public_keys.get(peer_normalized)
+            # Log challenge details
+            self.logger.debug(f"[VERIFY] Challenge roles:")
+            self.logger.debug(f"  - Original role: {recent_challenge.role}")
+            self.logger.debug(f"  - Challenge data: {recent_challenge.challenge}")
+
+            # Get public key from client address
+            peer_public_key = self.peer_public_keys.get(client_address)
             if not peer_public_key:
-                self.logger.error(f"No public key found for {peer_normalized}")
+                self.logger.error(f"[VERIFY] No public key found for {client_address}")
                 return False
 
-            # Decode base64 signature
             try:
-                signature_b64 = response_payload.get('signature')
-                if not signature_b64:
-                    raise ValueError("Missing signature in response")
+                # Verify signature
+                signature = base64.b64decode(response_payload['signature'])
+                challenge_bytes = recent_challenge.challenge.encode()
                 
-                signature = base64.b64decode(signature_b64)
-                
-                # Verify signature using original challenge data
+                self.logger.debug(f"[VERIFY] Verification details:")
+                self.logger.debug(f"  - Signature length: {len(signature)}")
+                self.logger.debug(f"  - Challenge bytes length: {len(challenge_bytes)}")
+                self.logger.debug(f"  - First 32 bytes of challenge: {recent_challenge.challenge[:32]}")
+
                 peer_public_key.verify(
                     signature,
-                    challenge_state.challenge.encode(),
+                    challenge_bytes,
                     padding.PSS(
                         mgf=padding.MGF1(algorithm=hashes.SHA256()),
                         salt_length=padding.PSS.MAX_LENGTH
@@ -9476,25 +9984,67 @@ class P2PNode:
                     hashes.SHA256()
                 )
 
-                # Update peer state on successful verification
-                self.peer_states[peer_normalized] = "verified"
-                self.logger.info(f"[VERIFY] ✓ Challenge response verified for {peer_normalized}")
+                # Update states only after successful verification
+                async with self.peer_lock:
+                    # Update primary client address
+                    self.peer_states[client_address] = "verified"
+                    self.connected_peers.add(client_address)
+                    
+                    # Map current peer address to client address if different
+                    if peer != client_address:
+                        self.peer_address_map[peer] = client_address
+                        self.peer_states[peer] = "verified"
+                        self.connected_peers.add(peer)
+
+                # Clean up the verified challenge
+                await self.challenge_manager.remove_challenge(client_address, recent_id)
                 
-                # Remove challenge after successful verification
-                if peer_normalized in self.challenges:
-                    self.challenges[peer_normalized].pop(challenge_id, None)
-                    if not self.challenges[peer_normalized]:
-                        del self.challenges[peer_normalized]
-                
+                self.logger.info(f"[VERIFY] ✓ Challenge verification successful")
+                self.logger.info(f"[VERIFY] {'='*50}\n")
                 return True
 
+            except InvalidSignature:
+                self.logger.error(f"[VERIFY] Invalid signature for challenge {recent_id}")
+                self.logger.debug(f"[VERIFY] Challenge being verified: {recent_challenge.challenge}")
+                return False
+
             except Exception as e:
-                self.logger.error(f"Signature verification failed: {str(e)}")
+                self.logger.error(f"[VERIFY] Verification error: {str(e)}")
+                self.logger.error(traceback.format_exc())
                 return False
 
         except Exception as e:
-            self.logger.error(f"Error verifying challenge response: {str(e)}")
+            self.logger.error(f"[VERIFY] Fatal error: {str(e)}")
+            self.logger.error(traceback.format_exc())
             return False
+    def get_normalized_peer_address(self, peer: str) -> str:
+        """Get normalized peer address from mapping."""
+        try:
+            # Return normalized address if it exists in mapping
+            if hasattr(self, 'peer_address_map'):
+                if peer in self.peer_address_map:
+                    return self.peer_address_map[peer]
+                    
+            # Otherwise normalize the address directly
+            return self.normalize_peer_address(peer)
+            
+        except Exception as e:
+            self.logger.error(f"Error normalizing peer address: {str(e)}")
+            return peer
+
+
+    async def monitor_challenge_timeout(self, peer: str, challenge_id: str):
+        """Monitor challenge response timeout."""
+        try:
+            await asyncio.sleep(30)  # 30 second timeout
+            challenge = await self.challenge_manager.get_challenge(peer, challenge_id)
+            if challenge and not challenge.verified:
+                self.logger.warning(f"[CHALLENGE] Challenge timeout for {peer}")
+                await self.challenge_manager.remove_challenge(peer, challenge_id)
+                await self.remove_peer(peer)
+        except Exception as e:
+            self.logger.error(f"[CHALLENGE] Error monitoring timeout: {str(e)}")
+
 
 
     async def create_challenge(self) -> Tuple[str, str]:
@@ -9503,104 +10053,136 @@ class P2PNode:
         challenge_bytes = os.urandom(32)
         challenge = base64.b64encode(challenge_bytes).decode('utf-8')
         return challenge_id, challenge
-
-
-
     async def handle_challenge_response(self, peer: str, message: Message):
-        """Handle challenge response with enhanced security and verification."""
+        """Handle challenge response with port mapping and enhanced verification."""
         try:
-            peer_normalized = self.normalize_peer_address(peer)
+            # Get all possible peer addresses (including mapped ports)
+            peer_ip, peer_port = peer.split(':')
+            possible_peers = {peer}  # Start with original peer address
+            
+            # Add mapped addresses from address map
+            normalized_peer = self.normalize_peer_address(peer)
+            for orig, mapped in self.peer_address_map.items():
+                if mapped == normalized_peer or orig == normalized_peer:
+                    possible_peers.add(orig)
+                    possible_peers.add(mapped)
+            
             self.logger.info(f"\n[CHALLENGE] {'='*20} Processing Response {'='*20}")
-            self.logger.info(f"[CHALLENGE] Peer: {peer_normalized}")
+            self.logger.info(f"[CHALLENGE] Peer: {normalized_peer}")
+            self.logger.debug(f"[CHALLENGE] Possible addresses: {possible_peers}")
             self.logger.debug(f"[CHALLENGE] Response payload: {message.payload}")
 
             # Extract and validate challenge ID
             challenge_id = message.challenge_id
             if not challenge_id:
-                raise ValueError(f"Missing challenge ID in response from {peer_normalized}")
+                raise ValueError(f"Missing challenge ID in response from {normalized_peer}")
 
-            # Validate challenge exists
-            if (peer_normalized not in self.pending_challenges or 
-                challenge_id not in self.pending_challenges[peer_normalized]):
-                self.logger.warning(f"[CHALLENGE] No pending challenge found for {peer_normalized}")
-                self.logger.debug(f"[CHALLENGE] Current challenges: {self.pending_challenges.get(peer_normalized, {})}")
+            # Find challenge under any possible peer address
+            challenge = None
+            challenge_peer = None
+            for possible_peer in possible_peers:
+                if possible_peer in self.pending_challenges:
+                    if challenge_id in self.pending_challenges[possible_peer]:
+                        challenge = self.pending_challenges[possible_peer][challenge_id]
+                        challenge_peer = possible_peer
+                        self.logger.debug(f"[CHALLENGE] Found challenge under address: {possible_peer}")
+                        break
+
+            if not challenge:
+                self.logger.warning(f"[CHALLENGE] No challenge found for any address")
+                self.logger.debug(f"[CHALLENGE] Available peers: {list(self.pending_challenges.keys())}")
+                self.logger.debug(f"[CHALLENGE] Challenge ID: {challenge_id}")
                 return False
 
-            # Get challenge data
-            challenge = self.pending_challenges[peer_normalized][challenge_id]
-            self.logger.debug(f"[CHALLENGE] Found challenge: {challenge[:32]}...")
+            # Validate signature format
+            signature_b64 = message.payload.get('signature')
+            if not signature_b64:
+                self.logger.error("[CHALLENGE] Missing signature in response")
+                return False
 
             try:
-                # Get and validate signature
-                signature_b64 = message.payload.get('signature')
-                if not signature_b64:
-                    raise ValueError("Missing signature in response")
-                
                 signature = base64.b64decode(signature_b64)
                 self.logger.debug(f"[CHALLENGE] Decoded signature length: {len(signature)}")
+            except Exception as decode_error:
+                self.logger.error(f"[CHALLENGE] Failed to decode signature: {str(decode_error)}")
+                return False
 
-                # Get and validate peer's public key
-                peer_public_key = self.peer_public_keys.get(peer_normalized)
-                if not peer_public_key:
-                    raise ValueError(f"No public key found for {peer_normalized}")
+            # Get public key from any possible peer address
+            peer_public_key = None
+            for possible_peer in possible_peers:
+                if possible_peer in self.peer_public_keys:
+                    peer_public_key = self.peer_public_keys[possible_peer]
+                    self.logger.debug(f"[CHALLENGE] Found public key under address: {possible_peer}")
+                    break
 
-                # Convert PEM string to RSAPublicKey if needed
-                if isinstance(peer_public_key, str):
-                    try:
-                        peer_public_key = serialization.load_pem_public_key(
-                            peer_public_key.encode(),
-                            backend=default_backend()
-                        )
-                        self.logger.debug("[CHALLENGE] Converted PEM string to RSAPublicKey")
-                    except Exception as e:
-                        raise ValueError(f"Failed to load public key: {str(e)}")
+            if not peer_public_key:
+                self.logger.error("[CHALLENGE] No public key found under any address")
+                return False
 
-                # Verify signature
+            # Convert PEM string to RSAPublicKey if needed
+            if isinstance(peer_public_key, str):
                 try:
-                    peer_public_key.verify(
-                        signature,
-                        challenge.encode(),
-                        padding.PSS(
-                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                            salt_length=padding.PSS.MAX_LENGTH
-                        ),
-                        hashes.SHA256()
+                    peer_public_key = serialization.load_pem_public_key(
+                        peer_public_key.encode(),
+                        backend=default_backend()
                     )
-                    self.logger.info(f"[CHALLENGE] ✓ Signature verified for {peer_normalized}")
-
-                except InvalidSignature:
-                    self.logger.error(f"[CHALLENGE] ✗ Invalid signature from {peer_normalized}")
-                    await self.remove_peer(peer_normalized)
+                    self.logger.debug("[CHALLENGE] Converted PEM string to RSAPublicKey")
+                except Exception as key_error:
+                    self.logger.error(f"[CHALLENGE] Failed to load public key: {str(key_error)}")
                     return False
 
-                # Cleanup challenge data
-                self.pending_challenges[peer_normalized].pop(challenge_id)
-                if not self.pending_challenges[peer_normalized]:
-                    del self.pending_challenges[peer_normalized]
+            # Verify signature with detailed logging
+            try:
+                self.logger.debug("[CHALLENGE] Attempting signature verification")
+                self.logger.debug(f"[CHALLENGE] Challenge length: {len(challenge)}")
+                self.logger.debug(f"[CHALLENGE] Signature length: {len(signature)}")
+                self.logger.debug(f"[CHALLENGE] Challenge data: {challenge[:32]}...")
+
+                peer_public_key.verify(
+                    signature,
+                    challenge.encode(),
+                    padding.PSS(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH
+                    ),
+                    hashes.SHA256()
+                )
+                
+                self.logger.info(f"[CHALLENGE] ✓ Signature verified")
+
+                # Update state for all related peer addresses
+                async with self.peer_lock:
+                    for possible_peer in possible_peers:
+                        self.peer_states[possible_peer] = "verified"
+                        if possible_peer not in self.connected_peers:
+                            self.connected_peers.add(possible_peer)
+                        self.logger.debug(f"[CHALLENGE] Updated state for {possible_peer}")
+
+                # Clean up challenge data
+                if challenge_peer in self.pending_challenges:
+                    self.pending_challenges[challenge_peer].pop(challenge_id)
+                    if not self.pending_challenges[challenge_peer]:
+                        del self.pending_challenges[challenge_peer]
                 self.logger.debug("[CHALLENGE] Challenge data cleaned up")
 
-                # Update peer state
-                async with self.peer_lock:
-                    self.peer_states[peer_normalized] = "verified"
-                    if peer_normalized not in self.connected_peers:
-                        self.connected_peers.add(peer_normalized)
-                    self.logger.info(f"[CHALLENGE] ✓ Peer {peer_normalized} verified")
-
                 # Complete the connection
-                await self.complete_connection(peer_normalized)
+                await self.complete_connection(normalized_peer)
                 
                 self.logger.info(f"[CHALLENGE] {'='*50}\n")
                 return True
 
+            except InvalidSignature as sig_error:
+                self.logger.error(f"[CHALLENGE] ✗ Invalid signature: {str(sig_error)}")
+                return False
+                
             except Exception as verify_error:
                 self.logger.error(f"[CHALLENGE] Verification error: {str(verify_error)}")
-                await self.remove_peer(peer_normalized)
+                self.logger.error(traceback.format_exc())
                 return False
 
         except Exception as e:
             self.logger.error(f"[CHALLENGE] Fatal error handling response: {str(e)}")
             self.logger.error(traceback.format_exc())
-            await self.remove_peer(peer_normalized)
             return False
     def cleanup_challenges(self):
         """Safely cleanup old challenges"""
